@@ -71,6 +71,21 @@ Web 悬浮助手 → Durable Run / 可续接事件 ──┐
 - 确认、拒绝和密钥补填共享 Action 行锁；预检期间密钥变化时保持 pending，必须再次确认。
 - 会触发文件、Worker 或系统进程的操作在 Action 提交后执行，失败记录为 `runtime_sync_status=failed`；只有幂等副作用允许“重新同步”，测试发送、立即执行、系统更新/重启和插件批量更新等外部副作用必须重新发起并确认。
 
+### Provider 协议档案与客户端运行时
+
+Provider 的 `api_format` 只选择 Chat Completions、Responses 或 Anthropic Messages
+协议族；`protocol_profile` 进一步声明实际方言。当前档案包括 `standard`、
+`openai_responses`、`deepseek_responses`、`codex_responses` 与
+`claude_code_proxy`。协议档案控制请求字段、reasoning 传输、能力硬限制和模型列表
+候选端点，`client_identity_profile` 只控制可复核的 UA 与安全身份头，两者互不替代。
+
+`auto` 身份由本次实际协议档案解析：标准 Responses 与 DeepSeek 使用 OpenAI SDK，
+Codex Responses 使用 Codex TUI，Anthropic Messages 使用 Claude Code。System Agent
+把本地 session/run/turn 仅作为运行时输入，发送给不同 Provider 前会按
+Provider/档案分别伪名化；同一会话保持稳定，每次 HTTP attempt 的 request ID
+保持唯一。原始 TelePilot session/account/Telegram ID、OAuth、设备证明、billing
+header、Agent Identity 与客户端签名不会发送给上游；测活和协议探测使用临时上下文。
+
 ### 上下文与记忆
 
 System Agent 使用四层上下文，避免每轮回放全部原始消息：
@@ -190,6 +205,8 @@ Web 首先通过 `POST /api/system-agent/sessions/{session_id}/runs` 创建持�
 旧的 `messages/stream` 与 `retry/stream` 接口继续兼容，但内部同样创建持久 Run。Web 会实时展示理解到的领域技能、当前 Provider/模型、重试进度和“正在调用某工具”，不再只显示笼统的“思考中”。
 
 `assistant_message` 始终是最终权威全文，用于持久化和重连对账。OpenAI Chat Completions、OpenAI Responses 与 Anthropic Messages 均直接消费上游 SSE；工具参数允许跨多个 SSE 事件拼接。若兼容上游忽略 `stream=true` 并返回普通 JSON，只发送最终 `assistant_message`，同时在 usage 和 UI 标记“完整响应”，绝不伪造 delta。已经向客户端发送任何文本后若上游中断，本轮立即失败，不自动换模型或 Provider，避免把两次回答拼接成一条。
+
+Responses 流同时接受 `response.completed` 与 `response.incomplete` 协议终态，后者会按 `incomplete_details.reason` 映射为输出上限或错误；`response.failed` 始终失败。若终态 `response.output` 为空，运行时会从此前的 `response.output_item.done` 重建 reasoning 与 function call。DeepSeek 官方 `deepseek-v4-flash` 使用 `https://api.deepseek.com` 根地址和 Responses 协议时，工具续轮会把明文 reasoning input item 与 function call output 一起回传；不依赖 `previous_response_id`、`conversation` 或服务端状态。
 
 预算门禁在结构化调用与流式调用中使用同一 scope 语义：高价 Provider 的 `premium_daily` 到限时允许在尚未输出文本前继续尝试更便宜 Provider；账号级请求数、每日 token 或预算后端不可用属于整条请求的终止条件。上游没有返回 usage 时按请求预估值保守结算；已输出部分文本、取消或异常终止同样不会按“未调用”释放费用。
 

@@ -64,6 +64,17 @@ def test_provider_endpoint_adds_protocol_default_version() -> None:
     ) == "https://api.example/v1/chat/completions"
 
 
+def test_provider_endpoint_keeps_deepseek_official_root_without_v1() -> None:
+    assert provider_endpoint(
+        "https://api.deepseek.com",
+        ApiFormat.RESPONSES,
+    ) == "https://api.deepseek.com/responses"
+    assert provider_endpoint(
+        "https://api.deepseek.com",
+        ApiFormat.CHAT_COMPLETIONS,
+    ) == "https://api.deepseek.com/chat/completions"
+
+
 def test_provider_endpoint_does_not_invent_version_inside_custom_path() -> None:
     assert provider_endpoint(
         "https://gateway.example/openai",

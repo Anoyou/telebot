@@ -19,6 +19,7 @@ import re
 import time as _time
 from types import SimpleNamespace
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 from fastapi import APIRouter, HTTPException, Response
@@ -68,7 +69,12 @@ from ..services.llm_identity import (
     default_identity_for_format,
     resolve_identity,
 )
-from ..services.llm_protocol import normalize_base_url, provider_endpoint, provider_models_endpoint
+from ..services.llm_profiles import infer_protocol_profile, resolve_protocol_profile
+from ..services.llm_protocol import (
+    normalize_base_url,
+    provider_endpoint,
+    provider_models_endpoints,
+)
 from ..services.llm_request_headers import (
     REQUEST_SCOPE_LIVENESS,
     REQUEST_SCOPE_MODELS,
@@ -78,6 +84,13 @@ from ..services.llm_request_headers import (
 )
 
 router = APIRouter(tags=["commands"])
+
+
+def _is_deepseek_v4_responses_target(base_url: str, model: str) -> bool:
+    """DeepSeek 官方 Responses API 当前仅开放给 deepseek-v4-flash。"""
+
+    host = (urlsplit(base_url).hostname or "").lower()
+    return host == "api.deepseek.com" and model.strip().lower() == "deepseek-v4-flash"
 
 
 async def _require_ai_enabled(db: DBSession) -> None:
@@ -135,6 +148,12 @@ async def _emit_llm_diagnostic_usage(
     client_identity_profile = resolve_identity(
         identity_override or getattr(provider_row, "client_identity_profile", None),
         effective_api_format,
+        recommended_profile=resolve_protocol_profile(
+            effective_api_format,
+            getattr(provider_row, "protocol_profile", None),
+            base_url=getattr(provider_row, "base_url", None),
+            model=model or getattr(provider_row, "default_model", None),
+        ).recommended_identity,
     ).profile
     await llm_runtime._emit_usage(
         UsageRecord(
@@ -616,10 +635,14 @@ async def fetch_models_preview(
 
     try:
         async with httpx.AsyncClient(**client_kwargs) as cli:
-            resp = await cli.get(
-                provider_models_endpoint(base_url, payload.api_format),
-                headers=headers,
-            )
+            for endpoint in provider_models_endpoints(
+                base_url,
+                payload.api_format,
+                protocol_profile=payload.protocol_profile,
+            ):
+                resp = await cli.get(endpoint, headers=headers)
+                if resp.status_code not in {404, 405}:
+                    break
     except httpx.HTTPError as exc:
         raise _llm_err(
             "FETCH_NETWORK",
@@ -866,10 +889,13 @@ async def detect_provider_protocols(
         )
         started = _time.monotonic()
         try:
-            resp = await cli.get(
-                provider_models_endpoint(base_url, "chat_completions"),
-                headers=headers,
-            )
+            for endpoint in provider_models_endpoints(
+                base_url,
+                "chat_completions",
+            ):
+                resp = await cli.get(endpoint, headers=headers)
+                if resp.status_code not in {404, 405}:
+                    break
             latency_ms = int((_time.monotonic() - started) * 1000)
             result = _probe_result(resp, latency_ms, api_key=api_key, base_url=base_url, stage="credentials")
             await _record_protocol_probe(result, started, "models")
@@ -964,13 +990,28 @@ async def detect_provider_protocols(
             note = "Anthropic provider 需要 /messages 可用。"
     else:
         if chat.ok:
-            recommended_api_format = "chat_completions"
-            recommended_web_search_api_format = "auto" if responses.ok else "chat_completions"
+            # DeepSeek 官方文档当前仅为 deepseek-v4-flash 开放 Responses；
+            # 该模型即使同时保留 Chat 兼容入口，也应优先落到原生协议。
+            if responses.ok and _is_deepseek_v4_responses_target(base_url, model):
+                recommended_api_format = "responses"
+                recommended_web_search_api_format = "responses"
+            else:
+                recommended_api_format = "chat_completions"
+                recommended_web_search_api_format = "auto" if responses.ok else "chat_completions"
         elif responses.ok:
             recommended_api_format = "responses"
             recommended_web_search_api_format = "responses"
         response_compat_note = responses.error if responses.ok and responses.error else ""
-        if chat.ok and responses.ok:
+        if (
+            chat.ok
+            and responses.ok
+            and _is_deepseek_v4_responses_target(base_url, model)
+        ):
+            note = (
+                "检测到 DeepSeek 官方 deepseek-v4-flash；已优先选择原生 Responses API。"
+                "该协议当前不支持 conversation、previous_response_id、图片输入等 OpenAI 扩展参数。"
+            )
+        elif chat.ok and responses.ok:
             note = (
                 "该 API 同时支持 chat/completions 与 responses；建议日常 chat，联网搜索自动切 responses。"
                 if not response_compat_note
@@ -989,6 +1030,7 @@ async def detect_provider_protocols(
 
     # 阶段 B：推荐身份 = 推荐协议下探测成功所用的身份；无则按协议 auto 默认。
     recommended_client_identity_profile: str | None = None
+    recommended_protocol_profile: str | None = None
     if recommended_api_format:
         result_by_format = {
             "chat_completions": chat,
@@ -1002,6 +1044,17 @@ async def detect_provider_protocols(
             recommended_client_identity_profile = default_identity_for_format(
                 recommended_api_format
             )
+        recommended_protocol_profile = infer_protocol_profile(
+            recommended_api_format,
+            base_url=base_url,
+            model=model,
+        )
+        if (
+            recommended_api_format == "responses"
+            and recommended_client_identity_profile in {"codex_tui", "codex_desktop"}
+            and recommended_protocol_profile == "standard"
+        ):
+            recommended_protocol_profile = "codex_responses"
 
     await audit.write(
         db,
@@ -1015,6 +1068,7 @@ async def detect_provider_protocols(
             "anthropic": anthropic.ok,
             "models": models.ok,
             "recommended_identity": recommended_client_identity_profile,
+            "recommended_protocol_profile": recommended_protocol_profile,
         },
     )
     await db.commit()
@@ -1025,6 +1079,7 @@ async def detect_provider_protocols(
         anthropic_messages=anthropic,
         models=models,
         recommended_api_format=recommended_api_format,
+        recommended_protocol_profile=recommended_protocol_profile,
         recommended_client_identity_profile=recommended_client_identity_profile,
         identity_attempts=identity_attempts,
         recommended_web_search_api_format=recommended_web_search_api_format,
@@ -1234,10 +1289,14 @@ async def fetch_models(
 
     try:
         async with httpx.AsyncClient(**client_kwargs) as cli:
-            resp = await cli.get(
-                provider_models_endpoint(base_url, fmt),
-                headers=headers,
-            )
+            for endpoint in provider_models_endpoints(
+                base_url,
+                fmt,
+                protocol_profile=getattr(row, "protocol_profile", None),
+            ):
+                resp = await cli.get(endpoint, headers=headers)
+                if resp.status_code not in {404, 405}:
+                    break
     except httpx.HTTPError as exc:
         raise _llm_err(
             "FETCH_NETWORK",
@@ -1284,12 +1343,15 @@ async def fetch_models(
         if mid in existing:
             # 老条目：保留 enabled / label，custom 改成 false（毕竟现在 fetch 拿到了）
             old = existing[mid]
-            merged.append({
-                "id": mid,
-                "enabled": bool(old.get("enabled", False)),
-                "custom": False,
-                "label": old.get("label"),
-            })
+            merged.append(
+                {
+                    **old,
+                    "id": mid,
+                    "enabled": bool(old.get("enabled", False)),
+                    "custom": False,
+                    "label": old.get("label"),
+                }
+            )
         else:
             merged.append({"id": mid, "enabled": False, "custom": False, "label": None})
 
@@ -1297,12 +1359,15 @@ async def fetch_models(
     fetched_ids = set(new_ids)
     for mid, old in existing.items():
         if mid not in fetched_ids and old.get("custom"):
-            merged.append({
-                "id": mid,
-                "enabled": bool(old.get("enabled", False)),
-                "custom": True,
-                "label": old.get("label"),
-            })
+            merged.append(
+                {
+                    **old,
+                    "id": mid,
+                    "enabled": bool(old.get("enabled", False)),
+                    "custom": True,
+                    "label": old.get("label"),
+                }
+            )
 
     row.models = merged
     await audit.write(
@@ -1952,10 +2017,23 @@ def _liveness_transport_metadata(
     identity_override: str | None = None,
 ) -> dict[str, str | None]:
     """返回本次测活真正采用的协议与客户端身份。"""
-    effective_api_format = api_format_override or getattr(row, "api_format", None)
+    from ..db.models.command import default_api_format_for
+
+    effective_api_format = (
+        api_format_override
+        or getattr(row, "api_format", None)
+        or default_api_format_for(getattr(row, "provider", "openai"))
+    )
+    protocol_profile = resolve_protocol_profile(
+        effective_api_format,
+        getattr(row, "protocol_profile", None),
+        base_url=getattr(row, "base_url", None),
+        model=getattr(row, "default_model", None),
+    )
     effective_identity = llm_identity.resolve_identity(
         identity_override or getattr(row, "client_identity_profile", None),
         effective_api_format,
+        recommended_profile=protocol_profile.recommended_identity,
     ).profile
     return {
         "effective_api_format": effective_api_format,

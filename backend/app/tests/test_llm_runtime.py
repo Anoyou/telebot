@@ -1648,13 +1648,16 @@ def test_usage_identity_resolves_auto_from_effective_protocol() -> None:
             provider,
             effective_api_format="responses",
         )
-        == "codex_tui"
+        == "openai_sdk"
     )
+    provider.api_format = "responses"
+    provider.protocol_profile = "codex_responses"
+    assert _rt.resolve_usage_client_identity_profile(provider) == "codex_tui"
 
 
 @pytest.mark.asyncio
 async def test_web_search_usage_records_identity_for_overridden_protocol(monkeypatch) -> None:
-    """联网调用切到 Responses 时，usage 应记录 Codex CLI 而非原 Chat 身份。"""
+    """联网调用切到标准 Responses 时，usage 应记录 OpenAI SDK 身份。"""
     from app.services import llm_invoke
     from app.services import llm_runtime as _rt
     from app.services.llm_client import LLMResult
@@ -1690,7 +1693,7 @@ async def test_web_search_usage_records_identity_for_overridden_protocol(monkeyp
     )
 
     assert len(captured) == 1
-    assert captured[0].client_identity_profile == "codex_tui"
+    assert captured[0].client_identity_profile == "openai_sdk"
 
 
 __all__ = []

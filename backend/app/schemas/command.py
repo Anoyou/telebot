@@ -32,6 +32,13 @@ from ..db.models.command import (
 # ── 命令名校验正则：与 worker/command.py 中的 \w+ 派发兼容 ─────
 _COMMAND_NAME_RE = re.compile(r"^[a-zA-Z0-9_]{1,64}$")
 _COMMAND_ALIAS_RE = re.compile(r"^[a-zA-Z0-9_]{1,16}$")
+LLMProtocolProfile = Literal[
+    "standard",
+    "openai_responses",
+    "deepseek_responses",
+    "codex_responses",
+    "claude_code_proxy",
+]
 
 
 # ════════════════════════════════════════════════════════════
@@ -318,6 +325,22 @@ class ProviderModel(BaseModel):
     supports_tools: bool | None = None
     supports_images: bool | None = None
     supports_temperature: bool | None = None
+    supports_parallel_tool_calls: bool | None = None
+    supports_web_search: bool | None = None
+    context_window: int | None = Field(default=None, ge=1)
+    max_output_tokens: int | None = Field(default=None, ge=1)
+    input_modalities: list[Literal["text", "image", "audio", "video"]] | None = None
+    output_modalities: list[Literal["text", "image", "audio"]] | None = None
+    supported_api_formats: list[
+        Literal["chat_completions", "responses", "anthropic_messages"]
+    ] | None = None
+    reasoning_transport: Literal[
+        "none",
+        "reasoning_content",
+        "responses_item",
+        "encrypted_reasoning_item",
+        "anthropic_thinking",
+    ] | None = None
     reasoning_efforts: list[
         Literal["minimal", "low", "medium", "high", "xhigh", "max"]
     ] | None = None
@@ -363,10 +386,8 @@ class LLMProviderCreate(BaseModel):
     )
     """API 协议；和 provider 厂商解耦——同一个反代 base_url 可能只支持其中某种。"""
 
-    protocol_profile: Literal["standard", "claude_code_proxy"] = (
-        LLM_PROTOCOL_PROFILE_STANDARD
-    )
-    """Anthropic Messages 请求兼容档案；其他 API 协议会在服务层规范化为 standard。"""
+    protocol_profile: LLMProtocolProfile = LLM_PROTOCOL_PROFILE_STANDARD
+    """Provider 协议档案；不兼容当前 API 格式的值会在服务层规范化为 standard。"""
 
     web_search_api_format: Literal["auto", "chat_completions", "responses", "anthropic_messages"] = (
         LLM_WEB_SEARCH_API_FORMAT_AUTO
@@ -457,7 +478,7 @@ class LLMProviderUpdate(BaseModel):
     base_url: str | None = Field(default=None, max_length=255)
     default_model: str | None = Field(default=None, min_length=1, max_length=64)
     api_format: Literal["chat_completions", "responses", "anthropic_messages"] | None = None
-    protocol_profile: Literal["standard", "claude_code_proxy"] | None = None
+    protocol_profile: LLMProtocolProfile | None = None
     client_identity_profile: (
         Literal[
             "auto",
@@ -558,6 +579,7 @@ class FetchModelsPreviewRequest(BaseModel):
     api_format: Literal["chat_completions", "responses", "anthropic_messages"] = (
         LLM_API_FORMAT_CHAT_COMPLETIONS
     )
+    protocol_profile: LLMProtocolProfile = LLM_PROTOCOL_PROFILE_STANDARD
     base_url: str | None = Field(default=None, max_length=255)
     api_key: str | None = Field(default=None, max_length=512)
     proxy_id: int | None = Field(default=None, ge=1)
@@ -586,9 +608,7 @@ class QuickVerifyProviderRequest(BaseModel):
     api_format: Literal[
         "chat_completions", "responses", "anthropic_messages"
     ] = LLM_API_FORMAT_CHAT_COMPLETIONS
-    protocol_profile: Literal["standard", "claude_code_proxy"] = (
-        LLM_PROTOCOL_PROFILE_STANDARD
-    )
+    protocol_profile: LLMProtocolProfile = LLM_PROTOCOL_PROFILE_STANDARD
     client_identity_profile: Literal[
         "auto",
         "minimal",
@@ -688,6 +708,7 @@ class DetectProviderProtocolsResponse(BaseModel):
     anthropic_messages: ProtocolProbeResult
     models: ProtocolProbeResult
     recommended_api_format: str | None = None
+    recommended_protocol_profile: str | None = None
     # 阶段 B：推荐客户端身份 + 每协议身份尝试列表。
     recommended_client_identity_profile: str | None = None
     identity_attempts: list[ProtocolIdentityAttempt] = Field(default_factory=list)

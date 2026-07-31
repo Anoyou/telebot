@@ -1387,7 +1387,12 @@ export type LLMProviderKind = "openai" | "anthropic" | "ollama";
 export type LLMApiFormat = "chat_completions" | "responses" | "anthropic_messages";
 export type LLMReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 export type LLMWebSearchApiFormat = "auto" | LLMApiFormat;
-export type LLMProtocolProfile = "standard" | "claude_code_proxy";
+export type LLMProtocolProfile =
+  | "standard"
+  | "openai_responses"
+  | "deepseek_responses"
+  | "codex_responses"
+  | "claude_code_proxy";
 /**
  * 客户端身份档案（0.57.0 阶段 A）：控制 UA 与身份相关的安全请求头，
  * 与 protocol_profile（协议语义 / beta 头）相互独立。auto 按本次实际协议解析。
@@ -1432,6 +1437,20 @@ export interface ProviderModel {
   supports_tools?: boolean | null;
   supports_images?: boolean | null;
   supports_temperature?: boolean | null;
+  supports_parallel_tool_calls?: boolean | null;
+  supports_web_search?: boolean | null;
+  context_window?: number | null;
+  max_output_tokens?: number | null;
+  input_modalities?: Array<"text" | "image" | "audio" | "video"> | null;
+  output_modalities?: Array<"text" | "image" | "audio"> | null;
+  supported_api_formats?: LLMApiFormat[] | null;
+  reasoning_transport?:
+    | "none"
+    | "reasoning_content"
+    | "responses_item"
+    | "encrypted_reasoning_item"
+    | "anthropic_thinking"
+    | null;
   reasoning_efforts?: LLMReasoningEffort[] | null;
 }
 
@@ -1575,6 +1594,7 @@ export interface FetchModelsResponse {
 export interface FetchModelsPreviewRequest {
   provider: LLMProviderKind;
   api_format?: LLMApiFormat;
+  protocol_profile?: LLMProtocolProfile;
   base_url?: string | null;
   /** 可空——若 pid 给了且 api_key 留空，后端会回落到 DB 里已存的 */
   api_key?: string | null;
@@ -1692,6 +1712,7 @@ export interface DetectProviderProtocolsResponse {
   anthropic_messages: ProtocolProbeResult;
   models: ProtocolProbeResult;
   recommended_api_format?: LLMApiFormat | string | null;
+  recommended_protocol_profile?: LLMProtocolProfile | string | null;
   /** 阶段 B：推荐客户端身份 */
   recommended_client_identity_profile?: LLMClientIdentityProfile | string | null;
   /** 阶段 B：每协议身份尝试列表 */

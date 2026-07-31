@@ -4394,6 +4394,17 @@
             ],
             "title": "Recommended Client Identity Profile"
           },
+          "recommended_protocol_profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recommended Protocol Profile"
+          },
           "recommended_web_search_api_format": {
             "default": "auto",
             "title": "Recommended Web Search Api Format",
@@ -5943,6 +5954,18 @@
             ],
             "title": "Pid"
           },
+          "protocol_profile": {
+            "default": "standard",
+            "enum": [
+              "standard",
+              "openai_responses",
+              "deepseek_responses",
+              "codex_responses",
+              "claude_code_proxy"
+            ],
+            "title": "Protocol Profile",
+            "type": "string"
+          },
           "provider": {
             "enum": [
               "openai",
@@ -6911,6 +6934,9 @@
             "default": "standard",
             "enum": [
               "standard",
+              "openai_responses",
+              "deepseek_responses",
+              "codex_responses",
               "claude_code_proxy"
             ],
             "title": "Protocol Profile",
@@ -7253,6 +7279,9 @@
               {
                 "enum": [
                   "standard",
+                  "openai_responses",
+                  "deepseek_responses",
+                  "codex_responses",
                   "claude_code_proxy"
                 ],
                 "type": "string"
@@ -11359,6 +11388,18 @@
       "ProviderModel": {
         "description": "LLMProvider 下挂的一个候选模型。\n\n- ``id``       模型 ID（如 ``gpt-5.5`` / ``claude-haiku-4-5``）\n- ``enabled``  下游\"自定义命令 ai 子表单\"展开式 select 里是否会出现这条\n- ``custom``   true = 用户手动添加；false = 从 fetch /v1/models 拉的\n- ``label``    可选展示名（默认就用 id）",
         "properties": {
+          "context_window": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Window"
+          },
           "custom": {
             "default": false,
             "title": "Custom",
@@ -11375,6 +11416,26 @@
             "title": "Id",
             "type": "string"
           },
+          "input_modalities": {
+            "anyOf": [
+              {
+                "items": {
+                  "enum": [
+                    "text",
+                    "image",
+                    "audio",
+                    "video"
+                  ],
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Input Modalities"
+          },
           "label": {
             "anyOf": [
               {
@@ -11386,6 +11447,37 @@
               }
             ],
             "title": "Label"
+          },
+          "max_output_tokens": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Output Tokens"
+          },
+          "output_modalities": {
+            "anyOf": [
+              {
+                "items": {
+                  "enum": [
+                    "text",
+                    "image",
+                    "audio"
+                  ],
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output Modalities"
           },
           "reasoning_efforts": {
             "anyOf": [
@@ -11409,6 +11501,43 @@
             ],
             "title": "Reasoning Efforts"
           },
+          "reasoning_transport": {
+            "anyOf": [
+              {
+                "enum": [
+                  "none",
+                  "reasoning_content",
+                  "responses_item",
+                  "encrypted_reasoning_item",
+                  "anthropic_thinking"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reasoning Transport"
+          },
+          "supported_api_formats": {
+            "anyOf": [
+              {
+                "items": {
+                  "enum": [
+                    "chat_completions",
+                    "responses",
+                    "anthropic_messages"
+                  ],
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supported Api Formats"
+          },
           "supports_images": {
             "anyOf": [
               {
@@ -11419,6 +11548,17 @@
               }
             ],
             "title": "Supports Images"
+          },
+          "supports_parallel_tool_calls": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supports Parallel Tool Calls"
           },
           "supports_temperature": {
             "anyOf": [
@@ -11441,6 +11581,17 @@
               }
             ],
             "title": "Supports Tools"
+          },
+          "supports_web_search": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supports Web Search"
           }
         },
         "required": [
@@ -12149,6 +12300,9 @@
             "default": "standard",
             "enum": [
               "standard",
+              "openai_responses",
+              "deepseek_responses",
+              "codex_responses",
               "claude_code_proxy"
             ],
             "title": "Protocol Profile",
@@ -16747,7 +16901,7 @@
   },
   "info": {
     "title": "TelePilot",
-    "version": "0.88.0-beta.11"
+    "version": "0.89.0-beta.1"
   },
   "openapi": "3.1.0",
   "paths": {

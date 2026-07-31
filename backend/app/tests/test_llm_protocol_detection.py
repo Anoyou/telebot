@@ -242,6 +242,69 @@ async def test_detect_stops_after_standard_identity_success(monkeypatch) -> None
 
 
 @pytest.mark.asyncio
+async def test_detect_prefers_official_deepseek_v4_responses(monkeypatch) -> None:
+    from app.api import commands
+    from app.schemas.command import DetectProviderProtocolsRequest
+
+    requested_paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested_paths.append(request.url.path)
+        if request.url.path == "/models":
+            return httpx.Response(200, json={"data": [{"id": "deepseek-v4-flash"}]})
+        if request.url.path == "/chat/completions":
+            return httpx.Response(200, json={"choices": [{"message": {"content": "chat"}}]})
+        if request.url.path == "/responses":
+            return httpx.Response(
+                200,
+                json={
+                    "object": "response",
+                    "status": "completed",
+                    "output_text": "responses",
+                },
+            )
+        return httpx.Response(404, text="Not Found")
+
+    def _fake_client(**kwargs):
+        return _REAL_ASYNC_CLIENT(transport=httpx.MockTransport(handler))
+
+    monkeypatch.setattr(commands.httpx, "AsyncClient", _fake_client)
+
+    async def _noop(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(commands, "_require_ai_enabled", _noop)
+    monkeypatch.setattr(commands.audit, "write", _noop)
+    monkeypatch.setattr(commands, "_emit_llm_diagnostic_usage", _noop)
+
+    class _DB:
+        async def commit(self):
+            return None
+
+    class _User:
+        id = 1
+
+    result = await commands.detect_provider_protocols(
+        DetectProviderProtocolsRequest(
+            provider="openai",
+            base_url="https://api.deepseek.com",
+            api_key="sk-test",
+            model="deepseek-v4-flash",
+        ),
+        _DB(),
+        _User(),
+    )
+
+    assert result.chat_completions.ok is True
+    assert result.responses.ok is True
+    assert result.recommended_api_format == "responses"
+    assert result.recommended_web_search_api_format == "responses"
+    assert result.note is not None and "DeepSeek 官方 deepseek-v4-flash" in result.note
+    assert "/responses" in requested_paths
+    assert "/v1/responses" not in requested_paths
+
+
+@pytest.mark.asyncio
 async def test_detect_retries_identity_only_on_client_rejection(monkeypatch) -> None:
     """Responses 上游用 openai/minimal 均 client_rejected 时，会按顺序尝试 codex_tui。"""
     from app.api import commands

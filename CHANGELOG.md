@@ -25,6 +25,30 @@
 
 ## [Unreleased]
 
+## [0.89.0-beta.1] - 2026-08-01 · minor（次版本预发布） · Provider 协议档案与客户端会话运行时
+
+### 新增
+
+- 为 AI Provider 增加可执行协议档案：标准协议、OpenAI Responses、DeepSeek Responses、Codex Responses 与 Claude Code 反代不再共用隐含兼容逻辑；前端可显式选择，协议检测会推荐匹配档案。
+- 扩展模型能力事实层，支持上下文窗口、最大输出、输入/输出模态、并行工具、联网搜索、支持协议与 reasoning 传输方式；协议硬限制优先于用户模型元数据。
+- 为 System Agent 增加客户端会话运行时：上游会话 ID 按 Provider/档案隔离并伪名化，每次 HTTP 请求使用唯一 request ID，不发送原始 TelePilot 会话、账号或 Telegram 标识。
+
+### 优化
+
+- 拆分 Chat Completions、Responses、Anthropic 与 SSE Codec；SSE 按完整事件块和字节流解析，支持多行 data、UTF-8 跨分片、无尾分隔符与传输大小限制。
+- 模型发现支持有序候选端点；仅在 404/405 时继续尝试，401/403、429 与服务端错误保留真实失败，避免把鉴权或限流问题误判为路径不兼容。
+- 标准 Responses 与 DeepSeek 默认使用 OpenAI SDK 身份，只有明确选择 Codex Responses 档案时才使用 Codex 身份；动态请求 ID 与稳定会话 ID 已分离，并停止模拟 Grok Agent Identity。
+
+### 修复
+
+- 适配 DeepSeek 官方 Responses API：`https://api.deepseek.com` 不再被错误补成 `/v1`，`deepseek-v4-flash` 的协议探测会优先推荐原生 Responses。
+- 支持 Responses 流以 `response.incomplete` 正常收尾，并从 `response.output_item.done` 修复终态缺失的 reasoning / function call；DeepSeek 工具续轮会回传明文 reasoning input，避免达到输出上限或继续调用工具时被误判失败、丢失上下文。
+- 在 AI Provider 配置页补充 DeepSeek V4 Flash 的 Responses、Base URL 与当前能力限制说明。
+
+### 测试
+
+- 新增协议档案、能力硬约束、会话伪名化与 Provider 隔离、模型端点候选、Responses cache usage、并行 function call、失败终态、迟到事件及 SSE 分片边界回归。
+
 ## [0.88.0-beta.11] - 2026-07-31 · patch（补丁版本预发布） · 在线更新补丁镜像判空修复
 
 ### 修复

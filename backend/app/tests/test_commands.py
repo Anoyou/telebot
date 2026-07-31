@@ -111,7 +111,7 @@ def test_liveness_transport_metadata_resolves_effective_identity() -> None:
 
     assert commands_api._liveness_transport_metadata(row) == {
         "effective_api_format": "responses",
-        "client_identity_profile": "codex_tui",
+        "client_identity_profile": "openai_sdk",
     }
     assert commands_api._liveness_transport_metadata(
         row,

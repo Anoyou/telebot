@@ -18,7 +18,6 @@ from __future__ import annotations
 import base64
 import json
 import re
-import uuid
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Iterable, Mapping
 from contextvars import ContextVar
@@ -39,11 +38,17 @@ from ..db.models.command import (
     LLMProvider,
     default_api_format_for,
 )
+from .llm_call_context import ClientRuntimeContext
+from .llm_codecs.anthropic import usage_from_anthropic
+from .llm_codecs.chat_completions import usage_from_chat
+from .llm_codecs.responses import plan_responses_body, usage_from_responses
+from .llm_codecs.sse import iter_sse_events, parse_sse_text
 from .llm_dto import LLMProviderDTO
 from .llm_identity import (
     ClientIdentity,
     resolve_identity,
 )
+from .llm_profiles import ProviderProtocolProfile, resolve_protocol_profile
 from .llm_protocol import (
     ImageContent,
     MessageRole,
@@ -297,38 +302,19 @@ async def _iter_limited_sse_lines(
     line_limit_bytes: int = _STREAM_SSE_LINE_LIMIT_BYTES,
     total_limit_bytes: int = _STREAM_SSE_TOTAL_LIMIT_BYTES,
 ) -> AsyncIterator[str]:
-    """按原始字节有界解析 SSE 行，拒绝超长单行和无限滴流响应。"""
+    """按完整 SSE block 解析，再投影成兼容旧调用方的 event/data/空行。"""
 
-    pending = bytearray()
-    total = 0
-    async for chunk in response.aiter_bytes():
-        if not isinstance(chunk, (bytes, bytearray)):
-            raise LLMError("上游 streaming 返回了无效的字节流")
-        total += len(chunk)
-        if total > total_limit_bytes:
-            raise LLMError("上游 streaming 响应超过 8 MiB 限制")
-        pending.extend(chunk)
-        while True:
-            newline = pending.find(b"\n")
-            if newline < 0:
-                if len(pending) > line_limit_bytes:
-                    raise LLMError("上游 streaming 单个 SSE 事件超过 1 MiB 限制")
-                break
-            raw = bytes(pending[:newline])
-            del pending[: newline + 1]
-            if len(raw) > line_limit_bytes:
-                raise LLMError("上游 streaming 单个 SSE 事件超过 1 MiB 限制")
-            try:
-                yield raw.rstrip(b"\r").decode("utf-8")
-            except UnicodeDecodeError:
-                raise LLMError("上游 streaming 返回了无效的 UTF-8 SSE 数据") from None
-    if pending:
-        if len(pending) > line_limit_bytes:
-            raise LLMError("上游 streaming 单个 SSE 事件超过 1 MiB 限制")
-        try:
-            yield bytes(pending).rstrip(b"\r").decode("utf-8")
-        except UnicodeDecodeError:
-            raise LLMError("上游 streaming 返回了无效的 UTF-8 SSE 数据") from None
+    try:
+        async for event in iter_sse_events(
+            response,
+            event_limit_bytes=line_limit_bytes,
+            total_limit_bytes=total_limit_bytes,
+        ):
+            yield f"event: {event.event}"
+            yield f"data: {event.data}"
+            yield ""
+    except ValueError as exc:
+        raise LLMError(f"上游 streaming SSE 结构异常: {exc}") from None
 
 
 def _model_response_from_result(result: LLMResult) -> ModelResponse:
@@ -510,8 +496,28 @@ def _responses_input(
                 for result in message.tool_results
             )
             continue
-        content: list[dict[str, Any]] = []
         text = message.text_content()
+        # Responses reasoning item 必须与同一轮后续的 assistant message 或
+        # function_call 成对出现。推理被截断且没有生成结果时不能回放，否则
+        # 下一次请求会被上游以 "without its required following item" 拒绝。
+        if (
+            message.role is MessageRole.ASSISTANT
+            and isinstance(message.reasoning_content, str)
+            and message.reasoning_content
+            and (bool(text) or bool(message.tool_calls))
+        ):
+            output.append(
+                {
+                    "type": "reasoning",
+                    "content": [
+                        {
+                            "type": "reasoning_text",
+                            "text": message.reasoning_content,
+                        }
+                    ],
+                }
+            )
+        content: list[dict[str, Any]] = []
         if text:
             content.append(
                 {
@@ -746,11 +752,7 @@ def _openai_structured_response(
         model=str(data.get("model") or request.model),
         content=(TextContent(visible),) if visible else (),
         tool_calls=tool_calls,
-        usage=ModelUsage(
-            input_tokens=int(usage.get("prompt_tokens") or 0),
-            output_tokens=int(usage.get("completion_tokens") or 0),
-            reasoning_tokens=int((usage.get("completion_tokens_details") or {}).get("reasoning_tokens") or 0),
-        ),
+        usage=usage_from_chat(usage),
         stop_reason=(
             StopReason.REFUSAL
             if isinstance(refusal, str) and refusal.strip()
@@ -864,12 +866,7 @@ def _anthropic_structured_response(
         model=str(data.get("model") or request.model),
         content=tuple(content),
         tool_calls=tuple(tool_calls),
-        usage=ModelUsage(
-            input_tokens=int(usage.get("input_tokens") or 0),
-            output_tokens=int(usage.get("output_tokens") or 0),
-            cache_read_tokens=int(usage.get("cache_read_input_tokens") or 0),
-            cache_write_tokens=int(usage.get("cache_creation_input_tokens") or 0),
-        ),
+        usage=usage_from_anthropic(usage),
         stop_reason=(StopReason.TOOL_CALLS if tool_calls else normalized_stop_reason),
         provider_status=str(stop_reason) if stop_reason else None,
         stream_fallback=stream_fallback,
@@ -1054,25 +1051,19 @@ def _responses_structured_response(
                 text_parts.append(content["text"])
     if not text_parts and isinstance(data.get("output_text"), str) and data["output_text"]:
         text_parts.append(str(data["output_text"]))
-    # 仅有 reasoning 无正文时兜底（中转站 / 推理模型常见）
-    if not text_parts and reasoning_parts:
+    # 仅有 reasoning、没有工具调用时才兜底为正文。工具轮必须保持
+    # reasoning 独立，供下一轮按 Responses input item 原样回传。
+    if not text_parts and reasoning_parts and not tool_calls:
         text_parts.extend(reasoning_parts)
     usage = data.get("usage") or {}
     if not isinstance(usage, dict):
         usage = {}
-    details = usage.get("output_tokens_details") or {}
-    if not isinstance(details, dict):
-        details = {}
     provider_reason = incomplete_reason or status
     return ModelResponse(
         model=str(data.get("model") or request.model),
         content=(TextContent("".join(text_parts)),) if text_parts else (),
         tool_calls=tuple(tool_calls),
-        usage=ModelUsage(
-            input_tokens=int(usage.get("input_tokens") or 0),
-            output_tokens=int(usage.get("output_tokens") or 0),
-            reasoning_tokens=int(details.get("reasoning_tokens") or 0),
-        ),
+        usage=usage_from_responses(usage),
         stop_reason=(
             StopReason.REFUSAL
             if has_refusal
@@ -1261,31 +1252,6 @@ def _parse_responses_sse(text: str) -> dict[str, Any]:
     ``text/event-stream``。这里优先使用 ``response.completed`` 里的完整响应；
     如果反代只给了文本增量，则退化为顶层 ``output_text``。
     """
-    events: list[tuple[str, str]] = []
-    event_name = "message"
-    data_lines: list[str] = []
-
-    def flush() -> None:
-        nonlocal event_name, data_lines
-        if data_lines:
-            events.append((event_name, "\n".join(data_lines)))
-        event_name = "message"
-        data_lines = []
-
-    for raw_line in text.splitlines():
-        line = raw_line.rstrip("\r")
-        if not line:
-            flush()
-            continue
-        if line.startswith(":"):
-            continue
-        if line.startswith("event:"):
-            event_name = line.removeprefix("event:").strip() or "message"
-            continue
-        if line.startswith("data:"):
-            data_lines.append(line.removeprefix("data:").strip())
-    flush()
-
     delta_parts: list[str] = []
     done_text = ""
     error_payload: Any = None
@@ -1304,7 +1270,9 @@ def _parse_responses_sse(text: str) -> dict[str, Any]:
         response["output_text"] = stream_text
         return response
 
-    for event_name, raw_data in events:
+    for event in parse_sse_text(text):
+        event_name = event.event
+        raw_data = event.data
         if not raw_data or raw_data == "[DONE]":
             continue
         try:
@@ -1322,9 +1290,12 @@ def _parse_responses_sse(text: str) -> dict[str, Any]:
         response = payload.get("response")
         if isinstance(response, dict):
             # Responses 的状态字段描述资源状态，不能替代协议定义的终态事件。
-            # 只有 response.completed 才表示整个 SSE 响应已完成。
-            if payload_type == "response.completed":
+            # response.completed / response.incomplete 都是官方定义的正常终态。
+            if payload_type in {"response.completed", "response.incomplete"}:
                 return with_stream_text(response)
+            if payload_type == "response.failed":
+                error_payload = payload.get("error") or response.get("error") or response
+                continue
 
         if payload_type == "response.output_text.delta" and isinstance(payload.get("delta"), str):
             delta_parts.append(payload["delta"])
@@ -1340,7 +1311,7 @@ def _parse_responses_sse(text: str) -> dict[str, Any]:
 
     if error_payload is not None:
         raise ValueError(f"error event: {str(error_payload)[:200]}")
-    raise ValueError("缺少 response.completed 终态")
+    raise ValueError("缺少 response.completed / response.incomplete 终态")
 
 
 def _decode_responses_payload(prefix: str, resp: Any, api_key: str | None) -> dict[str, Any]:
@@ -1424,6 +1395,20 @@ async def _post_responses_compatible(
         if not removed_key or removed_key in removed:
             return resp
         removed.add(removed_key)
+
+
+def _responses_capabilities_for_profile(
+    profile: ProviderProtocolProfile,
+):
+    overrides = {
+        name: False
+        for name in profile.hard_disabled_capabilities
+        if name in {"images", "tools", "parallel_tool_calls", "web_search", "temperature"}
+    }
+    return capabilities_for_api_format(LLM_API_FORMAT_RESPONSES).with_overrides(
+        reasoning_transport=profile.reasoning_transport,
+        **overrides,
+    )
 
 
 def _non_json_error(prefix: str, resp: Any, exc: json.JSONDecodeError, api_key: str | None) -> LLMError:
@@ -2369,6 +2354,7 @@ class AnthropicClient(LLMClient):
         protocol_profile: str = LLM_PROTOCOL_PROFILE_STANDARD,
         identity: ClientIdentity | None = None,
         compatibility_headers: Mapping[str, str] | None = None,
+        provider_scope: str | None = None,
     ):
         self._api_key = api_key
         self._base_url = normalize_base_url(base_url or "https://api.anthropic.com/v1")
@@ -2376,14 +2362,10 @@ class AnthropicClient(LLMClient):
         self._proxy_url = proxy_url
         self._protocol_profile = protocol_profile
         self._identity = identity
+        self._provider_scope = provider_scope or f"{self._base_url}|{protocol_profile}"
         self._compatibility_headers = dict(compatibility_headers or {})
-        self._runtime_headers = (
-            {"X-Claude-Code-Session-Id": str(uuid.uuid4())}
-            if identity is not None and identity.profile == "claude_code"
-            else {}
-        )
 
-    def _headers(self) -> dict[str, str]:
+    def _headers(self, request: ModelRequest | None = None) -> dict[str, str]:
         _activate_error_secrets(self._compatibility_headers.values())
         # 协议必需头：x-api-key / anthropic-version / Content-Type。
         # 身份头（UA、x-app 等）由集中身份目录提供，不再发送 TelePilot 产品 UA；
@@ -2405,10 +2387,20 @@ class AnthropicClient(LLMClient):
                     "x-app": "cli",
                 }
             )
+        runtime_headers: dict[str, str] = {}
+        if self._identity is not None:
+            context = ClientRuntimeContext.from_metadata(
+                request.metadata if request is not None else None,
+                provider_scope=self._provider_scope,
+            )
+            runtime_headers = context.headers_for_identity(
+                self._identity.profile,
+                model=request.model if request is not None else self._model,
+            )
         return plan_request_headers(
             system_headers=system_headers,
             identity_headers=self._identity.headers() if self._identity is not None else None,
-            runtime_headers=self._runtime_headers,
+            runtime_headers=runtime_headers,
             compatibility_headers=self._compatibility_headers,
         )
 
@@ -2666,7 +2658,7 @@ class AnthropicClient(LLMClient):
             client_kwargs["trust_env"] = False
         try:
             async with httpx.AsyncClient(**client_kwargs) as cli:
-                resp = await cli.post(url, headers=self._headers(), json=body)
+                resp = await cli.post(url, headers=self._headers(request), json=body)
         except httpx.HTTPError as exc:
             raise LLMError(
                 _safe_error_message(_describe_http_error(exc, self._base_url), self._api_key),
@@ -2782,7 +2774,12 @@ class AnthropicClient(LLMClient):
 
         try:
             async with httpx.AsyncClient(**client_kwargs) as cli:
-                async with cli.stream("POST", url, headers=self._headers(), json=body) as resp:
+                async with cli.stream(
+                    "POST",
+                    url,
+                    headers=self._headers(request),
+                    json=body,
+                ) as resp:
                     if resp.status_code >= 400:
                         error_body = ""
                         async for chunk in resp.aiter_text():
@@ -3174,36 +3171,37 @@ class ResponsesClient(LLMClient):
         proxy_url: str | None = None,
         identity: ClientIdentity | None = None,
         compatibility_headers: Mapping[str, str] | None = None,
+        protocol_profile: str = LLM_PROTOCOL_PROFILE_STANDARD,
+        provider_scope: str | None = None,
     ):
         self._api_key = api_key
         self._base_url = normalize_base_url(base_url or "https://api.openai.com/v1")
         self._model = model
         self._proxy_url = proxy_url
         self._identity = identity
+        self._protocol_profile = resolve_protocol_profile(
+            LLM_API_FORMAT_RESPONSES,
+            protocol_profile,
+            base_url=self._base_url,
+            model=model,
+            infer_when_standard=True,
+        )
+        self._provider_scope = provider_scope or (
+            f"{self._base_url}|{self._protocol_profile.name}"
+        )
         self._compatibility_headers = dict(compatibility_headers or {})
-        request_session_id = str(uuid.uuid4())
-        if identity is not None and identity.profile == "codex_tui":
-            self._runtime_headers = {
-                "session-id": request_session_id,
-                "thread-id": request_session_id,
-                "x-client-request-id": request_session_id,
-            }
-        elif identity is not None and identity.profile == "codex_desktop":
-            self._runtime_headers = {
-                "session_id": request_session_id,
-                "x-client-request-id": request_session_id,
-            }
-        elif identity is not None and identity.profile == "grok_cli":
-            self._runtime_headers = {
-                "x-grok-conv-id": request_session_id,
-                "x-grok-session-id": request_session_id,
-                "x-grok-req-id": str(uuid.uuid4()),
-                "x-grok-agent-id": str(uuid.uuid4()),
-                "x-grok-turn-idx": "1",
-                "x-grok-model-override": model,
-            }
-        else:
-            self._runtime_headers = {}
+
+    def _runtime_headers(self, request: ModelRequest | None = None) -> dict[str, str]:
+        if self._identity is None:
+            return {}
+        context = ClientRuntimeContext.from_metadata(
+            request.metadata if request is not None else None,
+            provider_scope=self._provider_scope,
+        )
+        return context.headers_for_identity(
+            self._identity.profile,
+            model=request.model if request is not None else self._model,
+        )
 
     async def complete(
         self,
@@ -3217,12 +3215,22 @@ class ResponsesClient(LLMClient):
         reasoning_effort: str | None = None,
         timeout_seconds: int | None = None,
     ) -> LLMResult:
+        if images and "images" in self._protocol_profile.hard_disabled_capabilities:
+            raise LLMError(
+                f"{self._protocol_profile.name} 不支持图片输入",
+                scope=LLMErrorScope.CAPABILITY_MISMATCH,
+            )
+        if web_search and "web_search" in self._protocol_profile.hard_disabled_capabilities:
+            raise LLMError(
+                f"{self._protocol_profile.name} 不支持原生联网搜索",
+                scope=LLMErrorScope.CAPABILITY_MISMATCH,
+            )
         url = provider_endpoint(self._base_url, LLM_API_FORMAT_RESPONSES)
         headers = _llm_headers(
             identity=self._identity,
             accept="application/json",
             compatibility_headers=self._compatibility_headers,
-            runtime_headers=self._runtime_headers,
+            runtime_headers=self._runtime_headers(),
         )
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
@@ -3258,6 +3266,7 @@ class ResponsesClient(LLMClient):
                 size = "medium"
             body["tools"] = [{"type": "web_search", "search_context_size": size}]
             body["include"] = ["web_search_call.action.sources"]
+        body = plan_responses_body(body, self._protocol_profile)
 
         client_kwargs: dict[str, object] = {"timeout": _timeout_for_call(self._base_url, timeout_seconds)}
         if self._proxy_url:
@@ -3315,7 +3324,7 @@ class ResponsesClient(LLMClient):
         )
 
     async def invoke(self, request: ModelRequest) -> ModelResponse:
-        capabilities_for_api_format(LLM_API_FORMAT_RESPONSES).validate(
+        _responses_capabilities_for_profile(self._protocol_profile).validate(
             request,
             LLM_API_FORMAT_RESPONSES,
         )
@@ -3325,7 +3334,7 @@ class ResponsesClient(LLMClient):
             identity=self._identity,
             accept="application/json",
             compatibility_headers=self._compatibility_headers,
-            runtime_headers=self._runtime_headers,
+            runtime_headers=self._runtime_headers(request),
         )
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
@@ -3360,6 +3369,7 @@ class ResponsesClient(LLMClient):
                 size = "medium"
             body.setdefault("tools", []).append({"type": "web_search", "search_context_size": size})
             body["include"] = ["web_search_call.action.sources"]
+        body = plan_responses_body(body, self._protocol_profile)
 
         client_kwargs: dict[str, object] = {"timeout": _timeout_for_call(self._base_url, None)}
         if self._proxy_url:
@@ -3395,7 +3405,7 @@ class ResponsesClient(LLMClient):
     ) -> AsyncIterator[ModelStreamEvent]:
         """Expose real Responses API deltas while preserving function calls."""
 
-        capabilities_for_api_format(LLM_API_FORMAT_RESPONSES).validate(
+        _responses_capabilities_for_profile(self._protocol_profile).validate(
             replace(request, stream=True),
             LLM_API_FORMAT_RESPONSES,
         )
@@ -3405,7 +3415,7 @@ class ResponsesClient(LLMClient):
             identity=self._identity,
             accept="text/event-stream",
             compatibility_headers=self._compatibility_headers,
-            runtime_headers=self._runtime_headers,
+            runtime_headers=self._runtime_headers(request),
         )
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
@@ -3434,6 +3444,15 @@ class ResponsesClient(LLMClient):
             body["temperature"] = _normalize_temperature(request.temperature)
         if request.reasoning_effort:
             body["reasoning"] = {"effort": _normalize_reasoning_effort(request.reasoning_effort)}
+        if request.web_search:
+            size = (request.web_search_context_size or "medium").lower()
+            if size not in {"low", "medium", "high"}:
+                size = "medium"
+            body.setdefault("tools", []).append(
+                {"type": "web_search", "search_context_size": size}
+            )
+            body["include"] = ["web_search_call.action.sources"]
+        body = plan_responses_body(body, self._protocol_profile)
 
         client_kwargs: dict[str, object] = {"timeout": _timeout_for_call(self._base_url, None)}
         if self._proxy_url:
@@ -3446,18 +3465,63 @@ class ResponsesClient(LLMClient):
         reasoning_parts: list[str] = []
         function_calls: dict[str, dict[str, Any]] = {}
         function_call_aliases: dict[str, str] = {}
+        indexed_output_items: dict[int, dict[str, Any]] = {}
+        unindexed_output_items: list[dict[str, Any]] = []
         last_response: dict[str, Any] | None = None
         terminal_sent = False
+
+        def recorded_output_items() -> list[dict[str, Any]]:
+            return [
+                *(
+                    dict(indexed_output_items[index])
+                    for index in sorted(indexed_output_items)
+                ),
+                *(dict(item) for item in unindexed_output_items),
+            ]
 
         def terminal_response(*, stream_fallback: bool = False) -> ModelResponse:
             if last_response is not None:
                 response = dict(last_response)
-                visible = "".join(text_parts) or "".join(reasoning_parts)
+                visible = "".join(text_parts)
                 if visible and not response.get("output_text"):
                     response["output_text"] = visible
+                existing_output = response.get("output")
+                merged_output = (
+                    list(existing_output)
+                    if isinstance(existing_output, list) and existing_output
+                    else recorded_output_items()
+                )
+                reasoning_text = "".join(reasoning_parts)
+                if reasoning_text:
+                    reasoning_item = next(
+                        (
+                            item
+                            for item in merged_output
+                            if isinstance(item, dict) and item.get("type") == "reasoning"
+                        ),
+                        None,
+                    )
+                    if reasoning_item is None:
+                        merged_output.insert(
+                            0,
+                            {
+                                "type": "reasoning",
+                                "content": [
+                                    {
+                                        "type": "reasoning_text",
+                                        "text": reasoning_text,
+                                    }
+                                ],
+                            },
+                        )
+                    elif not _responses_reasoning_text_from_item(reasoning_item):
+                        reasoning_item["content"] = [
+                            {
+                                "type": "reasoning_text",
+                                "text": reasoning_text,
+                            }
+                        ]
                 if function_calls:
-                    existing_output = response.get("output")
-                    merged_output = list(existing_output) if isinstance(existing_output, list) else []
                     seen_keys: set[str] = set()
                     for item in merged_output:
                         if not isinstance(item, dict) or item.get("type") != "function_call":
@@ -3478,13 +3542,34 @@ class ResponsesClient(LLMClient):
                                 item["name"] = current.get("name") or ""
                             seen_keys.add(key)
                     merged_output.extend(item for key, item in function_calls.items() if key not in seen_keys)
+                if merged_output:
                     response["output"] = merged_output
             else:
+                output = recorded_output_items()
+                reasoning_text = "".join(reasoning_parts)
+                if reasoning_text and not any(
+                    item.get("type") == "reasoning" for item in output
+                ):
+                    output.insert(
+                        0,
+                        {
+                            "type": "reasoning",
+                            "content": [
+                                {
+                                    "type": "reasoning_text",
+                                    "text": reasoning_text,
+                                }
+                            ],
+                        },
+                    )
+                output.extend(
+                    item for item in function_calls.values() if item not in output
+                )
                 response = {
                     "model": model_name,
                     "status": "completed",
-                    "output_text": "".join(text_parts) or "".join(reasoning_parts),
-                    "output": list(function_calls.values()),
+                    "output_text": "".join(text_parts),
+                    "output": output,
                 }
             return _responses_structured_response(
                 response,
@@ -3586,15 +3671,28 @@ class ResponsesClient(LLMClient):
                                             self._api_key,
                                         )
                                     )
-                                if event_type == "response.completed":
+                                if event_type in {"response.completed", "response.incomplete"}:
                                     terminal_sent = True
                                     yield ModelStreamEvent(response=terminal_response())
                                     return
+                                if event_type == "response.failed":
+                                    error = payload.get("error") or response.get("error") or response
+                                    raise LLMError(
+                                        _safe_error_message(
+                                            f"Responses streaming 返回失败事件: {str(error)[:200]}",
+                                            self._api_key,
+                                        )
+                                    )
                             if event_type == "response.output_text.delta":
                                 delta = payload.get("delta")
                                 if isinstance(delta, str) and delta:
                                     text_parts.append(delta)
                                     yield ModelStreamEvent(delta=delta)
+                            elif event_type == "response.output_text.done":
+                                text = payload.get("text")
+                                if isinstance(text, str) and text and not text_parts:
+                                    text_parts.append(text)
+                                    yield ModelStreamEvent(delta=text)
                             elif event_type in {
                                 "response.reasoning_summary_text.delta",
                                 "response.reasoning_text.delta",
@@ -3604,10 +3702,28 @@ class ResponsesClient(LLMClient):
                                     reasoning_parts.append(delta)
                                     yield ModelStreamEvent(reasoning_delta=delta)
                             elif event_type in {
+                                "response.reasoning_summary_text.done",
+                                "response.reasoning_text.done",
+                            }:
+                                text = payload.get("text")
+                                if isinstance(text, str) and text and not reasoning_parts:
+                                    reasoning_parts.append(text)
+                                    yield ModelStreamEvent(reasoning_delta=text)
+                            elif event_type in {
                                 "response.output_item.added",
                                 "response.output_item.done",
                             }:
                                 item = payload.get("item")
+                                if (
+                                    event_type == "response.output_item.done"
+                                    and isinstance(item, dict)
+                                    and item.get("type")
+                                ):
+                                    output_index = payload.get("output_index")
+                                    if isinstance(output_index, int):
+                                        indexed_output_items[output_index] = dict(item)
+                                    else:
+                                        unindexed_output_items.append(dict(item))
                                 if isinstance(item, dict) and item.get("type") == "function_call":
                                     item_id = str(item.get("id") or "")
                                     call_id = str(item.get("call_id") or "")
@@ -3661,7 +3777,8 @@ class ResponsesClient(LLMClient):
 
         if not terminal_sent:
             raise LLMError(
-                "Responses streaming 响应提前结束，缺少 response.completed 终态",
+                "Responses streaming 响应提前结束，缺少 response.completed / "
+                "response.incomplete 终态",
                 retryable=True,
             )
 
@@ -3677,12 +3794,22 @@ class ResponsesClient(LLMClient):
         reasoning_effort: str | None = None,
         timeout_seconds: int | None = None,
     ) -> AsyncIterator[LLMStreamChunk]:
+        if images and "images" in self._protocol_profile.hard_disabled_capabilities:
+            raise LLMError(
+                f"{self._protocol_profile.name} 不支持图片输入",
+                scope=LLMErrorScope.CAPABILITY_MISMATCH,
+            )
+        if web_search and "web_search" in self._protocol_profile.hard_disabled_capabilities:
+            raise LLMError(
+                f"{self._protocol_profile.name} 不支持原生联网搜索",
+                scope=LLMErrorScope.CAPABILITY_MISMATCH,
+            )
         url = provider_endpoint(self._base_url, LLM_API_FORMAT_RESPONSES)
         headers = _llm_headers(
             identity=self._identity,
             accept="text/event-stream",
             compatibility_headers=self._compatibility_headers,
-            runtime_headers=self._runtime_headers,
+            runtime_headers=self._runtime_headers(),
         )
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
@@ -3714,6 +3841,7 @@ class ResponsesClient(LLMClient):
                 size = "medium"
             body["tools"] = [{"type": "web_search", "search_context_size": size}]
             body["include"] = ["web_search_call.action.sources"]
+        body = plan_responses_body(body, self._protocol_profile)
 
         client_kwargs: dict[str, object] = {"timeout": _timeout_for_call(self._base_url, timeout_seconds)}
         if self._proxy_url:
@@ -3725,6 +3853,7 @@ class ResponsesClient(LLMClient):
         input_tokens = 0
         output_tokens = 0
         final_sent = False
+        saw_output_text = False
 
         try:
             async with httpx.AsyncClient(**client_kwargs) as cli:
@@ -3809,7 +3938,7 @@ class ResponsesClient(LLMClient):
                                             self._api_key,
                                         )
                                     )
-                                if payload_type == "response.completed":
+                                if payload_type in {"response.completed", "response.incomplete"}:
                                     final_sent = True
                                     yield LLMStreamChunk(
                                         model=model_name,
@@ -3818,15 +3947,33 @@ class ResponsesClient(LLMClient):
                                         done=True,
                                     )
                                     return
+                                if payload_type == "response.failed":
+                                    error = payload.get("error") or response.get("error") or response
+                                    raise LLMError(
+                                        _safe_error_message(
+                                            f"Responses streaming 返回失败事件: {str(error)[:200]}",
+                                            self._api_key,
+                                        )
+                                    )
                             if payload_type == "response.output_text.delta":
                                 delta = payload.get("delta")
                                 if isinstance(delta, str) and delta:
+                                    saw_output_text = True
                                     yield LLMStreamChunk(delta=delta, model=model_name)
                             elif payload_type == "response.output_text.done":
                                 text = payload.get("text")
-                                if isinstance(text, str) and text and not final_sent:
-                                    # done 事件只用于兼容不发送 completed 的反代；不重复输出文本。
-                                    continue
+                                if (
+                                    isinstance(text, str)
+                                    and text
+                                    and not saw_output_text
+                                    and not final_sent
+                                ):
+                                    saw_output_text = True
+                                    yield LLMStreamChunk(
+                                        delta=text,
+                                        model=model_name,
+                                        stream_fallback=True,
+                                    )
                             continue
                         if not line:
                             current_event = ""
@@ -3843,7 +3990,8 @@ class ResponsesClient(LLMClient):
 
         if not final_sent:
             raise LLMError(
-                "Responses streaming 响应提前结束，缺少 response.completed 终态",
+                "Responses streaming 响应提前结束，缺少 response.completed / "
+                "response.incomplete 终态",
                 retryable=True,
             )
 
@@ -3872,12 +4020,17 @@ class ResponsesClient(LLMClient):
         """
         if web_search:
             raise LLMError("图片生成不支持联网搜索，请关闭 web_search")
+        if "images" in self._protocol_profile.hard_disabled_capabilities:
+            raise LLMError(
+                f"{self._protocol_profile.name} 不支持图片生成",
+                scope=LLMErrorScope.CAPABILITY_MISMATCH,
+            )
         url = provider_endpoint(self._base_url, LLM_API_FORMAT_RESPONSES)
         headers = _llm_headers(
             identity=self._identity,
             accept="application/json",
             compatibility_headers=self._compatibility_headers,
-            runtime_headers=self._runtime_headers,
+            runtime_headers=self._runtime_headers(),
         )
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
@@ -3913,6 +4066,7 @@ class ResponsesClient(LLMClient):
         normalized_effort = _normalize_reasoning_effort(reasoning_effort)
         if normalized_effort is not None:
             body["reasoning"] = {"effort": normalized_effort}
+        body = plan_responses_body(body, self._protocol_profile)
 
         client_kwargs: dict[str, object] = {"timeout": _timeout_for_call(self._base_url, timeout_seconds)}
         if self._proxy_url:
@@ -4192,8 +4346,19 @@ def build_client(
         or getattr(provider_row, "api_format", None)
         or default_api_format_for(provider_row.provider)
     )
+    protocol_profile = resolve_protocol_profile(
+        fmt,
+        getattr(provider_row, "protocol_profile", LLM_PROTOCOL_PROFILE_STANDARD),
+        base_url=getattr(provider_row, "base_url", None),
+        model=model,
+        infer_when_standard=True,
+    )
     configured_identity = identity_override or getattr(provider_row, "client_identity_profile", None)
-    identity = resolve_identity(configured_identity, fmt)
+    identity = resolve_identity(
+        configured_identity,
+        fmt,
+        recommended_profile=protocol_profile.recommended_identity,
+    )
     compatibility_headers = request_headers_for_scope(
         getattr(provider_row, "request_headers_enc", None),
         request_scope,
@@ -4218,6 +4383,8 @@ def build_client(
             base_url=provider_row.base_url,
             model=model,
             proxy_url=proxy_url,
+            protocol_profile=protocol_profile.name,
+            provider_scope=f"provider:{provider_row.id}|{protocol_profile.name}",
             identity=identity,
             compatibility_headers=compatibility_headers,
         )
@@ -4227,11 +4394,8 @@ def build_client(
             base_url=provider_row.base_url,
             model=model,
             proxy_url=proxy_url,
-            protocol_profile=getattr(
-                provider_row,
-                "protocol_profile",
-                LLM_PROTOCOL_PROFILE_STANDARD,
-            ),
+            protocol_profile=protocol_profile.name,
+            provider_scope=f"provider:{provider_row.id}|{protocol_profile.name}",
             identity=identity,
             compatibility_headers=compatibility_headers,
         )
@@ -4266,12 +4430,23 @@ def build_client_from_dto(
 
     # api_format_override 用于联网搜索等单次调用协议覆盖；否则按 provider 配置。
     fmt = api_format_override or dto.api_format or default_api_format_for(dto.provider)
+    protocol_profile = resolve_protocol_profile(
+        fmt,
+        dto.protocol_profile,
+        base_url=dto.base_url,
+        model=model,
+        infer_when_standard=True,
+    )
 
     # proxy 合并：参数传入 > dto 内置
     final_proxy = proxy_url if proxy_url else dto.proxy_url
     # 身份依据本次实际协议解析（override 生效后）。
     configured_identity = identity_override or dto.client_identity_profile
-    identity = resolve_identity(configured_identity, fmt)
+    identity = resolve_identity(
+        configured_identity,
+        fmt,
+        recommended_profile=protocol_profile.recommended_identity,
+    )
     compatibility_headers = request_headers_for_scope(
         dto.request_headers_enc,
         request_scope,
@@ -4295,6 +4470,8 @@ def build_client_from_dto(
             base_url=dto.base_url,
             model=model,
             proxy_url=final_proxy,
+            protocol_profile=protocol_profile.name,
+            provider_scope=f"provider:{dto.id}|{protocol_profile.name}",
             identity=identity,
             compatibility_headers=compatibility_headers,
         )
@@ -4304,7 +4481,8 @@ def build_client_from_dto(
             base_url=dto.base_url,
             model=model,
             proxy_url=final_proxy,
-            protocol_profile=dto.protocol_profile,
+            protocol_profile=protocol_profile.name,
+            provider_scope=f"provider:{dto.id}|{protocol_profile.name}",
             identity=identity,
             compatibility_headers=compatibility_headers,
         )

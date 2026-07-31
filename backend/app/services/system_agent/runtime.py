@@ -23,6 +23,7 @@ from ...db.models.system_agent import (
     SystemAgentSession,
 )
 from ..llm_agent import AgentCallbacks, AgentLimits, AgentTool, run_agent
+from ..llm_call_context import runtime_metadata as build_runtime_metadata
 from ..llm_dto import LLMProviderDTO
 from ..llm_invoke import invoke_structured, stream_structured
 from ..llm_protocol import MessageRole, ModelMessage, ModelRequest, ModelUsage, ToolCall, ToolResult
@@ -334,6 +335,11 @@ class SystemAgentRuntime:
                     fallback_provider_id=fallback_provider_id,
                     progress_callback=emit_model_progress,
                     known_secrets=turn_secrets,
+                    client_runtime_metadata=build_runtime_metadata(
+                        session_id=session.id,
+                        run_id=run_id,
+                        turn_id=run_id,
+                    ),
                 )
             finally:
                 stage_timings["route_ms"] = max(
@@ -552,6 +558,11 @@ class SystemAgentRuntime:
                 "repair_text_tool_protocol": True,
                 # 仅供本地 usage preview 脱敏；Provider adapter 不发送 metadata。
                 "known_secrets": turn_secrets,
+                **build_runtime_metadata(
+                    session_id=session.id,
+                    run_id=run_id,
+                    turn_id=run_id,
+                ),
             },
         )
         limits = AgentLimits(
@@ -953,6 +964,7 @@ class SystemAgentRuntime:
         fallback_provider_id: int | None = None,
         progress_callback: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
         known_secrets: list[str] | None = None,
+        client_runtime_metadata: dict[str, Any] | None = None,
     ) -> ToolRoute:
         domains = available_domains(all_tool_specs)
         local = route_locally(user_text, available=domains, memory_state=memory_state)
@@ -993,6 +1005,7 @@ class SystemAgentRuntime:
                             "max_retries_per_model": 1,
                             "retry_delay_seconds": 0.0,
                             "known_secrets": list(known_secrets or []),
+                            **dict(client_runtime_metadata or {}),
                         },
                     ),
                     account_id=account_id,

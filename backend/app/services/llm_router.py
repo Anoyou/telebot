@@ -255,17 +255,38 @@ def _finalize_decision(decision: RoutingDecision, providers: dict[int, dict[str,
     decision.api_format = str(p.get("api_format") or "") or None
     decision.client_identity_profile = str(p.get("client_identity_profile") or "auto")
     decision.effective_client_identity_profile = _resolve_effective_identity(
-        decision.client_identity_profile, decision.api_format
+        decision.client_identity_profile,
+        decision.api_format,
+        str(p.get("protocol_profile") or "standard"),
+        str(p.get("base_url") or ""),
+        decision.model,
     )
     return decision
 
 
-def _resolve_effective_identity(profile: str | None, api_format: str | None) -> str | None:
+def _resolve_effective_identity(
+    profile: str | None,
+    api_format: str | None,
+    protocol_profile: str | None = None,
+    base_url: str | None = None,
+    model: str | None = None,
+) -> str | None:
     """把配置身份解析为本次实际生效的身份档案名（脱敏摘要用，保存值/摘要/请求头一致）。"""
     try:
         from .llm_identity import resolve_identity
+        from .llm_profiles import resolve_protocol_profile
 
-        return resolve_identity(profile, api_format).profile
+        resolved_profile = resolve_protocol_profile(
+            str(api_format or ""),
+            protocol_profile,
+            base_url=base_url,
+            model=model,
+        )
+        return resolve_identity(
+            profile,
+            api_format,
+            recommended_profile=resolved_profile.recommended_identity,
+        ).profile
     except Exception:  # noqa: BLE001 - 解析异常时退回配置值，不阻断路由
         return profile
 

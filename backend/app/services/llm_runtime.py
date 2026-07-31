@@ -32,6 +32,7 @@ from ..settings import settings
 from . import llm_account_budget
 from .llm_client import build_client_from_dto
 from .llm_identity import resolve_identity
+from .llm_profiles import resolve_protocol_profile
 from .llm_protocol import (
     ImageContent,
     ModelRequest,
@@ -177,7 +178,17 @@ def resolve_usage_client_identity_profile(
         if configured_identity_profile is not None
         else provider.client_identity_profile
     )
-    return resolve_identity(configured, api_format).profile
+    profile = resolve_protocol_profile(
+        api_format,
+        provider.protocol_profile,
+        base_url=provider.base_url,
+        model=provider.default_model,
+    )
+    return resolve_identity(
+        configured,
+        api_format,
+        recommended_profile=profile.recommended_identity,
+    ).profile
 
 
 def preview_text_for_usage(

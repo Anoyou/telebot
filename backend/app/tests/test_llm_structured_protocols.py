@@ -101,6 +101,42 @@ def _request(tool_name: str = "lookup") -> ModelRequest:
     )
 
 
+def test_responses_input_preserves_deepseek_reasoning_for_tool_round() -> None:
+    from app.services.llm_client import _responses_input
+
+    request = _request()
+    assistant = replace(
+        request.messages[2],
+        reasoning_content="先检查工具参数，再执行调用。",
+    )
+    items = _responses_input(
+        (request.messages[0], request.messages[1], assistant, request.messages[3]),
+        {request.tools[0].name: wire_tool_name(request.tools[0].name)},
+    )
+
+    assert items[1]["type"] == "reasoning"
+    assert items[1]["content"] == [
+        {"type": "reasoning_text", "text": "先检查工具参数，再执行调用。"}
+    ]
+
+
+def test_responses_input_drops_orphan_reasoning_without_following_output() -> None:
+    from app.services.llm_client import _responses_input
+
+    items = _responses_input(
+        (
+            ModelMessage.text(MessageRole.USER, "question"),
+            ModelMessage(
+                role=MessageRole.ASSISTANT,
+                reasoning_content="只有思考，没有正文或工具调用",
+            ),
+        ),
+        {},
+    )
+
+    assert all(item.get("type") != "reasoning" for item in items)
+
+
 @pytest.mark.asyncio
 async def test_chat_adapter_round_trips_tool_calls() -> None:
     internal_name = "interaction.list_rules"
@@ -951,6 +987,89 @@ async def test_responses_stream_preserves_split_function_arguments_on_done() -> 
 
 
 @pytest.mark.asyncio
+async def test_responses_stream_repairs_reasoning_and_tools_from_done_items() -> None:
+    """终态 output 为空时仍保留 DeepSeek reasoning，供工具续轮回传。"""
+
+    response = _StreamingResponse(
+        _sse_chunks(
+            {"type": "response.reasoning_text.delta", "delta": "先查询当前状态。"},
+            {
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {"type": "reasoning", "id": "rs-1", "content": []},
+            },
+            {
+                "type": "response.output_item.done",
+                "output_index": 1,
+                "item": {
+                    "type": "function_call",
+                    "call_id": "call-1",
+                    "name": "lookup",
+                    "arguments": '{"id":1}',
+                },
+            },
+            {
+                "type": "response.completed",
+                "response": {
+                    "model": "deepseek-v4-flash",
+                    "status": "completed",
+                    "output": [],
+                    "usage": {"input_tokens": 4, "output_tokens": 3},
+                },
+            },
+        )
+    )
+    with patch(
+        "app.services.llm_client.httpx.AsyncClient",
+        return_value=_StreamingClient(response),
+    ):
+        events = [
+            event
+            async for event in ResponsesClient(
+                "sk", "https://api.deepseek.com", "deepseek-v4-flash"
+            ).stream_invoke(_request())
+        ]
+
+    terminal = events[-1].response
+    assert terminal is not None
+    assert terminal.text == ""
+    assert terminal.reasoning_content == "先查询当前状态。"
+    assert terminal.tool_calls == (ToolCall("call-1", "lookup", {"id": 1}),)
+    assert terminal.stop_reason is StopReason.TOOL_CALLS
+
+
+@pytest.mark.asyncio
+async def test_responses_stream_uses_done_text_when_provider_omits_deltas() -> None:
+    response = _StreamingResponse(
+        _sse_chunks(
+            {"type": "response.output_text.done", "text": "完整正文"},
+            {
+                "type": "response.completed",
+                "response": {
+                    "model": "deepseek-v4-flash",
+                    "status": "completed",
+                    "usage": {"input_tokens": 2, "output_tokens": 2},
+                },
+            },
+        )
+    )
+    with patch(
+        "app.services.llm_client.httpx.AsyncClient",
+        return_value=_StreamingClient(response),
+    ):
+        chunks = [
+            chunk
+            async for chunk in ResponsesClient(
+                "sk", "https://api.deepseek.com", "deepseek-v4-flash"
+            ).stream_complete("sys", "user")
+        ]
+
+    assert [chunk.delta for chunk in chunks if chunk.delta] == ["完整正文"]
+    assert chunks[0].stream_fallback is True
+    assert chunks[-1].done is True
+
+
+@pytest.mark.asyncio
 async def test_responses_stream_maps_item_id_arguments_to_call_id() -> None:
     internal_name = "interaction.list_rules"
     wire_name = wire_tool_name(internal_name)
@@ -1244,6 +1363,39 @@ async def test_responses_stream_complete_rejects_natural_eof_without_completed()
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("structured", [False, True])
+async def test_responses_stream_accepts_incomplete_terminal_event(structured: bool) -> None:
+    """DeepSeek 官方流以 response.incomplete 结束时仍是合法响应。"""
+
+    response = _StreamingResponse(
+        _sse_chunks(
+            {"type": "response.output_text.delta", "delta": "截断前的内容"},
+            {
+                "type": "response.incomplete",
+                "response": {
+                    "model": "deepseek-v4-flash",
+                    "status": "incomplete",
+                    "incomplete_details": {"reason": "max_output_tokens"},
+                    "usage": {"input_tokens": 3, "output_tokens": 5},
+                },
+            },
+        )
+    )
+    client = ResponsesClient("sk", "https://api.deepseek.com", "deepseek-v4-flash")
+    with patch("app.services.llm_client.httpx.AsyncClient", return_value=_StreamingClient(response)):
+        if structured:
+            events = [event async for event in client.stream_invoke(_request())]
+            terminal = events[-1].response
+            assert terminal is not None
+            assert terminal.stop_reason is StopReason.MAX_TOKENS
+            assert terminal.text == "截断前的内容"
+        else:
+            chunks = [chunk async for chunk in client.stream_complete("sys", "user")]
+            assert chunks[-1].done is True
+            assert chunks[-1].output_tokens == 5
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("structured", [False, True])
 async def test_responses_stream_rejects_completed_status_on_nonterminal_event(
     structured: bool,
 ) -> None:
@@ -1294,3 +1446,102 @@ async def test_responses_completed_event_rejects_failed_response_status(
                 _ = [event async for event in client.stream_invoke(_request())]
             else:
                 _ = [chunk async for chunk in client.stream_complete("sys", "user")]
+
+
+@pytest.mark.asyncio
+async def test_responses_failed_event_rejects_http_2xx_stream() -> None:
+    response = _StreamingResponse(
+        _sse_chunks(
+            {
+                "type": "response.failed",
+                "response": {
+                    "model": "model",
+                    "status": "failed",
+                    "error": {"message": "upstream failed"},
+                },
+            }
+        )
+    )
+    with patch(
+        "app.services.llm_client.httpx.AsyncClient",
+        return_value=_StreamingClient(response),
+    ):
+        with pytest.raises(Exception, match="错误事件|状态异常"):
+            _ = [
+                event
+                async for event in ResponsesClient(
+                    "sk", "https://api.example/v1", "model"
+                ).stream_invoke(_request())
+            ]
+
+
+@pytest.mark.asyncio
+async def test_responses_usage_includes_cache_tokens_and_parallel_calls() -> None:
+    fake = AsyncMock()
+    fake.__aenter__.return_value = fake
+    fake.post = AsyncMock(
+        return_value=_Response(
+            {
+                "model": "model",
+                "status": "completed",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call-1",
+                        "name": "lookup",
+                        "arguments": '{"id":1}',
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call-2",
+                        "name": "lookup",
+                        "arguments": '{"id":2}',
+                    },
+                ],
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 4,
+                    "input_tokens_details": {"cached_tokens": 6},
+                    "cache_write_tokens": 3,
+                },
+            }
+        )
+    )
+    with patch("app.services.llm_client.httpx.AsyncClient", return_value=fake):
+        result = await ResponsesClient(
+            "sk", "https://api.example/v1", "model"
+        ).invoke(_request())
+
+    assert result.usage.cache_read_tokens == 6
+    assert result.usage.cache_write_tokens == 3
+    assert [call.id for call in result.tool_calls] == ["call-1", "call-2"]
+
+
+@pytest.mark.asyncio
+async def test_responses_stream_ignores_events_after_terminal() -> None:
+    response = _StreamingResponse(
+        _sse_chunks(
+            {
+                "type": "response.completed",
+                "response": {
+                    "model": "model",
+                    "status": "completed",
+                    "output_text": "done",
+                },
+            },
+            {"type": "response.output_text.delta", "delta": "late"},
+        )
+    )
+    with patch(
+        "app.services.llm_client.httpx.AsyncClient",
+        return_value=_StreamingClient(response),
+    ):
+        events = [
+            event
+            async for event in ResponsesClient(
+                "sk", "https://api.example/v1", "model"
+            ).stream_invoke(_request())
+        ]
+
+    assert all(event.delta != "late" for event in events)
+    assert events[-1].response is not None

@@ -5874,6 +5874,8 @@ export interface components {
             recommended_api_format?: string | null;
             /** Recommended Client Identity Profile */
             recommended_client_identity_profile?: string | null;
+            /** Recommended Protocol Profile */
+            recommended_protocol_profile?: string | null;
             /**
              * Recommended Web Search Api Format
              * @default auto
@@ -6394,6 +6396,12 @@ export interface components {
             /** Pid */
             pid?: number | null;
             /**
+             * Protocol Profile
+             * @default standard
+             * @enum {string}
+             */
+            protocol_profile: "standard" | "openai_responses" | "deepseek_responses" | "codex_responses" | "claude_code_proxy";
+            /**
              * Provider
              * @enum {string}
              */
@@ -6811,7 +6819,7 @@ export interface components {
              * @default standard
              * @enum {string}
              */
-            protocol_profile: "standard" | "claude_code_proxy";
+            protocol_profile: "standard" | "openai_responses" | "deepseek_responses" | "codex_responses" | "claude_code_proxy";
             /**
              * Provider
              * @enum {string}
@@ -6924,7 +6932,7 @@ export interface components {
             /** Notes */
             notes?: string | null;
             /** Protocol Profile */
-            protocol_profile?: ("standard" | "claude_code_proxy") | null;
+            protocol_profile?: ("standard" | "openai_responses" | "deepseek_responses" | "codex_responses" | "claude_code_proxy") | null;
             /** Provider */
             provider?: ("openai" | "anthropic" | "ollama") | null;
             /** Proxy Id */
@@ -8371,6 +8379,8 @@ export interface components {
          *     - ``label``    可选展示名（默认就用 id）
          */
         ProviderModel: {
+            /** Context Window */
+            context_window?: number | null;
             /**
              * Custom
              * @default false
@@ -8383,16 +8393,30 @@ export interface components {
             enabled: boolean;
             /** Id */
             id: string;
+            /** Input Modalities */
+            input_modalities?: ("text" | "image" | "audio" | "video")[] | null;
             /** Label */
             label?: string | null;
+            /** Max Output Tokens */
+            max_output_tokens?: number | null;
+            /** Output Modalities */
+            output_modalities?: ("text" | "image" | "audio")[] | null;
             /** Reasoning Efforts */
             reasoning_efforts?: ("minimal" | "low" | "medium" | "high" | "xhigh" | "max")[] | null;
+            /** Reasoning Transport */
+            reasoning_transport?: ("none" | "reasoning_content" | "responses_item" | "encrypted_reasoning_item" | "anthropic_thinking") | null;
+            /** Supported Api Formats */
+            supported_api_formats?: ("chat_completions" | "responses" | "anthropic_messages")[] | null;
             /** Supports Images */
             supports_images?: boolean | null;
+            /** Supports Parallel Tool Calls */
+            supports_parallel_tool_calls?: boolean | null;
             /** Supports Temperature */
             supports_temperature?: boolean | null;
             /** Supports Tools */
             supports_tools?: boolean | null;
+            /** Supports Web Search */
+            supports_web_search?: boolean | null;
         };
         /** ProvidersStatus */
         ProvidersStatus: {
@@ -8690,7 +8714,7 @@ export interface components {
              * @default standard
              * @enum {string}
              */
-            protocol_profile: "standard" | "claude_code_proxy";
+            protocol_profile: "standard" | "openai_responses" | "deepseek_responses" | "codex_responses" | "claude_code_proxy";
             /** Proxy Id */
             proxy_id?: number | null;
             /** Reasoning Effort */

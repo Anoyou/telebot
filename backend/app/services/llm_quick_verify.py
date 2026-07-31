@@ -21,7 +21,7 @@ from .llm_client import (
     build_client_from_dto,
 )
 from .llm_dto import LLMProviderDTO
-from .llm_protocol import normalize_base_url, provider_models_endpoint
+from .llm_protocol import normalize_base_url, provider_models_endpoints
 from .llm_request_headers import (
     REQUEST_SCOPE_LIVENESS,
     REQUEST_SCOPE_MODELS,
@@ -148,6 +148,7 @@ async def discover_models(
     base_url: str,
     api_key: str,
     api_format: str,
+    protocol_profile: str = "standard",
     proxy_url: str | None = None,
     timeout_seconds: int,
     request_headers: list[object] | None = None,
@@ -161,24 +162,32 @@ async def discover_models(
         client_kwargs["proxy"] = proxy_url
     else:
         client_kwargs["trust_env"] = False
+    headers = plan_request_headers(
+        system_headers=_discovery_headers(api_format, api_key),
+        compatibility_headers=request_headers_for_scope(
+            request_headers,
+            REQUEST_SCOPE_MODELS,
+        ),
+    )
+    response: httpx.Response | None = None
     try:
         async with httpx.AsyncClient(**client_kwargs) as client:
-            response = await client.get(
-                provider_models_endpoint(base_url, api_format),
-                headers=plan_request_headers(
-                    system_headers=_discovery_headers(api_format, api_key),
-                    compatibility_headers=request_headers_for_scope(
-                        request_headers,
-                        REQUEST_SCOPE_MODELS,
-                    ),
-                ),
-            )
+            for endpoint in provider_models_endpoints(
+                base_url,
+                api_format,
+                protocol_profile=protocol_profile,
+            ):
+                response = await client.get(endpoint, headers=headers)
+                if response.status_code not in {404, 405}:
+                    break
     except httpx.HTTPError as exc:
         raise LLMError(
             _safe_message(f"模型列表请求失败（{type(exc).__name__}）。", api_key),
             retryable=True,
         ) from None
 
+    if response is None:
+        raise LLMError("没有可用的模型列表候选端点。")
     if response.status_code >= 400:
         raise LLMError(
             _safe_message(
@@ -262,6 +271,7 @@ async def quick_verify_events(
                 base_url=base_url,
                 api_key=api_key,
                 api_format=api_format,
+                protocol_profile=protocol_profile,
                 proxy_url=proxy_url,
                 timeout_seconds=timeout_seconds,
                 request_headers=request_headers,

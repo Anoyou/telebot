@@ -83,7 +83,7 @@ const API_FORMAT_OPTIONS: { value: LLMApiFormat; label: string; hint: string }[]
   {
     value: "responses",
     label: "Responses ( /responses )",
-    hint: "OpenAI 2024 出的新协议；anyrouter 等部分反代只接这个；默认应该选这个解决 chat/completions 不通的问题",
+    hint: "OpenAI 兼容的新协议；DeepSeek 官方 deepseek-v4-flash 原生支持，Base URL 请填 https://api.deepseek.com（无需 /v1）",
   },
   {
     value: "anthropic_messages",
@@ -91,6 +91,34 @@ const API_FORMAT_OPTIONS: { value: LLMApiFormat; label: string; hint: string }[]
     hint: "Anthropic 协议；走官方 https://api.anthropic.com 或兼容反代时选",
   },
 ];
+
+const PROTOCOL_PROFILE_OPTIONS: Record<
+  LLMApiFormat,
+  Array<{ value: LLMProtocolProfile; label: string; hint: string }>
+> = {
+  chat_completions: [
+    { value: "standard", label: "标准 Chat Completions", hint: "使用所选 API Format 的标准字段。" },
+  ],
+  responses: [
+    { value: "standard", label: "通用 Responses", hint: "适合未声明特殊方言的兼容服务。" },
+    { value: "openai_responses", label: "OpenAI Responses", hint: "启用 OpenAI 官方 Responses 字段与标准 SDK 身份。" },
+    { value: "deepseek_responses", label: "DeepSeek Responses", hint: "按 DeepSeek V4 正式版约束移除 store、previous_response_id、include 等不支持字段。" },
+    { value: "codex_responses", label: "Codex Responses", hint: "用于明确要求 Codex 身份及加密 reasoning 回传的 Responses 服务。" },
+  ],
+  anthropic_messages: [
+    { value: "standard", label: "标准 Anthropic API", hint: "仅发送 Anthropic Messages 标准字段。" },
+    { value: "claude_code_proxy", label: "Claude Code 反代兼容", hint: "仅用于明确要求 Claude Code beta 语义的反代。" },
+  ],
+};
+
+function protocolProfileForFormat(
+  apiFormat: LLMApiFormat,
+  profile: LLMProtocolProfile,
+): LLMProtocolProfile {
+  return PROTOCOL_PROFILE_OPTIONS[apiFormat].some((option) => option.value === profile)
+    ? profile
+    : "standard";
+}
 
 const WEB_SEARCH_API_FORMAT_OPTIONS: { value: LLMWebSearchApiFormat; label: string; hint: string }[] = [
   {
@@ -125,7 +153,7 @@ const CLIENT_IDENTITY_OPTIONS: {
   {
     value: "auto",
     label: "自动（推荐）",
-    hint: "按本次实际协议解析：chat_completions→OpenAI SDK / responses→Codex TUI / anthropic_messages→Claude Code CLI。",
+    hint: "按协议档案解析：标准 Responses / DeepSeek 使用 OpenAI SDK，Codex 档案使用 Codex TUI，Anthropic 使用 Claude Code CLI。",
   },
   {
     value: "minimal",
@@ -269,7 +297,7 @@ const EMPTY_FORM: FormState = {
   api_format: "responses",
   protocol_profile: "standard",
   web_search_api_format: "auto",
-  client_identity_profile: "codex_tui",
+  client_identity_profile: "auto",
   clearKey: false,
   modality: "text",
   tags: ["chat"],
@@ -397,7 +425,7 @@ const REQUEST_HEADER_GUIDES: RequestHeaderGuide[] = [
     key: "deepseek",
     label: "DeepSeek 官方",
     hosts: ["api.deepseek.com"],
-    note: "官方 API 通常只需要系统生成的 Bearer 鉴权，不需要额外兼容头。",
+    note: "官方 API 通常只需要系统生成的 Bearer 鉴权，不需要额外兼容头；deepseek-v4-flash 请优先选择 Responses（Base URL 无需 /v1）。",
     headers: [],
   },
   {
@@ -814,9 +842,7 @@ export function LLMProviders({
         base_url: form.base_url || null,
         default_model: form.default_model.trim(),
         api_format: form.api_format,
-        ...(form.api_format === "anthropic_messages"
-          ? { protocol_profile: form.protocol_profile }
-          : {}),
+        protocol_profile: form.protocol_profile,
         web_search_api_format: form.web_search_api_format,
         client_identity_profile: form.client_identity_profile,
         modality: form.modality,
@@ -851,9 +877,7 @@ export function LLMProviders({
         base_url: form.base_url || null,
         default_model: form.default_model.trim(),
         api_format: form.api_format,
-        ...(form.api_format === "anthropic_messages"
-          ? { protocol_profile: form.protocol_profile }
-          : {}),
+        protocol_profile: form.protocol_profile,
         web_search_api_format: form.web_search_api_format,
         client_identity_profile: form.client_identity_profile,
         modality: form.modality,
@@ -895,10 +919,10 @@ export function LLMProviders({
       base_url: p.base_url || "",
       default_model: p.default_model,
       api_format: ((p.api_format as LLMApiFormat) || "chat_completions"),
-      protocol_profile:
-        p.api_format === "anthropic_messages" && p.protocol_profile === "claude_code_proxy"
-          ? "claude_code_proxy"
-          : "standard",
+      protocol_profile: protocolProfileForFormat(
+        ((p.api_format as LLMApiFormat) || "chat_completions"),
+        ((p.protocol_profile as LLMProtocolProfile) || "standard"),
+      ),
       web_search_api_format: ((p.web_search_api_format as LLMWebSearchApiFormat) || "auto"),
       client_identity_profile: ((p.client_identity_profile as LLMClientIdentityProfile) || "auto"),
       clearKey: false,
@@ -1135,7 +1159,7 @@ export function LLMProviders({
                       <TableCell className="font-mono text-xs">{p.provider}</TableCell>
                       <TableCell className="space-y-1 text-xs">
                         <MetaBadge mono>{p.api_format || "chat_completions"}</MetaBadge>
-                        {p.api_format === "anthropic_messages" ? (
+                        {(p.protocol_profile || "standard") !== "standard" ? (
                           <div>
                             <MetaBadge mono tone={p.protocol_profile === "claude_code_proxy" ? "warn" : "neutral"}>
                               {p.protocol_profile || "standard"}
@@ -1293,7 +1317,7 @@ function ProviderMobileCard({
           </MetaBadge>
           <MetaBadge mono>{provider.provider}</MetaBadge>
           <MetaBadge mono>{provider.api_format || "chat_completions"}</MetaBadge>
-          {provider.api_format === "anthropic_messages" ? (
+          {(provider.protocol_profile || "standard") !== "standard" ? (
             <MetaBadge mono tone={provider.protocol_profile === "claude_code_proxy" ? "warn" : "neutral"}>
               {provider.protocol_profile || "standard"}
             </MetaBadge>
@@ -1449,13 +1473,8 @@ function ProviderCreateWorkspace({
       ...form,
       provider,
       api_format: apiFormat,
-      protocol_profile: apiFormat === "anthropic_messages" ? form.protocol_profile : "standard",
-      client_identity_profile:
-        apiFormat === "responses"
-          ? "codex_tui"
-          : apiFormat === "anthropic_messages"
-            ? "claude_code"
-            : "openai_sdk",
+      protocol_profile: protocolProfileForFormat(apiFormat, form.protocol_profile),
+      client_identity_profile: "auto",
       ...(!isEdit ? { default_model: "", models: [] } : {}),
     });
     onVerificationChange(false);
@@ -1687,6 +1706,7 @@ function ProviderCreateWorkspace({
                   onSetDefault={(model) => setField("default_model", model)}
                   providerKind={form.provider}
                   apiFormat={form.api_format}
+                  protocolProfile={form.protocol_profile}
                   baseUrl={form.base_url}
                   apiKey={form.api_key}
                   proxyId={form.proxy_id}
@@ -1809,13 +1829,17 @@ function ProviderCreateWorkspace({
                     ))}
                   </Select>
                 </div>
-                {form.api_format === "anthropic_messages" ? (
+                {form.api_format !== "chat_completions" ? (
                   <div className="space-y-1.5">
-                    <Label>Anthropic 请求兼容模式</Label>
+                    <Label>协议档案</Label>
                     <Select disabled={connectionLocked} value={form.protocol_profile} onChange={(event) => setField("protocol_profile", event.target.value as LLMProtocolProfile)}>
-                      <option value="standard">标准 Anthropic API</option>
-                      <option value="claude_code_proxy">Claude Code 反代兼容</option>
+                      {PROTOCOL_PROFILE_OPTIONS[form.api_format].map((option) => (
+                        <option key={option.value} value={option.value}>{option.label}</option>
+                      ))}
                     </Select>
+                    <p className="text-xs leading-5 text-muted-foreground">
+                      {PROTOCOL_PROFILE_OPTIONS[form.api_format].find((option) => option.value === form.protocol_profile)?.hint}
+                    </p>
                   </div>
                 ) : null}
               </div>
@@ -1957,8 +1981,10 @@ function ProviderEditDialog({
                 : form.provider
             : form.provider,
           api_format: recommendedApiFormat,
-          protocol_profile:
-            recommendedApiFormat === "anthropic_messages" ? form.protocol_profile : "standard",
+          protocol_profile: protocolProfileForFormat(
+            recommendedApiFormat,
+            (resp.recommended_protocol_profile as LLMProtocolProfile) || "standard",
+          ),
           web_search_api_format: (resp.recommended_web_search_api_format || "auto") as LLMWebSearchApiFormat,
           client_identity_profile:
             (resp.recommended_client_identity_profile as LLMClientIdentityProfile) ||
@@ -2088,6 +2114,7 @@ function ProviderModelsSection({
   onSetDefault,
   providerKind,
   apiFormat,
+  protocolProfile,
   baseUrl,
   apiKey,
   proxyId,
@@ -2100,6 +2127,7 @@ function ProviderModelsSection({
   onSetDefault: (id: string) => void;
   providerKind: LLMProviderKind;
   apiFormat: LLMApiFormat;
+  protocolProfile: LLMProtocolProfile;
   baseUrl: string;
   apiKey: string;
   proxyId: string;
@@ -2138,6 +2166,7 @@ function ProviderModelsSection({
       const old = existing.get(mid);
       if (old) {
         merged.push({
+          ...old,
           id: mid,
           enabled: !!old.enabled,
           custom: false,
@@ -2160,6 +2189,7 @@ function ProviderModelsSection({
       fetchProviderModelsPreview({
         provider: providerKind,
         api_format: apiFormat,
+        protocol_profile: protocolProfile,
         base_url: baseUrl ? baseUrl.trim() : null,
         // 编辑模式下若用户没重填 api_key，让后端回落到 DB 已存的
         api_key: apiKey ? apiKey : null,
