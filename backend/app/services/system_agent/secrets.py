@@ -91,6 +91,23 @@ def looks_like_provider_credential_paste(text: str) -> bool:
     )
 
 
+def looks_like_standalone_provider_key(text: str) -> bool:
+    """严格判断整条消息是否只有一个可信的 Provider Key。
+
+    该判断只用于上一轮已经进入 Provider 任务后的安全续接。整条消息必须是单一
+    token，避免把普通说明中的长 ID、链接或其他领域凭据误认成 Provider Key。
+    """
+
+    candidate = str(text or "").strip().strip("\"'`")
+    if not candidate or any(ch.isspace() for ch in candidate):
+        return False
+    return bool(
+        _KNOWN_KEY_RE.fullmatch(candidate)
+        or _DOTTED_KEY_RE.fullmatch(candidate)
+        or _GENERIC_KEY_RE.fullmatch(candidate)
+    )
+
+
 def extract_plaintext_secrets(text: str) -> list[str]:
     """从用户消息中提取疑似密钥明文（去重，保序）。"""
 
@@ -118,6 +135,11 @@ def extract_plaintext_secrets(text: str) -> list[str]:
     for match in _URL_PASSWORD_RE.finditer(raw):
         value = match.group(1)
         if value and value not in seen:
+            seen.add(value)
+            found.append(value)
+    if looks_like_standalone_provider_key(raw):
+        value = raw.strip().strip("\"'`")
+        if value not in seen:
             seen.add(value)
             found.append(value)
     remainder = _provider_credential_remainder(raw)
@@ -198,6 +220,7 @@ __all__ = [
     "encrypt_secrets_dict",
     "extract_plaintext_secrets",
     "looks_like_provider_credential_paste",
+    "looks_like_standalone_provider_key",
     "merge_secret_into_arguments",
     "redact_known_secrets",
     "redact_user_message",

@@ -8,6 +8,7 @@ from app.services.system_agent.secrets import (
     contains_request_header_context,
     extract_plaintext_secrets,
     looks_like_provider_credential_paste,
+    looks_like_standalone_provider_key,
     merge_secret_into_arguments,
     redact_known_secrets,
     redact_user_message,
@@ -25,6 +26,28 @@ def test_extract_labeled_key() -> None:
     text = "api_key: my-super-secret-token-value"
     secrets = extract_plaintext_secrets(text)
     assert any("my-super-secret-token-value" in s for s in secrets)
+
+
+@pytest.mark.parametrize(
+    "key",
+    (
+        "sk-proj-abcdefghijklmnopqrstuvwxyz123456",
+        "abcdefghijklmnopqrstuvwxyz123456",
+        "abcdefghijkl.mnopqrstuvwxyz",
+    ),
+)
+def test_extract_and_redact_standalone_provider_key(key: str) -> None:
+    secrets = extract_plaintext_secrets(key)
+
+    assert looks_like_standalone_provider_key(key) is True
+    assert secrets == [key]
+    assert key not in redact_known_secrets(key, secrets)
+
+
+def test_standalone_provider_key_rejects_long_sentence() -> None:
+    text = "issue-abcdefghijklmnopqrstuvwxyz123456 不是 Provider Key"
+
+    assert looks_like_standalone_provider_key(text) is False
 
 
 @pytest.mark.parametrize(

@@ -32,6 +32,7 @@ from ..llm_probe_defaults import (
     QUICK_VERIFY_MAX_TOKENS,
     QUICK_VERIFY_MESSAGE,
     QUICK_VERIFY_SYSTEM_PROMPT,
+    QUICK_VERIFY_TIMEOUT_SECONDS,
 )
 
 # ── 命令名校验正则：与 worker/command.py 中的 \w+ 派发兼容 ─────
@@ -641,7 +642,11 @@ class QuickVerifyProviderRequest(BaseModel):
         max_length=2000,
     )
     max_tokens: int = Field(default=QUICK_VERIFY_MAX_TOKENS, ge=64, le=2000)
-    timeout_seconds: int = Field(default=90, ge=10, le=180)
+    timeout_seconds: int = Field(
+        default=QUICK_VERIFY_TIMEOUT_SECONDS,
+        ge=10,
+        le=180,
+    )
 
     @field_validator("base_url", "system_prompt", "message")
     @classmethod

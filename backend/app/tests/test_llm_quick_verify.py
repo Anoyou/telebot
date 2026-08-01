@@ -14,6 +14,7 @@ from app.llm_probe_defaults import (
     QUICK_VERIFY_MAX_TOKENS,
     QUICK_VERIFY_MESSAGE,
     QUICK_VERIFY_SYSTEM_PROMPT,
+    QUICK_VERIFY_TIMEOUT_SECONDS,
 )
 from app.schemas.command import FetchModelsPreviewRequest, QuickVerifyProviderRequest
 from app.services import llm_quick_verify
@@ -369,6 +370,7 @@ def test_quick_verify_request_strips_values_and_rejects_blank_required_fields() 
     assert payload.system_prompt == QUICK_VERIFY_SYSTEM_PROMPT
     assert payload.message == QUICK_VERIFY_MESSAGE
     assert payload.max_tokens == QUICK_VERIFY_MAX_TOKENS
+    assert payload.timeout_seconds == QUICK_VERIFY_TIMEOUT_SECONDS
 
     with pytest.raises(ValueError):
         QuickVerifyProviderRequest(base_url="   ")

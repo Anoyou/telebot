@@ -21,6 +21,7 @@ from app.llm_probe_defaults import (
     QUICK_VERIFY_MAX_TOKENS,
     QUICK_VERIFY_MESSAGE,
     QUICK_VERIFY_SYSTEM_PROMPT,
+    QUICK_VERIFY_TIMEOUT_SECONDS,
 )
 from app.services.system_agent.actions import decrypt_secret_payload, encrypt_secret_payload
 from app.services.system_agent.context import ToolContext
@@ -393,3 +394,4 @@ async def test_run_quick_verify_forwards_compatibility_headers(monkeypatch) -> N
     assert captured["system_prompt"] == QUICK_VERIFY_SYSTEM_PROMPT
     assert captured["message"] == QUICK_VERIFY_MESSAGE
     assert captured["max_tokens"] == QUICK_VERIFY_MAX_TOKENS
+    assert captured["timeout_seconds"] == QUICK_VERIFY_TIMEOUT_SECONDS

@@ -15,10 +15,14 @@ QUICK_VERIFY_MESSAGE = (
 # 单次探针仍保持低成本，但要给强制推理模型留出足够的隐藏推理与正文空间，
 # 避免 32/256 token 上限造成“能调用、无正文”的假失败。
 QUICK_VERIFY_MAX_TOKENS = 512
+# 手动新建 Provider 与 Agent 测活必须共享同一总超时。协议自动探测可能依次尝试
+# models、streaming 与非 streaming 回退，45 秒会把可用但响应较慢的上游误判为失败。
+QUICK_VERIFY_TIMEOUT_SECONDS = 90
 
 
 __all__ = [
     "QUICK_VERIFY_MAX_TOKENS",
     "QUICK_VERIFY_MESSAGE",
     "QUICK_VERIFY_SYSTEM_PROMPT",
+    "QUICK_VERIFY_TIMEOUT_SECONDS",
 ]

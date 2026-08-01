@@ -230,69 +230,77 @@ export function TaskCenter({
                         {item.blocked_reason ? ` · ${item.blocked_reason}` : ""}
                       </span>
                     </span>
-                    <span className="col-span-2 flex min-w-0 justify-end gap-1 sm:col-span-1">
-                    {item.channel === "web" && item.status === "paused" && activeSessionId ? (
-                      <Button
-                        type="button"
-                        size="icon"
-                        variant="ghost"
-                        className="h-10 w-10 shrink-0 active:scale-95 sm:h-9 sm:w-9"
-                        onClick={() => onResumeQueue(activeSessionId)}
-                        title="恢复队列"
-                        aria-label="恢复队列"
-                      >
-                        <CirclePlay className="h-4 w-4" />
-                      </Button>
-                    ) : null}
-                    {item.channel === "web" && ["pending", "paused"].includes(item.status) ? (
-                      <>
+                    <span className="col-span-2 flex min-w-0 flex-wrap justify-end gap-1 sm:col-span-1 sm:flex-nowrap">
+                      {item.channel === "web" &&
+                      item.status === "paused" &&
+                      activeSessionId ? (
                         <Button
                           type="button"
                           size="icon"
                           variant="ghost"
-                          className="h-10 w-10 shrink-0 active:scale-95 sm:h-9 sm:w-9"
-                          onClick={() => {
-                            setEditingItem(item);
-                            setEditingContent(item.content);
-                          }}
-                          title="编辑排队消息"
-                          aria-label="编辑排队消息"
+                          className="h-10 w-auto shrink-0 px-2 active:scale-95 sm:h-9 sm:w-9 sm:px-0"
+                          onClick={() => onResumeQueue(activeSessionId)}
+                          title="恢复后续任务"
+                          aria-label="恢复后续任务"
                         >
-                          <Pencil className="h-3.5 w-3.5" />
+                          <CirclePlay className="h-4 w-4" />
+                          <span className="text-[11px] sm:sr-only">恢复</span>
                         </Button>
+                      ) : null}
+                      {item.channel === "web" &&
+                      ["pending", "paused"].includes(item.status) ? (
+                        <>
+                          <Button
+                            type="button"
+                            size="icon"
+                            variant="ghost"
+                            className="h-10 w-auto shrink-0 px-2 active:scale-95 sm:h-9 sm:w-9 sm:px-0"
+                            onClick={() => {
+                              setEditingItem(item);
+                              setEditingContent(item.content);
+                            }}
+                            title="修改这条消息"
+                            aria-label="修改这条消息"
+                          >
+                            <Pencil className="h-3.5 w-3.5" />
+                            <span className="text-[11px] sm:sr-only">修改</span>
+                          </Button>
                           <button
                             type="button"
-                            className="grid h-10 w-10 shrink-0 place-items-center rounded-md active:scale-95 hover:bg-muted disabled:opacity-30 sm:h-9 sm:w-9"
+                            className="inline-flex h-10 shrink-0 items-center justify-center gap-1 rounded-md px-2 text-[11px] active:scale-95 hover:bg-muted disabled:opacity-30 sm:h-9 sm:w-9 sm:px-0"
                             disabled={editableIndex === 0}
                             onClick={() => onMoveQueueItem(item, -1)}
-                            aria-label="上移"
-                            title="上移"
+                            aria-label="提前一位"
+                            title="提前一位"
                           >
                             <ChevronUp className="h-3.5 w-3.5" />
+                            <span className="sm:sr-only">提前</span>
                           </button>
                           <button
                             type="button"
-                            className="grid h-10 w-10 shrink-0 place-items-center rounded-md active:scale-95 hover:bg-muted disabled:opacity-30 sm:h-9 sm:w-9"
+                            className="inline-flex h-10 shrink-0 items-center justify-center gap-1 rounded-md px-2 text-[11px] active:scale-95 hover:bg-muted disabled:opacity-30 sm:h-9 sm:w-9 sm:px-0"
                             disabled={editableIndex === editableQueue.length - 1}
                             onClick={() => onMoveQueueItem(item, 1)}
-                            aria-label="下移"
-                            title="下移"
+                            aria-label="延后一位"
+                            title="延后一位"
                           >
                             <ChevronDown className="h-3.5 w-3.5" />
+                            <span className="sm:sr-only">延后</span>
                           </button>
-                        <Button
-                          type="button"
-                          size="icon"
-                          variant="ghost"
-                          className="h-10 w-10 shrink-0 text-muted-foreground active:scale-95 hover:text-destructive sm:h-9 sm:w-9"
-                          onClick={() => onDeleteQueueItem(item)}
-                          title="移出队列"
-                          aria-label="移出队列"
-                        >
-                          <X className="h-4 w-4" />
-                        </Button>
-                      </>
-                    ) : null}
+                          <Button
+                            type="button"
+                            size="icon"
+                            variant="ghost"
+                            className="h-10 w-auto shrink-0 px-2 text-muted-foreground active:scale-95 hover:text-destructive sm:h-9 sm:w-9 sm:px-0"
+                            onClick={() => onDeleteQueueItem(item)}
+                            title="取消这条"
+                            aria-label="取消这条"
+                          >
+                            <X className="h-4 w-4" />
+                            <span className="text-[11px] sm:sr-only">取消</span>
+                          </Button>
+                        </>
+                      ) : null}
                     </span>
                   </div>
                   );
@@ -316,7 +324,7 @@ export function TaskCenter({
         <DialogHeader>
           <DialogTitle>编辑排队消息</DialogTitle>
           <DialogDescription>
-            修改后的内容会保留原队列位置，并在任务开始前加密保存。
+            修改后仍会排在原来的位置，轮到它时才会执行。
           </DialogDescription>
         </DialogHeader>
         <Textarea
@@ -335,14 +343,14 @@ export function TaskCenter({
           <Button
             type="button"
             variant="outline"
-            className="min-h-10 active:scale-95"
+            className="min-h-10 w-full active:scale-95 sm:w-auto"
             onClick={() => setEditingItem(null)}
           >
             取消
           </Button>
           <Button
             type="button"
-            className="min-h-10 active:scale-95"
+            className="min-h-10 w-full active:scale-95 sm:w-auto"
             disabled={!editingContent.trim()}
             onClick={() => {
               if (!editingItem) return;
@@ -378,7 +386,7 @@ export function TaskCenter({
           <Button
             type="button"
             variant="outline"
-            className="min-h-10 active:scale-95"
+            className="min-h-10 w-full active:scale-95 sm:w-auto"
             onClick={() => setClearSessionId(null)}
           >
             返回
@@ -386,7 +394,7 @@ export function TaskCenter({
           <Button
             type="button"
             variant="destructive"
-            className="min-h-10 active:scale-95"
+            className="min-h-10 w-full active:scale-95 sm:w-auto"
             onClick={() => {
               if (!clearSessionId) return;
               onClearQueue(clearSessionId);

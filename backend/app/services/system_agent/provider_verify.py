@@ -13,6 +13,7 @@ from ...llm_probe_defaults import (
     QUICK_VERIFY_MAX_TOKENS,
     QUICK_VERIFY_MESSAGE,
     QUICK_VERIFY_SYSTEM_PROMPT,
+    QUICK_VERIFY_TIMEOUT_SECONDS,
 )
 from ...services import llm_quick_verify
 from ...services.llm_request_headers import decrypt_request_headers
@@ -58,7 +59,7 @@ async def run_quick_verify(
     client_identity_profile: str = "auto",
     request_headers: list[object] | None = None,
     proxy_url: str | None = None,
-    timeout_seconds: int = 45,
+    timeout_seconds: int = QUICK_VERIFY_TIMEOUT_SECONDS,
     using_saved_key: bool = False,
     retain_temporary_key: bool = False,
 ) -> dict[str, Any]:
