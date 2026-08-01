@@ -2,21 +2,21 @@
 
 本文是当前维护的插件 API 参考，覆盖配置、派发、日志、前端集成、调试和示例。用户界面与开发文档统一使用“插件”指代可安装、可启停、可配置的扩展能力；历史代码字段名仍按兼容要求保留。
 
-## 1. 三模式心智模型
+## 1. 三链路心智模型
 
-新插件先判断自己属于哪种模式，再看 Event Bus、Trace、MessageOps 这些内部契约：
+新插件先判断消息从哪条链路进入，再看 Event Bus、Trace、MessageOps 这些内部契约：
 
-| 模式 | 触发与输入 | 默认收发通道 | 典型用法 |
+| 链路 | 触发与输入 | 会话/发送语义 | 典型用法 |
 | --- | --- | --- | --- |
-| 裸直通 | userbot 原始 Telethon event | 插件自行处理 userbot 能力 | 抢首响、极低延时 userbot 监听；不覆盖 interaction bot |
-| userbot 命令会话 | UserBot 前缀命令触发，进入标准事件信封 | 后续收发默认都走 userbot | 管理员命令、账号身份动作、需要沿用当前账号上下文的流程 |
-| interaction bot 规则会话 | 关键词、付款确认、按钮回调触发，进入标准事件信封 | 后续收发默认都走 interaction bot | 高频群内互动、按钮、题面、普通会话提示 |
+| 裸直通 | userbot Telethon 实时事件；安装插件收到 `SandboxEvent` 权限包装 | 插件自行处理 userbot 能力 | 抢首响、极低延时 userbot 监听；不覆盖 interaction bot |
+| UserBot 标准消息链路 | Event Bus、前缀命令、legacy `on_message`；可含 incoming/outgoing | 只有建立会话时才由 `session.channel=userbot` 路由后续普通收发 | 管理员命令、账号身份动作、第三方 Bot 消息监听 |
+| Interaction Bot 标准消息链路 | Event Bus 自主订阅或旧规则会话 | 只有建立会话时才由 `session.channel=interaction_bot` 路由后续普通收发 | 高频群内互动、按钮、题面、普通会话提示 |
 
 唯一例外：`payout`、收付款、发奖永远由 userbot 执行，不随会话通道切到 interaction bot。
 
 可选字段 `requires_platform_capabilities` 可写在 Manifest、interaction entry 或 event subscription 上，声明对 `ai` / `interaction_bot` / `webhooks` 等平台模块的依赖。旧插件未声明时继续加载；平台在路由层裁剪不可用入口，并在 `FeatureInfo.runtime_availability` 中返回 `ready` / `partial` / `paused` / `transitioning`。详见 [平台能力热插拔](./PLATFORM-CAPABILITIES.md)。
 
-Event Bus、Trace、MessageOps 是标准链路内部契约，不是第四种模式。userbot 命令会话和 interaction bot 规则会话都使用标准事件信封，并通过 `ctx.messages` / 标准 action 输出：
+Event Bus、Trace、MessageOps 是两条标准消息链路的内部契约，不是第四种模式。两条标准消息链路都可使用标准事件信封，并通过 `ctx.messages` / 标准 action 输出；legacy hook 仍保留兼容语义：
 
 ```python
 from app.worker.plugins.events import event_from_interaction_payload
@@ -50,7 +50,7 @@ async def on_direct_message(self, ctx, event):
     return {"status": "consumed"}
 ```
 
-这里的 `event` 是 live Telethon event，不是 `payload`，也不会自动生成标准事件信封或 `ctx.messages` action。平台只记录直通路由与调用 Trace，不提供标准 MessageOps 审计等价物。它不接 interaction bot 事件；需要按钮、Inline、付款确认、规则会话或审计回放时，改用标准会话链路。
+这里的 `event` 不是 `payload`，也不会自动生成标准事件信封或解释 handler 返回的标准 action。安装插件收到的是保留实时字段读取能力的 `SandboxEvent`，嵌套按钮已净化；builtin 内部插件才保留真实 Telethon event。平台会记录直通路由与插件调用 Trace；显式 `ctx.messages` 动作和受支持的 `ctx.client` 操作仍进入统一执行或动作审计。它不接 interaction bot 事件；需要 Interaction Bot 按钮回调、Inline、付款确认、标准会话或完整事件回放时，改用标准消息链路。
 
 账号二次开关只决定插件是否加入直通调度，优先级只决定尝试顺序。只有 `consumed` 会停止后续直通与普通链路；`ignored`、`failed`、异常和未返回结果都会继续调度并最终回退。兼容返回值为 `True → consumed`、`False/None → ignored`、`{"consume": true/false} → consumed/ignored`。
 
@@ -144,7 +144,7 @@ class PluginContext:
     http: Any | None       # HTTP facade；需要 external_http + allowed_hosts
     ai: Any | None         # AI facade；需要 ai_text
     engine: Any | None     # RateLimitEngine；安装型插件通常为 None
-    redis: Any | None      # redis.asyncio.Redis；低层兼容入口
+    redis: Any | None      # builtin 可为原始 Redis；安装插件为 PluginRedisFacade
     storage: Any | None    # PluginStorage；按账号和插件隔离的持久化 KV facade
     data_dir: Path | None  # 插件独享的持久化文件目录；更新插件代码时不会被覆盖
     log: Callable          # 日志函数
@@ -159,10 +159,10 @@ class PluginContext:
 
     # 工具方法
     async def conversation(self, peer, timeout=30) -> Conversation:
-        """创建与 bot 的对话会话。"""
+        """内部/真实 TelegramClient 兼容入口；普通安装插件不可依赖。"""
 ```
 
-注意：核心平台兼容代码可能拿到完整运行时能力；远程/本地/插件库安装型插件拿到的是受控上下文：`ctx.client` 是平台提供的客户端 facade，指令 handler 中传入的 `client` 参数与 `ctx.client` 同源。当前 worker 加载路径会向插件上下文注入低层 `ctx.redis`，并基于同一个 Redis 后端构造 `ctx.storage`；新插件需要持久化状态时应优先使用 `ctx.storage`，不要自行拼 Redis key。`ctx.engine` 仍只供核心 builtin 兼容代码直接依赖，安装型插件通常为 `None`。受控上下文用于收口常用操作和审计，不是公共插件市场式强沙箱。
+注意：核心平台兼容代码可能拿到完整运行时能力；远程/本地/插件库安装型插件拿到的是受控上下文：`ctx.client` 是 `SandboxClient` facade，指令 handler 中传入的 `client` 参数与 `ctx.client` 同源。安装型插件的 `ctx.redis` 是 `PluginRedisFacade`，会自动添加 `plugin_store:{account_id}:{plugin_key}:` 前缀，并拒绝 `keys`、`scan`、`eval`、`pipeline`、`pubsub` 等操作；builtin 兼容代码才可能拿到原始 Redis client。新插件的普通状态仍应优先使用 `ctx.storage`。`ctx.engine` 只供核心 builtin 兼容代码直接依赖，安装型插件通常为 `None`。受控上下文用于收口常用操作和审计，不是公共插件市场式强沙箱。
 
 插件需要 SQLite、索引文件或其他文件型持久化时，必须写入 `ctx.data_dir`，不要写进 `Path(__file__).parent`、插件安装目录或仓库源码目录。TelePilot 更新插件时会整体替换代码目录，而 `ctx.data_dir` 位于持久化插件卷的 `_data/<plugin_key>/` 下，不随代码更新删除。插件仍需使用 `ctx.account_id` 隔离账号数据；若一个数据库文件服务多个账号，表结构必须包含账号隔离键。
 
@@ -209,7 +209,7 @@ async def on_event(self, ctx, payload):
 
 ### 4.1 持久化 facade：ctx.storage
 
-`ctx.storage` 是 `PluginStorage` facade，用于插件自己的持久化 key-value 状态。运行时从 `PluginContext.account_id`、`PluginContext.feature_key` 和 `ctx.redis` 构造它，Redis key 前缀为 `plugin_store:{account_id}:{plugin_key}:`，因此同一插件在不同账号之间、同一账号的不同插件之间不会串数据。
+`ctx.storage` 是 `PluginStorage` facade，用于插件自己的持久化 key-value 状态。loader 使用原始 Redis 后端以及 `PluginContext.account_id`、`PluginContext.feature_key` 单独构造它，不会再套一层安装插件可见的 `ctx.redis` facade，因此不会产生双重前缀。它与 `PluginRedisFacade` 使用相同的 `plugin_store:{account_id}:{plugin_key}:` 命名空间格式，所以同一插件在不同账号之间、同一账号的不同插件之间不会串数据。
 
 API 签名：
 
@@ -257,21 +257,21 @@ if attempts is not None and attempts > 5:
 | `ctx.rules` | 遍历 `ctx.rules` | 当前账号 + 当前插件已启用规则 |
 | `ctx.client` | 高级兼容场景只读或受控调用 | UserBot 客户端 facade；新插件不要用它作为主动发送主路径，消息输出优先使用 `ctx.messages` 或标准 action |
 | `ctx.engine` | `await ctx.engine.acquire(...)` | 仅核心 builtin 兼容代码可直接依赖；安装型插件通常为 `None` |
-| `ctx.redis` | `await ctx.redis.get(...)` | 低层 Redis 客户端；当前运行时会注入，但新插件不应自行拼 key，持久化优先用 `ctx.storage` |
+| `ctx.redis` | `await ctx.redis.get("key")` | 安装插件拿 `PluginRedisFacade`，自动添加账号 + 插件前缀；不支持 `keys/scan/eval/pipeline/pubsub` 等操作。builtin 才可能拿原始 Redis；普通状态优先用 `ctx.storage` |
 | `ctx.storage` | `await ctx.storage.get("k")` / `await ctx.storage.set("k", value, ttl=3600)` | 推荐的插件持久化 facade；按账号 + 插件自动命名空间隔离 |
 | `ctx.log` | `await ctx.log("info", "...", **detail)` | 运行日志写入器 |
 | `ctx.scheduler` | `ctx.scheduler.register(job_id, schedule, callback, *, replace=True)` / `ctx.scheduler.unregister(job_id)` | 调度 facade（按权限/能力边界开放） |
 | `ctx.http` | `await ctx.http.get(url, params={...})` / `await ctx.http.post(url, json={...})` | 安全 HTTP facade；第三方插件需声明 `external_http` + `allowed_hosts` |
 | `ctx.ai` | `await ctx.ai.complete(system="...", user="...")` | 文本 LLM facade；第三方插件需声明 `ai_text` |
 | `ctx.ai` | `await ctx.ai.run_agent(..., handlers={...})` | 有界工具调用；第三方插件需声明独立 `ai_agent` 与工具双白名单 |
-| `ctx.messages` | `await ctx.messages.send(...)` / `send_photo(...)` / `edit_caption(...)` / `answer_callback(...)` | 交互入口消息操作 facade；只生成平台标准动作，由 TelePilot 统一代发、审计和执行 |
+| `ctx.messages` | `await ctx.messages.send(...)` / `send_photo(...)` / `edit_caption(...)` / `click_callback_button(...)` / `answer_callback(...)` | 交互入口消息操作 facade；只生成平台标准动作，由 TelePilot 统一代发、审计和执行 |
 | `ctx.identities` | 通常通过 `resolve_public_sender_identity(ctx, ...)` 间接使用；UserBot 专用场景可调用 `resolve_userbot(...)` | 平台注入的群内安全身份 facade；只返回标签、姓名、管理员状态和解析状态，不向插件开放成员目录 |
-| `ctx.conversation(...)` | `async with ctx.conversation(peer)` | 与目标 peer 建立会话 |
+| `ctx.conversation(...)` | `async with ctx.conversation(peer)` | 仅真实 `TelegramClient` 的 builtin/内部兼容场景可靠；普通安装插件的 `SandboxClient` 不支持其 handler/raw MTProto 要求 |
 
 ### 4.3 权限边界与禁止事项
 
 1. 第三方插件必须遵循 `manifest.permissions` 最小授权，未声明的客户端能力不可调用。
-2. 第三方插件不得假设 `ctx.engine` 恒可用；需要状态持久化时优先使用 `ctx.storage`，只有确需低层 Redis 语义且已处理命名空间、原子性和降级时才访问 `ctx.redis`。
+2. 第三方插件不得假设 `ctx.engine` 恒可用；需要状态持久化时优先使用 `ctx.storage`。确需 Redis 的 NX、hash/list/set 等已开放语义时才访问 `ctx.redis`，并接受自动命名空间和方法白名单；不要假设它是原始 Redis client。
 3. 禁止通过插件绕过账号边界：不要读写其他账号配置、规则、会话状态。
 4. 禁止在插件中执行系统级/运维级动作（如重启进程、安装/卸载插件、修改权限模型）。
 5. 禁止依赖 worker 私有实现或 monkey patch 运行时对象来“扩权”。
@@ -281,7 +281,7 @@ if attempts is not None and attempts > 5:
 
 1. 配置：通过 `ctx.config` 读取；按 `config_schema` 的 `level` 设计字段，不自行拼接跨账号配置。
 2. 账号：通过 `ctx.account_id` 做所有业务隔离键；插件持久化状态优先放进 `ctx.storage`，由平台按账号 + 插件隔离。
-3. 运行时：管理员命令兼容场景可使用 `ctx.client` / `ctx.scheduler` / `ctx.conversation` 提供的公开入口；公共群互动、按钮、Inline、付款确认和后台通知优先使用 `ctx.messages` 或标准 action。
+3. 运行时：管理员命令兼容场景可使用 `ctx.client` 已开放的方法和 `ctx.scheduler`；普通安装插件不要依赖 `ctx.conversation`。公共群互动、Interaction Bot callback、Inline、付款确认和后台通知优先使用 `ctx.messages` 或标准 action。
 4. 日志：统一用 `ctx.log`，并在 `detail` 里带结构化字段（如 `chat_id`、`action`）。
 5. 兜底：对可选能力（`engine`/`storage`/`redis`）做 feature-detection，保证第三方插件在受限上下文也能安全降级。
 
@@ -535,7 +535,7 @@ ZIP 上传还会在解压和加载 Python 前执行供应链门禁：
 
 ### 标准链路内部契约：Event Bus + Trace + MessageOps
 
-userbot 命令会话和 interaction bot 规则会话的内部链路是：
+UserBot 与 Interaction Bot 两条标准消息链路的内部链路是：
 
 ```text
 Telegram 来源
@@ -572,7 +572,7 @@ Telegram 来源
 }
 ```
 
-`usage` 必须让开发者和安装者不用理解旧规则也能知道插件怎么启用。`event_subscriptions` 描述 Event Bus 投递范围；`capabilities` 描述高风险能力，没有高风险能力也建议显式写 `{}`。这组契约服务于标准会话链路，不是裸直通，也不是独立于三模式之外的第四种模式。
+`usage` 必须让开发者和安装者不用理解旧规则也能知道插件怎么启用。`event_subscriptions` 描述 Event Bus 投递范围；`capabilities` 描述高风险能力，没有高风险能力也建议显式写 `{}`。这组契约服务于标准消息链路，不是裸直通，也不是独立于三条链路之外的第四种模式。
 
 自主发送的 Inline Keyboard 按钮不依赖交互 Bot 触发规则或活跃会话。插件只需订阅
 `source=["interaction_bot"]`、`events=["callback_query"]`、`scope="all_allowed_chats"`，
@@ -582,6 +582,117 @@ Telegram 来源
 `on_interaction(ctx, entry_key, payload)` 入口时必填。按钮必须由当前 Interaction
 Bot 发送，Telegram 才会把点击更新投递给该 Bot。
 
+### Inline 按钮的两种完全不同场景
+
+“收到按钮回调”和“主动点击别的 Bot 的按钮”在 Telegram 协议里是两件事：
+
+| 场景 | 谁发按钮 | 谁执行点击 | TelePilot 收到/发出什么 | 插件入口 |
+| --- | --- | --- | --- | --- |
+| Interaction Bot 按钮回调 | 当前 TelePilot Interaction Bot | Telegram 用户 | Interaction Bot 收到 `callback_query` update | `on_event` 处理 `callback_query`，用 `answer_callback` ACK |
+| UserBot 主动点击第三方 Bot 按钮 | 第三方 Bot | TelePilot UserBot | UserBot 经 MTProto 发送 `GetBotCallbackAnswerRequest` | UserBot 执行链路调用 `ctx.messages.click_callback_button(...)` |
+
+第一种场景的标准订阅如下：
+
+```json
+{
+  "events": ["callback_query"],
+  "source": ["interaction_bot"],
+  "scope": "all_allowed_chats"
+}
+```
+
+这不依赖旧 Interaction Bot 规则或活跃会话。插件用
+`ctx.messages.answer_callback(...)` 或 `{"type": "answer_callback", ...}` 确认 Telegram
+已经投递给当前 Interaction Bot 的 callback。`answer_callback` 不会、也不能让 UserBot
+点击第三方 Bot 的按钮。
+
+第二种场景使用平台正式 MessageOps 接口。安装插件的 manifest 必须声明：
+
+```python
+permissions = ["click_bot_button"]
+```
+
+legacy `on_message` 示例：
+
+```python
+from app.worker.plugins.base import Plugin, PluginContext, register
+
+
+@register
+class ThirdPartyBotButtonPlugin(Plugin):
+    key = "third_party_bot_button"
+    display_name = "第三方 Bot 按钮示例"
+
+    # legacy on_message 默认 owner_only=True；要接收第三方 Bot 消息必须显式关闭。
+    message_channels = {"incoming"}
+    owner_only = False
+
+    async def on_message(self, ctx: PluginContext, event) -> None:
+        message = getattr(event, "message", event)
+        sender_id = int(
+            getattr(message, "sender_id", None)
+            or getattr(event, "sender_id", 0)
+            or 0
+        )
+        chat_id = int(
+            getattr(message, "chat_id", None)
+            or getattr(event, "chat_id", 0)
+            or 0
+        )
+
+        # 必须同时限制发送 Bot 和会话；这里的 ID 由插件配置提供。
+        if sender_id != int(ctx.config["target_bot_id"]):
+            return
+        if chat_id != int(ctx.config["target_chat_id"]):
+            return
+
+        await ctx.messages.click_callback_button(
+            chat_id=chat_id,
+            message_id=int(getattr(message, "id", 0) or 0),
+            row=0,
+            column=0,
+            expected_bot_id=int(ctx.config["target_bot_id"]),
+            expected_button_text="确认",
+        )
+```
+
+要让这段逻辑收到消息，还必须满足：
+
+- 插件已经在目标 UserBot 账号启用。
+- 账号级“允许会话”留空，表示全部会话；列表非空时，目标会话必须在名单内。
+- 不需要配置旧 Interaction Bot 触发规则。
+- `owner_only=False` 只开放 legacy `on_message`，不会把第三方消息变成管理命令；UserBot outgoing 指令仍是独立安全边界。
+
+`click_callback_button(...)` 属于 UserBot 执行链路能力：UserBot Event Bus、legacy
+`on_message`、插件命令、裸直通和后台/调度任务的 `ctx.messages` 都可调用；Interaction
+Bot 插件入口不支持，收到当前 Interaction Bot 的用户点击时必须使用 `answer_callback`。
+实践中仍推荐在收到第三方 Bot 消息的处理函数内立即调用，并同时校验目标会话、Bot ID
+和按钮文字，避免依赖已经变化的旧消息。
+
+平台会重新读取指定 Telegram 消息，确认发送者确实为 Bot，定位对应行列，并且只接受
+`KeyboardButtonCallback`。callback data 不向插件暴露，也不接受插件传入；推荐同时传
+`expected_bot_id` 和 `expected_button_text`，防止消息或按钮在读取前被替换。平台统一负责：
+
+- installed 插件的 `click_bot_button` 权限检查；
+- `callback_query` 限流；如果限流要求等待，等待结束后重新读取并复核目标消息；
+- Trace、ActionEvent 和 dev-mode dry-run；
+- 15 秒消息读取/点击超时；
+- 同账号、同消息、同行列的物理点击锁：明确成功后保护 20 秒，超时或结果未知时保守保护 5 分钟；
+- Redis 不可用时 fail-closed，拒绝失去幂等保护的点击。
+
+普通安装插件看到的 `message.buttons[row][column]` 和
+`message.reply_markup.rows[row].buttons[column]` 都是平台只读视图，只暴露 `text`
+与 `kind`，不会暴露原始按钮对象、client 或 callback data。旧
+`message.buttons[row][column].click()`、`message.click()`、`get_buttons()` 等穿透调用
+会被沙箱拒绝。
+
+标准事件信封中的 `payload["message"]["reply_markup"]["buttons"]` 是扁平按钮数组，
+每项只包含 `row`、兼容字段 `col`、正式字段 `column`、`text`、`kind`；转换成
+`tp_event.message.reply_markup` 后得到 `ReplyMarkupRef`，其中每个 `ButtonRef` 只公开
+`row`、`column`、`text`、`kind`。这两种标准投影都不公开 callback data 或 URL。
+
+普通键盘、URL、Switch Inline、手机号、地理位置和其他非 callback 按钮都会被拒绝。
+
 `strict_trace` 是布尔字段，默认 `false`。开启后，插件声明的路由投递层会更积极保留全链路 trace，便于复盘订阅匹配、插件执行、动作投递和失败原因；动作层 `record_action` 不受这个开关影响。涉及资金、发奖、`payout`、补偿重放或对账的插件建议设为 `true`，普通查询/娱乐插件可保持默认。
 
 当前标准事件：
@@ -590,7 +701,7 @@ Bot 发送，Telegram 才会把点击更新投递给该 Bot。
 | --- | --- |
 | `message` | 普通消息，读取 `payload["message"]["text"]` |
 | `command` | 管理员/授权用户命令，仍受 UserBot command 权限约束 |
-| `callback_query` | Inline keyboard 按钮回调，用 `answer_callback` ACK |
+| `callback_query` | 当前 Interaction Bot 收到的 Inline keyboard 按钮回调，用 `answer_callback` ACK；不是 UserBot 主动点击第三方 Bot 按钮 |
 | `inline_query` | Inline 查询，用 `answer_inline_query` 返回结果 |
 | `chosen_inline_result` | 用户选择了 Inline 结果，用于记录选择或后续结算 |
 | `payment_confirmed` | 可信外部通知或平台解析确认到账后生成 |
@@ -963,7 +1074,7 @@ userbot 会话里的 `reply_markup` 不会直接丢掉：
 
 注意：`interaction_entries` 只负责“让前端知道这个插件有哪些交互入口可选”。真正运行时，worker 会调用插件实例的 `on_interaction(ctx, entry_key, payload)`。如果插件只声明入口但没有实现这个 hook，交互 Bot 会提示“插件尚未实现交互入口”。
 
-交互 Bot 运行时采用事件路由模型：普通 Bot 负责接收群消息、按钮回调和规则指令；UserBot/回复上下文与外部转账通知来源负责补充付款证据；平台只把命中规则且存在活跃会话的事件投递给对应插件，不会把所有群消息广播给所有插件。插件应在同一个 `on_interaction` 中按标准事件信封的 `payload["source"]["type"]` 区分事件，或直接使用 `event_from_interaction_payload(payload)` 转成稳定事件对象。
+Interaction Bot 运行时采用事件路由模型：普通 Bot 负责接收群消息、按钮回调和规则指令；UserBot/回复上下文与外部转账通知来源负责补充付款证据。新标准插件可以通过 `event_subscriptions` 自主订阅，并以 `all_allowed_chats` 接收账号允许范围内的事件，不要求先命中旧规则或存在活跃会话；平台仍会按 source、event、scope、filters 做匹配，不会无条件广播给所有插件。旧 `interaction_entries` / `on_interaction` 兼容路径才依赖规则匹配及相应会话上下文。
 
 交互入口是新增触发面，不是命令系统的替代品。插件原有 `commands`、`on_command`、`message_channels` 和 `on_message` 语义必须保持不变；任何新入口都不得让普通 incoming 消息绕过 UserBot outgoing 指令边界。需要复用能力时，把业务逻辑抽成共享函数，由 UserBot 命令和交互入口分别调用。
 
@@ -998,8 +1109,8 @@ userbot 会话里的 `reply_markup` 不会直接丢掉：
 | --- | --- | --- |
 | `payment_confirmed` | 转账通知命中规则 | 常用于付费开局 |
 | `keyword` | 插件启动关键词命中且无付费门槛 | 常用于免费开局 |
-| `message` | 规则已有活跃会话后的普通群消息 | 常用于答题、猜测、继续流程 |
-| `callback_query` | 规则已有活跃会话后的 inline keyboard 按钮点击 | 常用于按钮选择、翻页、确认操作 |
+| `message` | 自主订阅命中，或旧规则已有活跃会话后的普通群消息 | 常用于答题、猜测、继续流程 |
+| `callback_query` | 当前 Interaction Bot 收到的 inline keyboard 点击；可自主订阅，也可来自旧规则会话 | 常用于按钮选择、翻页、确认操作；不是 UserBot 主动点击第三方 Bot 按钮 |
 | `session_close` | 规则被关闭或会话被强制结束 | 插件可清理状态，第一版可按需实现 |
 
 #### interaction_entries 迁移字段
@@ -1208,7 +1319,8 @@ class GuessNumberPlugin(Plugin):
 | `edit_caption` | `parse_mode`、`reply_markup` | 可选；`parse_mode="html"` 时按 HTML 发送，`reply_markup` 只由 `interaction_bot` 原生承接 |
 | `delete_message` | `message_id` | 删除对应 Bot 通道可操作的消息 |
 | `pin_message` | `message_id` | 置顶对应 Bot 通道可操作的消息 |
-| `answer_callback` | `callback_query_id`、`text`、`show_alert` | 回应 inline keyboard 按钮回调 |
+| `click_callback_button` | `chat_id`、`message_id`、`row`、`column`、可选 `expected_bot_id` / `expected_button_text` | 仅 UserBot 执行链路；Interaction Bot 插件入口（包括 `ctx.messages.apply`）不支持。installed 插件需声明 `click_bot_button`。平台重新读取 callback data，只允许 callback 类型，并执行限流、审计、dry-run；明确成功后保护 20 秒，超时或结果未知时保护 5 分钟 |
+| `answer_callback` | `callback_query_id`、`text`、`show_alert` | ACK 当前 Interaction Bot 收到的 inline keyboard callback；不能点击第三方 Bot 按钮 |
 | `payout` | `amount`、`text`、`reply_to_message_id`、`reply_to_user_id`、`reply_to_display_name`、`reply_to_username`、`reply_to_search_limit`、`reply_anchor_missing_text` | UserBot 发奖动作；有消息 ID 时直接回复，否则可按用户 ID 查找近期发言作为锚点。公开名必须来自安全身份 facade，匿名管理员不传 username。超限拒（`error_code=payout_limit_exceeded`），瞬时失败自动进补偿队列重发，插件无需自己重试（见上文 payout 语义） |
 | `end_session` | 无 | 本次入口处理完成后不保留交互会话，适合彩票、红包等长期轮回插件 |
 
@@ -1252,7 +1364,7 @@ await ctx.messages.edit_caption(
 )
 ```
 
-推荐迁移路径：旧插件继续返回 `list[dict]` 标准动作可以兼容；新插件或重构插件优先调用 `ctx.messages.send/send_rich/send_photo/send_file/edit/edit_caption/delete/pin/answer_callback`。`ctx.messages` 只缓存动作，不会暴露 Bot Token，也不会直接调用 Telegram API。
+推荐迁移路径：旧插件继续返回 `list[dict]` 标准动作可以兼容；新插件或重构插件优先调用 `ctx.messages.send/send_rich/send_photo/send_file/edit/edit_caption/delete/pin/click_callback_button/answer_callback`。`ctx.messages` 只生成或提交标准动作，不会暴露 Bot Token、UserBot session 或 callback data。
 
 框架层源码位于 `backend/app/services/interaction/`：`contracts.py` 负责记录 `result_contract` 告警与旧通道失败，`delivery.py` 负责受控发送、编辑、删除、置顶、按钮 ACK、媒体发送和 message_id 保存。
 
@@ -1569,7 +1681,7 @@ identity = await ctx.identities.resolve_userbot(
 
 #### 标准动作输出
 
-交互入口或适配器应返回平台可执行的标准动作，或通过 `ctx.messages` 缓存这些动作，而不是直接调用 Telegram API。交互 Bot runtime 统一负责发送、回复、删除、置顶、按钮 ACK 与基础动作执行。需要跨消息保存业务状态时，插件应优先使用 `ctx.storage`；它会按账号和插件自动隔离命名空间。`ctx.redis` 当前会被注入，但属于低层兼容入口，新插件不要自行拼接 Redis key。需要 NX、CAS、锁或严格原子抢占时，`ctx.storage` 不提供这些语义，应交给平台会话/结算链路或官方受控低层实现。
+交互入口或适配器应返回平台可执行的标准动作，或通过 `ctx.messages` 缓存这些动作，而不是直接调用 Telegram API。交互 Bot runtime 统一负责发送、回复、删除、置顶、按钮 ACK 与基础动作执行。需要跨消息保存业务状态时，插件应优先使用 `ctx.storage`；它会按账号和插件自动隔离命名空间。安装插件的 `ctx.redis` 是 `PluginRedisFacade`，会自动添加同一命名空间并限制可调用方法，不要自行拼接完整 `plugin_store:` 前缀。需要 NX 时可使用 facade 已开放的 `set(..., nx=True, ex=...)`；CAS、Lua、pipeline、分布式锁或严格原子抢占不在公开能力内，应交给平台会话/结算链路或官方受控实现。
 
 ```json
 [
@@ -1809,9 +1921,20 @@ def is_outgoing(event) -> bool:
 
 ---
 
-## 8. Conversation 工具
+## 8. Conversation 工具（仅内部/真实客户端兼容）
 
-与其他 Bot 交互的工具类（如 @BotFather）：
+`Conversation` 的实现会在进入上下文时调用客户端的 `add_event_handler`，发送和点击时还会
+直接使用 TelegramClient/raw MTProto。它只适合 builtin 或其他明确持有真实
+`TelegramClient` 的内部兼容代码。
+
+普通安装插件的 `ctx.client` 是 `SandboxClient`：它不开放 `add_event_handler`，也会拒绝
+`GetBotCallbackAnswerRequest` 等 raw MTProto，因此不能把 `ctx.conversation()` 当作可靠的
+公开 API。`event.message.click(...)` 和 `message.buttons[row][column].click()` 都会被安全
+包装拒绝。普通安装插件点击第三方 Bot callback 必须改用
+`ctx.messages.click_callback_button(...)`；具体限制见
+[Inline 按钮的两种完全不同场景](#inline-按钮的两种完全不同场景)。
+
+以下示例仅用于真实客户端的内部兼容代码（如与 @BotFather 交互）：
 
 ```python
 async with ctx.conversation("@BotFather") as conv:
@@ -1832,6 +1955,8 @@ async with ctx.conversation("@BotFather") as conv:
 | `click_button(msg, row, col)` | 点击 inline keyboard |
 | `mark_read()` | 标记已读 |
 | `close()` | 清理 handler |
+
+> 不要把本节的 `click_button()` 复制到普通远程/本地安装插件；它不是安装插件 Contract。
 
 ### 超时处理
 
@@ -2417,7 +2542,7 @@ class DemoPlugin(Plugin):
 - callback 异常会写入插件日志，并保留任务等待下次 tick；不要把异常吞掉后静默失败
 - `ctx.scheduler` 注册的是运行期任务；worker 重启后会由插件 `on_startup` 重新注册，若需要精确保存 `last_fire` / `next_fire`，插件应把状态写回自己的配置或规则表
 - 如果任务依赖插件配置，配置变更后建议触发插件热重载，或在 callback 中读取最新 `ctx.config`
-- 第三方插件拿到的是 scheduler facade，不会直接获得 Redis / DB / userbot session
+- 第三方插件拿到的是 scheduler facade，不会直接获得 DB 或 userbot session；安装插件的 `ctx.redis` 是自动命名空间、方法受限的 `PluginRedisFacade`，不是原始 Redis client
 - GUI 定时任务页仍走 `Rule(feature_key="scheduler")`，由同一个 `PlatformScheduler` 调度；后续新增插件不要依赖 `SchedulerPlugin`，只依赖 `ctx.scheduler`
 
 ---
@@ -2467,6 +2592,10 @@ class DemoPlugin(Plugin):
 - [ ] 新 Telegram 交互插件是否声明了 `usage`、`event_subscriptions`、`capabilities`
 - [ ] 插件主入口是否读取标准事件信封，例如 `payload["message"]`、`payload["chat"]`、`payload["sender"]`、`payload["payment"]`
 - [ ] 发送、编辑、删除、置顶、按钮 ACK、Inline answer、结算是否通过 `ctx.messages` 或标准 action，而不是直接调用 live client
+- [ ] 是否区分 Interaction Bot callback ACK 和 UserBot 主动点击第三方 Bot 按钮；后者使用 `ctx.messages.click_callback_button(...)`，没有混用 `answer_callback`
+- [ ] legacy `on_message` 若需接收普通成员/第三方 Bot，是否同时设置 `message_channels={"incoming"}` 与 `owner_only=False`
+- [ ] 账号级“允许会话”留空是否按“全部会话”理解；有没有误套到插件自定义 `allowed_chat_ids=[]`
+- [ ] 自动点击第三方 Bot callback 是否声明 `click_bot_button`，并传入 `expected_bot_id`、`expected_button_text`；没有读取/传入 callback data，也没有尝试点击 URL 等非 callback 按钮
 - [ ] 日志页是否能用 `trace_id`、`plugin_key`、`reason_code` 查到订阅匹配、插件执行和动作结果
 - [ ] `permissions` 是否覆盖实际调用的方法
 - [ ] 如果保留旧管理员命令 hook，`on_command` 签名是否是 5 参数；不要把旧 hook 当作公共玩法的新入口

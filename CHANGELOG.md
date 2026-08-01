@@ -25,6 +25,32 @@
 
 ## [Unreleased]
 
+## [0.90.0-beta.1] - 2026-08-02 · minor（次版本预发布） · 插件受控识别与点击第三方 Bot 按钮
+
+### 新增
+
+- 为普通插件和 UserBot 插件增加正式的 `ctx.messages.click_callback_button(...)` 能力：插件只提交会话、消息和按钮行列，平台临近执行时重新读取 Telegram 消息与真实 callback data，并校验发送 Bot、按钮类型和可选按钮文字。
+- 标准事件信封新增安全的按钮布局投影，公开行列、文字和按钮类型；`tp_event.message.reply_markup` 提供 `ReplyMarkupRef` / `ButtonRef`，不暴露 callback data、URL、原始按钮对象或客户端。
+- 新增 `click_bot_button` 安装插件权限与前端中文标签；插件检查器可从 MessageOps 调用或标准 action 自动推导该高风险权限。
+
+### 安全
+
+- 安装插件的 legacy、命令和裸直通事件统一净化嵌套按钮，旧 `message.buttons[row][column].click()` 与 raw MTProto 穿透路径被阻断；Interaction Bot 插件入口及其 `ctx.messages.apply(...)` 不能绕过边界代点第三方按钮。
+- 点击动作在限流等待后再次读取并复核消息，发送前再次确认插件仍为同一活跃实例且权限未撤销；插件禁用、热重载、Redis 异常或重复请求均失败关闭。
+- 幂等锁按账号、消息和按钮位置覆盖跨插件并发：明确成功后保护 20 秒，Telegram 超时或结果未知时保守保护 5 分钟；callback answer 文本、URL 和可能包含 request 内容的异常原文不进入 Trace 或 ActionEvent。
+
+### 修复
+
+- 修复普通 Reply Keyboard 被标准事件错误标记为 Inline Keyboard 的问题，Bot API 与 Telethon 两种输入现在都会保留真实键盘类型。
+
+### 文档
+
+- 按实际运行时代码统一更新插件 API、快速开始、远程插件、安全、规则、速查表和开发指南，明确三条消息链路、允许会话留空、两种 Inline 按钮语义、各入口 MessageOps 能力以及裸直通的沙箱边界。
+
+### 测试
+
+- 新增标准按钮投影与防泄露、Reply Keyboard 类型、按钮权限、Interaction Bot 绕过、裸直通沙箱、限流后二次复核、插件关闭竞态、跨插件并发、未知结果幂等和插件检查器权限推导回归。
+
 ## [0.89.1-beta.1] - 2026-08-01 · patch（补丁预发布） · 修复插件自主按钮回调投递
 
 ### 修复

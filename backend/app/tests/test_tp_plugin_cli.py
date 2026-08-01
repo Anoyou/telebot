@@ -194,6 +194,58 @@ class DemoPlugin:
     assert "中风险" in out
 
 
+@pytest.mark.parametrize(
+    "plugin_body",
+    [
+        """
+from __future__ import annotations
+
+class DemoPlugin:
+    async def run(self, ctx):
+        await ctx.messages.click_callback_button(
+            chat_id=-100123,
+            message_id=7,
+            row=0,
+            column=0,
+        )
+""",
+        """
+from __future__ import annotations
+
+class DemoPlugin:
+    async def run(self, ctx):
+        return [{
+            "type": "click_callback_button",
+            "chat_id": -100123,
+            "message_id": 7,
+            "row": 0,
+            "column": 0,
+        }]
+""",
+    ],
+)
+def test_check_reports_missing_click_bot_button_permission(
+    tmp_path: Path,
+    capsys,
+    plugin_body: str,
+) -> None:
+    name = "demo_missing_click_bot_button"
+    plugin_dir = tmp_path / name
+    tp.scaffold_plugin(name, "command", plugin_dir)
+    (plugin_dir / "plugin.py").write_text(plugin_body.strip() + "\n", encoding="utf-8")
+
+    report = tp.check_plugin(plugin_dir)
+    assert "click_bot_button" in report.inferred_permissions
+    assert "click_bot_button" in report.missing_permissions
+
+    code = tp._cmd_check(SimpleNamespace(dir=plugin_dir))
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "permissions 声明漏了" in out
+    assert "click_bot_button" in out
+    assert "高风险" in out
+
+
 def test_check_infers_send_message_permission_for_rich_messages(tmp_path: Path) -> None:
     name = "demo_rich_message"
     plugin_dir = tmp_path / name

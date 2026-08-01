@@ -132,7 +132,7 @@ hello_ping/
   "category": "utility",
   "permissions": ["send_message"],
   "interaction_profile": "utility_trigger",
-  "usage": "安装并在账号上启用后，在已允许会话发送 ping，插件会回复 pong。",
+  "usage": "安装并在账号上启用后，在已允许会话发送 ping，插件会回复 pong。账号允许会话列表留空时表示全部会话。",
   "event_subscriptions": [
     {
       "events": ["message"],
@@ -172,7 +172,7 @@ MANIFEST = Manifest(
     version="0.1.0",
     author="examples",
     description="最小 Event Bus + MessageOps 入门示例。",
-    usage="安装并在账号上启用后，在已允许会话发送 ping，插件会回复 pong。",
+    usage="安装并在账号上启用后，在已允许会话发送 ping，插件会回复 pong。账号允许会话列表留空时表示全部会话。",
     category="utility",
     permissions=["send_message"],
     event_subscriptions=EVENT_SUBSCRIPTIONS,
@@ -231,7 +231,7 @@ __all__ = ["MANIFEST", "PLUGIN_CLASS"]
 1. 把插件目录放进远程插件仓库，或先放到本地示例目录验证。
 2. 在 Web 面板的“插件中心 → 安装插件”里添加仓库并安装。
 3. 安装后插件不会自动运行；回到插件中心，选择账号，启用 `Hello Ping`。
-4. 在该账号已允许会话里发送 `ping`。
+4. 在该账号已允许会话里发送 `ping`。账号级“允许会话”列表留空时表示全部会话；列表非空时才只允许名单内会话。
 5. 正常结果是一条 `pong` 回复；排障时去“日志中心 → 消息链路”查 Trace。
 
 本仓库已提供完整可运行的显式 Manifest 示例：[examples/plugins/hello_ping](../examples/plugins/hello_ping)。维护示例时运行：
@@ -243,6 +243,7 @@ backend/.venv/bin/python scripts/validate-plugin-examples.py
 ## 8. 下一步
 
 - 想看 message、command、callback、inline、payment 的完整写法：读 [event_bus_demo](../examples/plugins/event_bus_demo)。
+- 想处理按钮：先读 [Inline 按钮的两种完全不同场景](./PLUGIN-API-REFERENCE.md#inline-按钮的两种完全不同场景)，不要把 Interaction Bot 的 callback ACK 和 UserBot 主动点击第三方 Bot 按钮混为一谈。
 - 想调用外部 HTTP：读 [PLUGIN-HTTP.md](./PLUGIN-HTTP.md) 和 `examples/plugins/with_http`。
 - 想调用平台 LLM：读 [PLUGIN-AI.md](./PLUGIN-AI.md) 和 `examples/plugins/with_ai`。
 - 写任何真实插件前，先读 [插件开发铁律](./PLUGIN-RULES.md)。

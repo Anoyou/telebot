@@ -55,6 +55,7 @@ _PERMISSION_RISK: dict[str, tuple[str, str]] = {
     "external_http": ("中风险", "访问外部 HTTP"),
     "edit_message": ("中风险", "编辑消息"),
     "delete_message": ("中风险", "删除消息"),
+    "click_bot_button": ("高风险", "以 UserBot 身份点击第三方 Bot callback 按钮，必须显式声明并限制目标"),
     "payout": ("高风险", "发起派奖/付款，必须显式声明并强确认用途"),
     "modify_identity": ("高风险", "修改身份信息，必须显式声明并强确认用途"),
 }
@@ -67,6 +68,7 @@ _CTX_MESSAGE_METHOD_PERMISSIONS = {
     "history": "read_chat",
     "edit": "edit_message",
     "delete": "delete_message",
+    "click_callback_button": "click_bot_button",
     "payout": "payout",
 }
 _ACTION_TYPE_PERMISSIONS = {
@@ -77,6 +79,7 @@ _ACTION_TYPE_PERMISSIONS = {
     "edit_message": "edit_message",
     "edit_caption": "edit_message",
     "delete_message": "delete_message",
+    "click_callback_button": "click_bot_button",
     "payout": "payout",
 }
 

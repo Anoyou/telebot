@@ -21,6 +21,21 @@ class ActorRef:
 
 
 @dataclass(slots=True)
+class ButtonRef:
+    row: int = 0
+    column: int = 0
+    text: str = ""
+    kind: str = "text"
+
+
+@dataclass(slots=True)
+class ReplyMarkupRef:
+    type: str = "reply_markup"
+    button_count: int = 0
+    buttons: list[ButtonRef] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class MessageRef:
     chat_id: int | None = None
     message_id: int | None = None
@@ -37,6 +52,7 @@ class MessageRef:
     reply_to_message_id: int | None = None
     reply_to_text: str | None = None
     rich_message: dict[str, Any] | None = None
+    reply_markup: ReplyMarkupRef | None = None
     text_source: str = "message"
 
 
@@ -124,6 +140,7 @@ def event_from_interaction_payload(payload: dict[str, Any]) -> TelePilotEvent:
         ),
         reply_to_text=str(reply_to.get("text") or data.get("reply_to_text") or "") or None,
         rich_message=_dict_or_none(message_raw.get("rich_message")),
+        reply_markup=_reply_markup_ref(message_raw.get("reply_markup")),
         text_source=str(message_raw.get("text_source") or "message"),
     )
     sender = _actor_from_payload(sender_raw, data)
@@ -244,15 +261,42 @@ def _entity_list(value: Any) -> list[dict[str, Any]]:
     return out
 
 
+def _reply_markup_ref(value: Any) -> ReplyMarkupRef | None:
+    if not isinstance(value, dict):
+        return None
+    raw_buttons = value.get("buttons")
+    if not isinstance(raw_buttons, list):
+        return None
+    buttons: list[ButtonRef] = []
+    for raw in raw_buttons:
+        if not isinstance(raw, dict):
+            continue
+        buttons.append(
+            ButtonRef(
+                row=_int_or_none(raw.get("row")) or 0,
+                column=_int_or_none(raw.get("column") if raw.get("column") is not None else raw.get("col")) or 0,
+                text=str(raw.get("text") or ""),
+                kind=str(raw.get("kind") or "text"),
+            )
+        )
+    return ReplyMarkupRef(
+        type=str(value.get("type") or "reply_markup"),
+        button_count=_int_or_none(value.get("button_count")) or len(buttons),
+        buttons=buttons,
+    )
+
+
 def _payload_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in payload.items() if key != TP_EVENT_PAYLOAD_KEY}
 
 
 __all__ = [
     "ActorRef",
+    "ButtonRef",
     "CallbackRef",
     "MessageRef",
     "PaymentRef",
+    "ReplyMarkupRef",
     "SessionRef",
     "TelePilotEvent",
     "TP_EVENT_PAYLOAD_KEY",

@@ -11,6 +11,7 @@ from app.services.event_bus import (
     EVENT_TRACE_STATUSES,
     SUPPORTED_FILTER_KEYS,
     VALID_EVENT_TYPES,
+    _reply_markup_summary,
     dispatch_event,
     normalize_bot_update,
     normalize_event_subscription,
@@ -235,7 +236,97 @@ def test_normalize_bot_update_projects_developer_message_summary() -> None:
     assert event["message"]["chat"]["title"] == "Demo"
     assert event["raw"]["chat"]["title"] == "Demo"
     assert event["raw"]["media"]["file_name"] == "demo.txt"
-    assert event["raw"]["reply_markup"]["buttons"][0]["callback_data"] == "demo:start"
+    button = event["raw"]["reply_markup"]["buttons"][0]
+    assert button == {
+        "row": 0,
+        "col": 0,
+        "column": 0,
+        "text": "开始",
+        "kind": "callback",
+    }
+    assert "callback_data" not in button
+    assert "url" not in button
+
+
+def test_normalize_bot_update_does_not_expose_inline_button_url() -> None:
+    event = normalize_bot_update(
+        1,
+        {
+            "update_id": 44,
+            "message": {
+                "message_id": 10,
+                "text": "请选择",
+                "chat": {"id": -100, "type": "supergroup"},
+                "from": {"id": 1001, "first_name": "Alice"},
+                "reply_markup": {
+                    "inline_keyboard": [
+                        [{"text": "登录", "url": "https://example.test/login?token=secret"}]
+                    ]
+                },
+            },
+        },
+    )
+
+    button = event["message"]["reply_markup"]["buttons"][0]
+    assert button == {
+        "row": 0,
+        "col": 0,
+        "column": 0,
+        "text": "登录",
+        "kind": "url",
+    }
+    assert event["raw"]["reply_markup"]["buttons"][0] == button
+    assert "url" not in button
+
+
+def test_normalize_bot_update_preserves_reply_keyboard_type() -> None:
+    event = normalize_bot_update(
+        1,
+        {
+            "update_id": 440,
+            "message": {
+                "message_id": 10,
+                "text": "请选择",
+                "chat": {"id": -100, "type": "supergroup"},
+                "from": {"id": 1001, "first_name": "Alice"},
+                "reply_markup": {"keyboard": [[{"text": "同意"}]]},
+            },
+        },
+    )
+
+    markup = event["message"]["reply_markup"]
+    assert markup["type"] == "reply_keyboard"
+    assert markup["buttons"][0]["kind"] == "text"
+
+
+@pytest.mark.parametrize(
+    ("native_type", "expected_type"),
+    [
+        ("ReplyInlineMarkup", "inline_keyboard"),
+        ("ReplyKeyboardMarkup", "reply_keyboard"),
+    ],
+)
+def test_telethon_reply_markup_projection_preserves_keyboard_type(
+    native_type: str,
+    expected_type: str,
+) -> None:
+    markup = _reply_markup_summary(
+        {
+            "_": native_type,
+            "rows": [
+                {
+                    "buttons": [
+                        {"_": "KeyboardButtonCallback", "text": "确认", "data": b"secret"}
+                    ]
+                }
+            ],
+        }
+    )
+
+    assert markup is not None
+    assert markup["type"] == expected_type
+    assert markup["buttons"][0]["kind"] == "callback"
+    assert "data" not in markup["buttons"][0]
 
 
 def test_normalize_bot_update_projects_edited_message_event() -> None:

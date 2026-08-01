@@ -131,6 +131,14 @@ async def test_click_button_index_out_of_range():
     with pytest.raises(IndexError, match="越界"):
         await conv.click_button(msg, 0, 0)
 
+    row = MagicMock()
+    row.buttons = [MagicMock()]
+    markup.rows = [row]
+    with pytest.raises(IndexError, match="越界"):
+        await conv.click_button(msg, -1, 0)
+    with pytest.raises(IndexError, match="越界"):
+        await conv.click_button(msg, 0, -1)
+
 
 @pytest.mark.asyncio
 async def test_setup_registers_handler():

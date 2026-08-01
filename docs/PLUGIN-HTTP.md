@@ -9,8 +9,9 @@ HTTP 插件通常会用到 `ctx.http`、`ctx.storage`、`ctx.data_dir`、`ctx.lo
 需要安全展示群成员身份时使用 `ctx.identities`。不要在本页复制完整 dataclass，避免字段随运行时扩展后产生两份不同的参考。
 
 核心平台兼容代码可能拿到完整运行时能力；远程、本地和插件库安装型插件拿到的是受控上下文。
-`ctx.client` 是平台提供的客户端 facade，`ctx.redis` 是低层兼容入口。新插件需要持久化普通状态时优先使用
-`ctx.storage`，文件型数据写入 `ctx.data_dir`，不要自行拼 Redis key，也不要把运行数据写进插件代码目录。
+`ctx.client` 是平台提供的客户端 facade；安装插件的 `ctx.redis` 是自动添加账号 + 插件命名空间、
+方法受限的 `PluginRedisFacade`，不是原始 Redis client。新插件需要持久化普通状态时优先使用
+`ctx.storage`，文件型数据写入 `ctx.data_dir`，不要自行拼完整 `plugin_store:` 前缀，也不要把运行数据写进插件代码目录。
 
 ### 4.0 受控 facade：ctx.http 与 ctx.ai
 

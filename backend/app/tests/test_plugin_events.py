@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from app.worker.plugins.events import (
     TP_EVENT_PAYLOAD_KEY,
+    ButtonRef,
+    ReplyMarkupRef,
     TelePilotEvent,
     attach_tp_event,
     event_from_interaction_payload,
@@ -158,6 +160,56 @@ def test_attach_tp_event_and_ipc_rebuild_produce_equal_projection() -> None:
 
     assert isinstance(direct_event, TelePilotEvent)
     assert direct_event == rebuilt_event
+
+
+def test_event_from_interaction_payload_projects_safe_button_references() -> None:
+    event = event_from_interaction_payload(
+        {
+            "source": {
+                "type": "callback_query",
+                "channel": "interaction_bot",
+                "callback_query_id": "cb-safe",
+                "callback_data": "answer:1",
+            },
+            "message": {
+                "chat_id": -100123,
+                "message_id": 88,
+                "text": "请选择",
+                "reply_markup": {
+                    "type": "inline_keyboard",
+                    "button_count": 2,
+                    "buttons": [
+                        {
+                            "row": 0,
+                            "col": 0,
+                            "column": 0,
+                            "text": "确认",
+                            "kind": "callback",
+                            "callback_data": "must-not-project",
+                        },
+                        {
+                            "row": 0,
+                            "column": 1,
+                            "text": "登录",
+                            "kind": "url",
+                            "url": "https://example.test/login?token=secret",
+                        },
+                    ],
+                },
+            },
+        }
+    )
+
+    assert isinstance(event.message.reply_markup, ReplyMarkupRef)
+    assert event.message.reply_markup.button_count == 2
+    assert event.message.reply_markup.buttons == [
+        ButtonRef(row=0, column=0, text="确认", kind="callback"),
+        ButtonRef(row=0, column=1, text="登录", kind="url"),
+    ]
+    assert not hasattr(event.message.reply_markup.buttons[0], "callback_data")
+    assert not hasattr(event.message.reply_markup.buttons[1], "url")
+    assert event.callback is not None
+    assert event.callback.data == "answer:1"
 
 
 def test_event_from_interaction_payload_projects_synthetic_callback_semantics() -> None:
