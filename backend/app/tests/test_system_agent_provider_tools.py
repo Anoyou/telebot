@@ -55,7 +55,7 @@ def test_probe_and_add_tool_is_a_confirmed_write_with_encrypted_secret() -> None
 
     spec = next(item for item in registry.list_all() if item.name == "providers.probe_and_add")
     assert spec.read_only is False
-    assert spec.secret_argument_names == ("api_key", "request_headers")
+    assert spec.secret_argument_names == ("api_key",)
     assert spec.allow_secret_input is False
     assert spec.preview_handler is probe_and_add_preview
     assert spec.execute_handler is not None
@@ -78,7 +78,7 @@ def test_probe_and_add_tool_is_a_confirmed_write_with_encrypted_secret() -> None
 )
 @pytest.mark.asyncio
 async def test_provider_tools_reject_undeclared_request_headers_at_runtime(handler) -> None:
-    with pytest.raises(ValueError, match="不能通过 System Agent"):
+    with pytest.raises(ValueError, match="本地安全策略拒绝，尚未向上游发起请求"):
         await handler(
             None,
             {

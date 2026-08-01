@@ -9,6 +9,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...crypto import decrypt_str
 from ...db.models.command import LLMProvider
+from ...llm_probe_defaults import (
+    QUICK_VERIFY_MAX_TOKENS,
+    QUICK_VERIFY_MESSAGE,
+    QUICK_VERIFY_SYSTEM_PROMPT,
+)
 from ...services import llm_quick_verify
 from ...services.llm_request_headers import decrypt_request_headers
 from .registry import ActionKeepPendingError
@@ -95,9 +100,9 @@ async def run_quick_verify(
         proxy_url=proxy_url,
         model=model,
         reasoning_effort=None,
-        system_prompt="You are a connectivity probe. Reply with a short OK.",
-        message="ping",
-        max_tokens=32,
+        system_prompt=QUICK_VERIFY_SYSTEM_PROMPT,
+        message=QUICK_VERIFY_MESSAGE,
+        max_tokens=QUICK_VERIFY_MAX_TOKENS,
         timeout_seconds=timeout_seconds,
     ):
         if not isinstance(event, dict):

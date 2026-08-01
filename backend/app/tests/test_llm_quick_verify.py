@@ -10,6 +10,11 @@ from fastapi import HTTPException
 
 from app.api import commands as commands_api
 from app.crypto import decrypt_str
+from app.llm_probe_defaults import (
+    QUICK_VERIFY_MAX_TOKENS,
+    QUICK_VERIFY_MESSAGE,
+    QUICK_VERIFY_SYSTEM_PROMPT,
+)
 from app.schemas.command import FetchModelsPreviewRequest, QuickVerifyProviderRequest
 from app.services import llm_quick_verify
 from app.services.llm_client import LLMError, LLMResult, LLMStreamChunk
@@ -361,6 +366,9 @@ def test_quick_verify_request_strips_values_and_rejects_blank_required_fields() 
     assert payload.api_key == "sk-test"
     assert payload.model == "gpt-5"
     assert payload.reasoning_effort == "max"
+    assert payload.system_prompt == QUICK_VERIFY_SYSTEM_PROMPT
+    assert payload.message == QUICK_VERIFY_MESSAGE
+    assert payload.max_tokens == QUICK_VERIFY_MAX_TOKENS
 
     with pytest.raises(ValueError):
         QuickVerifyProviderRequest(base_url="   ")

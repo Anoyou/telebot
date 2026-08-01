@@ -135,3 +135,19 @@ def test_chat_secret_replaces_model_redacted_placeholder() -> None:
     assert "api_key" not in public
     assert secrets == {"api_key": "sk-abcdefghijklmnopqrstuvwxyz123456"}
     assert fields == ["api_key"]
+
+
+def test_chat_secret_does_not_fill_another_secret_when_one_is_already_present() -> None:
+    public, secrets, fields = merge_secret_into_arguments(
+        {
+            "base_url": "https://api.example/v1",
+            "api_key": "sk-already-present-secret-value",
+        },
+        secret_names=("api_key", "request_headers"),
+        chat_secrets=["sk-already-present-secret-value"],
+    )
+
+    assert public["has_api_key"] is True
+    assert public.get("has_request_headers") is not True
+    assert secrets == {"api_key": "sk-already-present-secret-value"}
+    assert fields == ["api_key"]

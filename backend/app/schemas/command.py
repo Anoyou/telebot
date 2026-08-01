@@ -28,6 +28,11 @@ from ..db.models.command import (
     LLM_PROTOCOL_PROFILE_STANDARD,
     LLM_WEB_SEARCH_API_FORMAT_AUTO,
 )
+from ..llm_probe_defaults import (
+    QUICK_VERIFY_MAX_TOKENS,
+    QUICK_VERIFY_MESSAGE,
+    QUICK_VERIFY_SYSTEM_PROMPT,
+)
 
 # ── 命令名校验正则：与 worker/command.py 中的 \w+ 派发兼容 ─────
 _COMMAND_NAME_RE = re.compile(r"^[a-zA-Z0-9_]{1,64}$")
@@ -626,16 +631,16 @@ class QuickVerifyProviderRequest(BaseModel):
     proxy_id: int | None = Field(default=None, ge=1)
     request_headers: list[LLMRequestHeaderInput] = Field(default_factory=list)
     system_prompt: str = Field(
-        default="你是一个自然、简洁的中文聊天助手。请像真实聊天一样直接回复用户，不要只返回 ping/pong。",
+        default=QUICK_VERIFY_SYSTEM_PROMPT,
         min_length=1,
         max_length=2000,
     )
     message: str = Field(
-        default="你怎么又不行了？继续。",
+        default=QUICK_VERIFY_MESSAGE,
         min_length=1,
         max_length=2000,
     )
-    max_tokens: int = Field(default=400, ge=64, le=2000)
+    max_tokens: int = Field(default=QUICK_VERIFY_MAX_TOKENS, ge=64, le=2000)
     timeout_seconds: int = Field(default=90, ge=10, le=180)
 
     @field_validator("base_url", "system_prompt", "message")

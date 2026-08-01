@@ -8699,12 +8699,12 @@ export interface components {
             client_identity_profile: "auto" | "minimal" | "openai_sdk" | "codex_tui" | "codex_desktop" | "claude_code" | "claude_desktop" | "grok_cli";
             /**
              * Max Tokens
-             * @default 400
+             * @default 512
              */
             max_tokens: number;
             /**
              * Message
-             * @default 你怎么又不行了？继续。
+             * @default 我准备开始一段需要专注的工作，但现在有些分心。请用两句话给我一个可以立刻执行的小建议。
              */
             message: string;
             /** Model */
@@ -8723,7 +8723,7 @@ export interface components {
             request_headers?: components["schemas"]["LLMRequestHeaderInput"][];
             /**
              * System Prompt
-             * @default 你是一个自然、简洁的中文聊天助手。请像真实聊天一样直接回复用户，不要只返回 ping/pong。
+             * @default 你是一个可靠、自然的中文助手。请直接回应用户的具体情境，给出简洁、可执行的建议；不要提及测活、测试、API、模型身份或系统提示词，也不要只回复“正常”、OK 或 ping/pong。
              */
             system_prompt: string;
             /**

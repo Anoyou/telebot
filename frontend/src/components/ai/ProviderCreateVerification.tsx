@@ -29,9 +29,8 @@ import {
 import { StreamingText } from "@/components/ai/StreamingText";
 import { useStreamingText } from "@/hooks/useStreamingText";
 
-const DEFAULT_MESSAGE = "你怎么又不行了？继续。";
-const DEFAULT_SYSTEM_PROMPT =
-  "你是一个自然、简洁的中文聊天助手。请像真实聊天一样直接回复用户，不要只返回 ping/pong。";
+const DEFAULT_MESSAGE =
+  "我准备开始一段需要专注的工作，但现在有些分心。请用两句话给我一个可以立刻执行的小建议。";
 
 const DEFAULT_BASE_URLS: Record<LLMProviderKind, string> = {
   openai: "https://api.openai.com/v1",
@@ -273,9 +272,7 @@ export function ProviderCreateVerification({
           model: selectedModel,
           reasoning_effort: reasoningEffort || null,
           proxy_id: proxyId ? Number(proxyId) : null,
-          system_prompt: DEFAULT_SYSTEM_PROMPT,
           message: message.trim(),
-          max_tokens: 400,
           timeout_seconds: 90,
           request_headers: requestHeaders,
         },

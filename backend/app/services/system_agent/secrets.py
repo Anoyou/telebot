@@ -163,16 +163,29 @@ def merge_secret_into_arguments(
 ) -> tuple[dict[str, Any], dict[str, Any], list[str]]:
     """合并工具参数中的密钥与聊天提取的密钥。
 
-    若 arguments 缺少 secret 字段或只有掩码占位符，使用当前聊天提取到的真实密钥。
+    若敏感字段均为空或只有掩码占位符，使用当前聊天提取到的真实密钥；
+    已有任一真实值时不再跨字段补注入。
     """
 
     args = dict(arguments or {})
     secrets_list = list(chat_secrets or [])
     if secrets_list and secret_names:
-        for name in secret_names:
-            if args.get(name) in (None, "") or _is_secret_placeholder(args.get(name)):
-                args[name] = secrets_list[0]
-                break
+        # 聊天抽取结果没有可靠的字段归属信息：优先替换模型明确给出的脱敏占位符；
+        # 仅当所有敏感字段都为空时，才回填约定中的第一个字段。若已有任一真实值，
+        # 继续把同一密钥塞入另一个缺失字段会把 API Key 误当成请求头、Token 等。
+        has_concrete_secret = any(
+            args.get(name) not in (None, "")
+            and not _is_secret_placeholder(args.get(name))
+            for name in secret_names
+        )
+        target_name = None
+        if not has_concrete_secret:
+            target_name = next(
+                (name for name in secret_names if _is_secret_placeholder(args.get(name))),
+                secret_names[0],
+            )
+        if target_name is not None:
+            args[target_name] = secrets_list[0]
     return split_secret_arguments(args, secret_names)
 
 
