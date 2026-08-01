@@ -5592,18 +5592,6 @@ async def _try_handle_event_bus_subscriptions(
         if not decision.matched:
             continue
         entry_key = str(decision.entry_key or "").strip()
-        if not entry_key:
-            all_ok = False
-            await record_span(
-                trace_log_context(incoming.trace_id),
-                "plugin_invoke",
-                TRACE_STATUS_SKIPPED,
-                component="event_bus",
-                plugin_key=decision.plugin_key,
-                reason_code="entry_key_missing",
-                message="Event Bus 订阅缺少 entry_key，无法投递给插件入口。",
-            )
-            continue
         await _maybe_fast_ack_callback(incoming, decision.plugin_key, entry_key)
         payload = _event_bus_plugin_payload(incoming, event, decision)
         ok, error, actions = await _run_worker_interaction_entry(
@@ -5920,8 +5908,11 @@ async def _event_bus_account_state(db: Any, incoming: Incoming, cfg: dict[str, A
     owner_ids, known_user_ids = await _event_bus_cached_known_user_ids(db, incoming.account_id)
     active_participant_ids = await _event_bus_active_session_participant_ids(incoming, cfg)
     known_user_ids.update(active_participant_ids)
+    allowed_chat_ids = _interaction_allowed_chat_ids(cfg)
     return {
-        "allowed_chat_ids": _interaction_allowed_chat_ids(cfg),
+        # 交互 Bot 与 UserBot 使用同一范围语义：允许会话留空表示全部，
+        # 只有显式配置会话列表时才按 chat_id 收窄。
+        "allowed_chat_ids": allowed_chat_ids or "*",
         "owner_user_ids": owner_ids,
         "known_user_ids": sorted(known_user_ids),
     }

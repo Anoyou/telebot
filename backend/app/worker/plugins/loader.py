@@ -8429,23 +8429,31 @@ async def invoke_interaction_entry(
     default_send_via: list[str] | None = None,
     deadline_at_ms: int | None = None,
 ) -> list[dict[str, Any]]:
-    """调用已加载插件的交互 Bot 入口，返回平台标准动作。"""
+    """调用已加载插件的 Interaction Bot 事件或旧交互入口。"""
 
     state = _STATES.get(account_id)
     if state is None:
         raise RuntimeError("账号 worker 尚未运行")
     plugin_key = str(plugin_key or "").strip()
     entry_key = str(entry_key or "").strip()
-    if not plugin_key or not entry_key:
-        raise ValueError("缺少 plugin_key 或 entry_key")
+    if not plugin_key:
+        raise ValueError("缺少 plugin_key")
     inst = state.instances.get(plugin_key)
     ctx = state.contexts.get(plugin_key)
     if inst is None or ctx is None:
         raise RuntimeError(f"模块未加载或未启用：{plugin_key}")
 
+    raw_payload = dict(payload or {})
+    trigger = raw_payload.get("trigger") if isinstance(raw_payload.get("trigger"), dict) else {}
+    is_event_subscription = str(trigger.get("dispatch_mode") or "").strip() == "event_subscription"
+    has_event_handler = _plugin_overrides(inst, "on_event")
+    has_interaction_handler = _plugin_overrides(inst, "on_interaction")
+    if not entry_key and not (is_event_subscription and has_event_handler):
+        raise ValueError("Event Bus 订阅缺少 entry_key，且插件未实现 on_event")
+
     base_log = ctx.log
     base_client = ctx.client
-    trace_id = str((payload or {}).get("trace_id") or "").strip()
+    trace_id = str(raw_payload.get("trace_id") or "").strip()
     buffered_messages = _InteractionEntryMessageOps(
         state,
         plugin_key=plugin_key,
@@ -8472,9 +8480,13 @@ async def invoke_interaction_entry(
 
         call_log = _trace_log
     call_ctx = replace(ctx, messages=buffered_messages, client=call_client, log=call_log)
-    plugin_payload = attach_tp_event(dict(payload or {}))
+    plugin_payload = attach_tp_event(raw_payload)
 
     async def _call_handler() -> Any:
+        if is_event_subscription and has_event_handler:
+            return await inst.on_event(call_ctx, plugin_payload)
+        if not has_interaction_handler:
+            raise RuntimeError(f"模块尚未实现交互入口：{plugin_key}.{entry_key}")
         return await inst.on_interaction(call_ctx, entry_key, plugin_payload)
 
     actions = await _invoke_plugin_with_resilience(
@@ -8483,7 +8495,7 @@ async def invoke_interaction_entry(
         _call_handler,
         deadline_at_ms=deadline_at_ms,
     )
-    if actions is None and not buffered_messages.actions:
+    if actions is None and not buffered_messages.actions and not (is_event_subscription and has_event_handler):
         raise RuntimeError(f"模块尚未实现交互入口：{plugin_key}.{entry_key}")
     if actions is None:
         actions = []

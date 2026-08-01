@@ -559,7 +559,7 @@ Telegram 来源
   "usage": "启用后按 Event Bus 订阅处理 message/command/callback/inline/payment。",
   "event_subscriptions": [
     {"events": ["message", "command"], "source": ["userbot", "interaction_bot"], "scope": "all_allowed_chats"},
-    {"events": ["callback_query"], "source": ["interaction_bot"], "scope": "rule_bound"},
+    {"events": ["callback_query"], "source": ["interaction_bot"], "scope": "all_allowed_chats"},
     {"events": ["inline_query", "chosen_inline_result"], "source": ["interaction_bot"], "scope": "inline_all"},
     {"events": ["payment_confirmed"], "source": ["external_payment_notice", "userbot"], "scope": "rule_bound"}
   ],
@@ -573,6 +573,14 @@ Telegram 来源
 ```
 
 `usage` 必须让开发者和安装者不用理解旧规则也能知道插件怎么启用。`event_subscriptions` 描述 Event Bus 投递范围；`capabilities` 描述高风险能力，没有高风险能力也建议显式写 `{}`。这组契约服务于标准会话链路，不是裸直通，也不是独立于三模式之外的第四种模式。
+
+自主发送的 Inline Keyboard 按钮不依赖交互 Bot 触发规则或活跃会话。插件只需订阅
+`source=["interaction_bot"]`、`events=["callback_query"]`、`scope="all_allowed_chats"`，
+并在 `on_event(ctx, payload)` 中处理回调；允许会话留空时，`all_allowed_chats`
+表示全部会话。只有确实依附某条旧交互规则的按钮才使用 `rule_bound`。
+新标准 `on_event` 订阅不要求 `entry_key`；`entry_key` 仅在需要回落到旧
+`on_interaction(ctx, entry_key, payload)` 入口时必填。按钮必须由当前 Interaction
+Bot 发送，Telegram 才会把点击更新投递给该 Bot。
 
 `strict_trace` 是布尔字段，默认 `false`。开启后，插件声明的路由投递层会更积极保留全链路 trace，便于复盘订阅匹配、插件执行、动作投递和失败原因；动作层 `record_action` 不受这个开关影响。涉及资金、发奖、`payout`、补偿重放或对账的插件建议设为 `true`，普通查询/娱乐插件可保持默认。
 
@@ -911,7 +919,7 @@ userbot 会话里的 `reply_markup` 不会直接丢掉：
 | `subscription_not_matched` / `event_type_not_subscribed` / `source_not_subscribed` | 没有订阅命中、事件类型未订阅或来源未订阅 |
 | `scope_not_matched` / `filter_not_matched` | 允许会话、owner_only、inline_all 等范围不匹配，或关键词、金额、callback data 等过滤不匹配 |
 | `plugin_disabled` / `plugin_load_failed` / `plugin_runtime_error` | 插件未启用、加载失败或运行异常 |
-| `entry_key_missing` | 订阅缺少可投递的插件入口 |
+| `entry_key_missing` | 订阅未声明 `entry_key`，且插件也没有实现标准 `on_event` 入口 |
 | `command_matched` / `command_not_matched` / `command_unauthorized` | 管理员命令命中、普通文本未命中命令、权限不足 |
 | `event_bus_delivery_disabled` / `inline_disabled` | 运维回滚开关关闭 Event Bus 新投递路径或 Inline updates |
 | `native_raw_not_allowed` / `native_raw_skipped` | 插件未声明 `telegram_native_raw` 或本次因来源、大小、设置未下发 |

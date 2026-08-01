@@ -13,7 +13,7 @@ EVENT_SUBSCRIPTIONS = [
     {
         "events": ["callback_query"],
         "source": ["interaction_bot"],
-        "scope": "rule_bound",
+        "scope": "all_allowed_chats",
     },
     {
         "events": ["inline_query", "chosen_inline_result"],
