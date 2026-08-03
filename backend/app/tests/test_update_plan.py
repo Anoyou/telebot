@@ -173,7 +173,7 @@ def test_build_plan_treats_version_only_pyproject_change_as_file_sync(tmp_path: 
     assert plan.rebuild_services == []
 
 
-def test_build_plan_treats_release_metadata_as_backend_file_sync_only(tmp_path: Path) -> None:
+def test_build_plan_rebuilds_frontend_for_release_metadata(tmp_path: Path) -> None:
     root = tmp_path / "repo"
     (root / "backend" / "app").mkdir(parents=True)
     (root / "frontend" / "src" / "lib").mkdir(parents=True)
@@ -216,10 +216,10 @@ def test_build_plan_treats_release_metadata_as_backend_file_sync_only(tmp_path: 
 
     plan = build_update_plan(root, old, new)
 
-    assert plan.components == ["backend"]
-    assert plan.services == ["web"]
+    assert plan.components == ["backend", "frontend"]
+    assert plan.services == ["web", "frontend"]
     assert plan.file_sync_services == ["web"]
-    assert plan.rebuild_services == []
+    assert plan.rebuild_services == ["frontend"]
 
 
 def test_all_runtime_plugin_docs_and_changelog_are_docs_only() -> None:

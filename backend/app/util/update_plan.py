@@ -10,7 +10,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import subprocess
 import tempfile
 from dataclasses import asdict, dataclass
@@ -107,8 +106,6 @@ def classify_changed_files(
     compose_changed_services: set[str] | None = None,
     compose_inspection_failed: bool = False,
     backend_dependencies_changed: bool | None = None,
-    frontend_package_runtime_changed: bool | None = None,
-    frontend_version_runtime_changed: bool | None = None,
 ) -> UpdatePlan:
     files = [_normalize(path) for path in changed_files if path.strip()]
     if not files:
@@ -183,15 +180,6 @@ def classify_changed_files(
                 # 直接分类时缺少新旧内容，默认按依赖变化处理；build_update_plan
                 # 会解析 project.dependencies，把纯版本号变化降为文件同步。
                 require_rebuild("web")
-            continue
-
-        if path == "frontend/src/lib/version.ts" and frontend_version_runtime_changed is False:
-            # 只有 APP_VERSION / APP_STAGE 值变化时才是纯发布元数据；无法读取
-            # 新旧内容或文件还有其他改动时，继续保守地重建前端。
-            continue
-
-        if path == "frontend/package.json" and frontend_package_runtime_changed is False:
-            # package.json 只有 version 字段变化时无需重新编译前端。
             continue
 
         if path.startswith("deploy/") or path.startswith("scripts/"):
@@ -312,42 +300,6 @@ def _backend_dependencies_changed(root: Path, old_revision: str, new_revision: s
         return True
 
 
-def _frontend_package_runtime_changed(root: Path, old_revision: str, new_revision: str) -> bool:
-    try:
-        old_data = json.loads(_git_show(root, old_revision, "frontend/package.json"))
-        new_data = json.loads(_git_show(root, new_revision, "frontend/package.json"))
-        if not isinstance(old_data, dict) or not isinstance(new_data, dict):
-            return True
-        old_data.pop("version", None)
-        new_data.pop("version", None)
-        return old_data != new_data
-    except (RuntimeError, json.JSONDecodeError):
-        return True
-
-
-def _frontend_version_runtime_changed(root: Path, old_revision: str, new_revision: str) -> bool:
-    def without_release_values(source: str) -> str:
-        source = re.sub(
-            r'^(export const APP_VERSION\s*=\s*)["\'][^"\']*["\']\s*;',
-            r'\1"<release-version>";',
-            source,
-            flags=re.MULTILINE,
-        )
-        return re.sub(
-            r'^(export const APP_STAGE[^=]*=\s*).+?\s*;',
-            r'\1null;',
-            source,
-            flags=re.MULTILINE,
-        )
-
-    try:
-        old_source = _git_show(root, old_revision, "frontend/src/lib/version.ts")
-        new_source = _git_show(root, new_revision, "frontend/src/lib/version.ts")
-        return without_release_values(old_source) != without_release_values(new_source)
-    except RuntimeError:
-        return True
-
-
 def _compose_config(root: Path, revision: str) -> dict[str, Any]:
     content = _git_show(root, revision, "docker-compose.yml")
     with tempfile.NamedTemporaryFile("w", suffix=".yml", encoding="utf-8", delete=False) as handle:
@@ -418,25 +370,11 @@ def build_update_plan(root: Path, old_revision: str, new_revision: str) -> Updat
             root, old_revision, new_revision
         )
 
-    frontend_package_runtime_changed: bool | None = None
-    if "frontend/package.json" in changed_files:
-        frontend_package_runtime_changed = _frontend_package_runtime_changed(
-            root, old_revision, new_revision
-        )
-
-    frontend_version_runtime_changed: bool | None = None
-    if "frontend/src/lib/version.ts" in changed_files:
-        frontend_version_runtime_changed = _frontend_version_runtime_changed(
-            root, old_revision, new_revision
-        )
-
     return classify_changed_files(
         changed_files,
         compose_changed_services=compose_services,
         compose_inspection_failed=compose_failed,
         backend_dependencies_changed=backend_dependencies_changed,
-        frontend_package_runtime_changed=frontend_package_runtime_changed,
-        frontend_version_runtime_changed=frontend_version_runtime_changed,
     )
 
 
