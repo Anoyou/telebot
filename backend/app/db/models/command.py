@@ -73,6 +73,13 @@ ALL_LLM_API_FORMATS = {
     LLM_API_FORMAT_ANTHROPIC_MESSAGES,
 }
 
+LLM_EXECUTION_BACKEND_DIRECT = "direct"
+LLM_EXECUTION_BACKEND_CODEX_GATEWAY = "codex_gateway"
+ALL_LLM_EXECUTION_BACKENDS = {
+    LLM_EXECUTION_BACKEND_DIRECT,
+    LLM_EXECUTION_BACKEND_CODEX_GATEWAY,
+}
+
 ALL_LLM_WEB_SEARCH_API_FORMATS = {
     LLM_WEB_SEARCH_API_FORMAT_AUTO,
     *ALL_LLM_API_FORMATS,
@@ -303,6 +310,12 @@ class LLMProvider(Base):
         String(32),
         nullable=False,
         server_default=LLM_CLIENT_IDENTITY_AUTO,
+    )
+    # 模型传输后端；旧 Provider 与默认路径始终保持 direct。
+    execution_backend: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        server_default=LLM_EXECUTION_BACKEND_DIRECT,
     )
     # 联网搜索调用时的协议覆盖：
     # - auto：OpenAI/chat_completions 日常走 chat，web_search 时临时走 responses

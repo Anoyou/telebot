@@ -316,6 +316,7 @@ def _provider_to_out(row: LLMProvider) -> LLMProviderOut:
         client_identity_profile=normalize_client_identity_profile(
             getattr(row, "client_identity_profile", None)
         ),
+        execution_backend=getattr(row, "execution_backend", "direct") or "direct",
         # 路由元数据（老数据可能为 None / [] / 缺字段；用属性 getattr 兼容）
         modality=getattr(row, "modality", None) or "text",
         tags=list(getattr(row, "tags", None) or []),
@@ -386,6 +387,14 @@ async def create_provider(
         if payload.api_format
         else default_api_format_for(payload.provider)
     )
+    if payload.execution_backend == "codex_gateway":
+        if effective_api_format != "responses":
+            raise _err("LLM_GATEWAY_FORMAT_INVALID", "内置 Codex Gateway 仅支持 Responses", 422)
+        from .gateway_runtime import gateway_runtime_manager
+
+        status = await gateway_runtime_manager.preflight()
+        if status.state == "degraded":
+            raise _err("LLM_GATEWAY_UNAVAILABLE", status.error or "内置 Gateway 不可用", 422)
     identity_profile = normalize_client_identity_profile(
         payload.client_identity_profile
     )
@@ -409,10 +418,13 @@ async def create_provider(
         api_format=payload.api_format,
         protocol_profile=normalize_protocol_profile(
             payload.api_format,
-            payload.protocol_profile,
+            "codex_responses"
+            if payload.execution_backend == "codex_gateway"
+            else payload.protocol_profile,
         ),
         web_search_api_format=payload.web_search_api_format,
         client_identity_profile=identity_profile,
+        execution_backend=payload.execution_backend,
         # 路由元数据
         modality=payload.modality,
         tags=list(payload.tags or []),
@@ -456,8 +468,22 @@ async def update_provider(
     if "default_model" in data and data["default_model"]:
         row.default_model = data["default_model"]
     effective_api_format = str(data.get("api_format") or row.api_format or "chat_completions")
+    effective_execution_backend = str(
+        data.get("execution_backend") or getattr(row, "execution_backend", "direct") or "direct"
+    )
+    if effective_execution_backend == "codex_gateway":
+        if effective_api_format != "responses":
+            raise _err("LLM_GATEWAY_FORMAT_INVALID", "内置 Codex Gateway 仅支持 Responses", 422)
+        from .gateway_runtime import gateway_runtime_manager
+
+        status = await gateway_runtime_manager.preflight()
+        if status.state == "degraded":
+            raise _err("LLM_GATEWAY_UNAVAILABLE", status.error or "内置 Gateway 不可用", 422)
     if "api_format" in data and data["api_format"]:
         row.api_format = data["api_format"]
+    row.execution_backend = effective_execution_backend
+    if effective_execution_backend == "codex_gateway":
+        data["protocol_profile"] = "codex_responses"
     row.protocol_profile = normalize_protocol_profile(
         effective_api_format,
         data.get("protocol_profile", getattr(row, "protocol_profile", None)),

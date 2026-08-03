@@ -392,6 +392,9 @@ async def create_provider(
         detail={"name": out.name, "provider": out.provider, "default_model": out.default_model},
     )
     await db.commit()
+    from ..services.gateway_runtime import reconcile_gateway_runtime
+
+    await reconcile_gateway_runtime()
     aids = await command_service.list_all_account_ids(db)
     await command_service.notify_reload(aids)
     return out
@@ -441,6 +444,9 @@ async def update_provider(
         detail=audit_detail,
     )
     await db.commit()
+    from ..services.gateway_runtime import reconcile_gateway_runtime
+
+    await reconcile_gateway_runtime()
     # 通知所有启用了 ai 类型模板的账号热加载
     aids = await command_service.list_all_account_ids(db)
     await command_service.notify_reload(aids)
@@ -467,6 +473,9 @@ async def delete_provider(
         target=f"llm_provider:{pid}",
     )
     await db.commit()
+    from ..services.gateway_runtime import reconcile_gateway_runtime
+
+    await reconcile_gateway_runtime()
     await command_service.notify_reload(aids)
     return {"ok": True}
 

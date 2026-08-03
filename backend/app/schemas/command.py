@@ -11,7 +11,7 @@ import re
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ..db.models.command import (
     ALL_COMMAND_TYPES,
@@ -24,6 +24,7 @@ from ..db.models.command import (
     COMMAND_TYPE_RUN_PLUGIN,
     LLM_API_FORMAT_CHAT_COMPLETIONS,
     LLM_CLIENT_IDENTITY_AUTO,
+    LLM_EXECUTION_BACKEND_DIRECT,
     LLM_MODALITY_TEXT,
     LLM_PROTOCOL_PROFILE_STANDARD,
     LLM_WEB_SEARCH_API_FORMAT_AUTO,
@@ -412,6 +413,9 @@ class LLMProviderCreate(BaseModel):
     ] = LLM_CLIENT_IDENTITY_AUTO
     """客户端身份档案；auto 按本次实际协议解析。与 protocol_profile 相互独立。"""
 
+    execution_backend: Literal["direct", "codex_gateway"] = LLM_EXECUTION_BACKEND_DIRECT
+    """模型传输后端；Gateway 仅支持 Responses，且不改变已保存身份档案。"""
+
     # ── 路由元数据（全可选；不填走默认）───────────────────────
     modality: Literal["text", "vision", "audio", "multimodal"] = Field(
         default=LLM_MODALITY_TEXT
@@ -451,6 +455,12 @@ class LLMProviderCreate(BaseModel):
         if v not in ALL_LLM_MODALITIES:
             raise ValueError(f"未知 modality：{v}")
         return v
+
+    @model_validator(mode="after")
+    def _validate_execution_backend(self) -> LLMProviderCreate:
+        if self.execution_backend == "codex_gateway" and self.api_format != "responses":
+            raise ValueError("内置 Codex Gateway 仅支持 Responses API Format")
+        return self
 
     @field_validator("tags")
     @classmethod
@@ -498,6 +508,7 @@ class LLMProviderUpdate(BaseModel):
         ]
         | None
     ) = None
+    execution_backend: Literal["direct", "codex_gateway"] | None = None
     web_search_api_format: Literal["auto", "chat_completions", "responses", "anthropic_messages"] | None = None
 
     # 路由元数据（全可选；None / 缺省 = 不动）
@@ -538,6 +549,7 @@ class LLMProviderOut(BaseModel):
     api_format: str = LLM_API_FORMAT_CHAT_COMPLETIONS
     protocol_profile: str = LLM_PROTOCOL_PROFILE_STANDARD
     client_identity_profile: str = LLM_CLIENT_IDENTITY_AUTO
+    execution_backend: str = LLM_EXECUTION_BACKEND_DIRECT
     web_search_api_format: str = LLM_WEB_SEARCH_API_FORMAT_AUTO
     # 路由元数据（出参始终带，便于前端展示）
     modality: str = LLM_MODALITY_TEXT

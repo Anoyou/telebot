@@ -81,6 +81,14 @@ class GatewayRuntimeManager:
             rows = list((await db.execute(select(LLMProvider).order_by(LLMProvider.id))).scalars().all())
         return await self.reconcile([LLMProviderDTO.from_orm_row(row) for row in rows])
 
+    async def preflight(self) -> GatewayRuntimeStatus:
+        """保存 Gateway Provider 前验证二进制与协议版本，不写入任何配置。"""
+
+        async with self._lock:
+            if self._process is None or self._process.returncode is not None:
+                await self._start_locked()
+            return self.status()
+
     async def shutdown(self) -> None:
         self._closing = True
         async with self._lock:

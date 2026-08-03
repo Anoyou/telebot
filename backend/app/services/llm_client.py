@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import re
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Iterable, Mapping
@@ -32,6 +33,7 @@ from ..db.models.command import (
     LLM_API_FORMAT_ANTHROPIC_MESSAGES,
     LLM_API_FORMAT_CHAT_COMPLETIONS,
     LLM_API_FORMAT_RESPONSES,
+    LLM_EXECUTION_BACKEND_CODEX_GATEWAY,
     LLM_PROTOCOL_PROFILE_CLAUDE_CODE_PROXY,
     LLM_PROTOCOL_PROFILE_STANDARD,
     LLM_PROVIDER_OLLAMA,
@@ -3192,6 +3194,14 @@ class ResponsesClient(LLMClient):
         )
         self._compatibility_headers = dict(compatibility_headers or {})
 
+    def _client_kwargs(self, timeout_seconds: int | None) -> dict[str, object]:
+        kwargs: dict[str, object] = {"timeout": _timeout_for_call(self._base_url, timeout_seconds)}
+        if self._proxy_url:
+            kwargs["proxy"] = self._proxy_url
+        else:
+            kwargs["trust_env"] = False
+        return kwargs
+
     def _runtime_headers(self, request: ModelRequest | None = None) -> dict[str, str]:
         if self._identity is None:
             return {}
@@ -3269,11 +3279,7 @@ class ResponsesClient(LLMClient):
             body["include"] = ["web_search_call.action.sources"]
         body = plan_responses_body(body, self._protocol_profile)
 
-        client_kwargs: dict[str, object] = {"timeout": _timeout_for_call(self._base_url, timeout_seconds)}
-        if self._proxy_url:
-            client_kwargs["proxy"] = self._proxy_url
-        else:
-            client_kwargs["trust_env"] = False
+        client_kwargs = self._client_kwargs(timeout_seconds)
         try:
             async with httpx.AsyncClient(**client_kwargs) as cli:
                 resp = await _post_responses_compatible(cli, url, headers=headers, body=body)
@@ -3324,6 +3330,7 @@ class ResponsesClient(LLMClient):
             provider_status=normalized.provider_status,
         )
 
+
     async def invoke(self, request: ModelRequest) -> ModelResponse:
         _responses_capabilities_for_profile(self._protocol_profile).validate(
             request,
@@ -3372,11 +3379,7 @@ class ResponsesClient(LLMClient):
             body["include"] = ["web_search_call.action.sources"]
         body = plan_responses_body(body, self._protocol_profile)
 
-        client_kwargs: dict[str, object] = {"timeout": _timeout_for_call(self._base_url, None)}
-        if self._proxy_url:
-            client_kwargs["proxy"] = self._proxy_url
-        else:
-            client_kwargs["trust_env"] = False
+        client_kwargs = self._client_kwargs(None)
         try:
             async with httpx.AsyncClient(**client_kwargs) as cli:
                 resp = await _post_responses_compatible(cli, url, headers=headers, body=body)
@@ -3455,11 +3458,7 @@ class ResponsesClient(LLMClient):
             body["include"] = ["web_search_call.action.sources"]
         body = plan_responses_body(body, self._protocol_profile)
 
-        client_kwargs: dict[str, object] = {"timeout": _timeout_for_call(self._base_url, None)}
-        if self._proxy_url:
-            client_kwargs["proxy"] = self._proxy_url
-        else:
-            client_kwargs["trust_env"] = False
+        client_kwargs = self._client_kwargs(None)
 
         model_name = request.model or self._model
         text_parts: list[str] = []
@@ -3844,11 +3843,7 @@ class ResponsesClient(LLMClient):
             body["include"] = ["web_search_call.action.sources"]
         body = plan_responses_body(body, self._protocol_profile)
 
-        client_kwargs: dict[str, object] = {"timeout": _timeout_for_call(self._base_url, timeout_seconds)}
-        if self._proxy_url:
-            client_kwargs["proxy"] = self._proxy_url
-        else:
-            client_kwargs["trust_env"] = False
+        client_kwargs = self._client_kwargs(timeout_seconds)
 
         model_name = self._model
         input_tokens = 0
@@ -4069,11 +4064,7 @@ class ResponsesClient(LLMClient):
             body["reasoning"] = {"effort": normalized_effort}
         body = plan_responses_body(body, self._protocol_profile)
 
-        client_kwargs: dict[str, object] = {"timeout": _timeout_for_call(self._base_url, timeout_seconds)}
-        if self._proxy_url:
-            client_kwargs["proxy"] = self._proxy_url
-        else:
-            client_kwargs["trust_env"] = False
+        client_kwargs = self._client_kwargs(timeout_seconds)
         try:
             async with httpx.AsyncClient(**client_kwargs) as cli:
                 resp = await _post_responses_compatible(cli, url, headers=headers, body=body)
@@ -4112,6 +4103,53 @@ class ResponsesClient(LLMClient):
             image_data=image_data,
             sources=_extract_response_sources(data),
         )
+
+
+class GatewayResponsesClient(ResponsesClient):
+    """复用 Responses codec，仅把 transport 与内部路由元数据切到 Unix Socket。"""
+
+    def __init__(
+        self,
+        *,
+        provider_id: int,
+        model: str,
+        socket_path: str,
+        request_scope: str = REQUEST_SCOPE_INFERENCE,
+    ) -> None:
+        super().__init__(
+            api_key="",
+            base_url="http://gateway/v1",
+            model=model,
+            protocol_profile="codex_responses",
+            provider_scope=f"gateway-provider:{provider_id}",
+            identity=None,
+            compatibility_headers=None,
+        )
+        self._gateway_provider_id = int(provider_id)
+        self._gateway_socket_path = socket_path
+        self._gateway_request_scope = request_scope
+
+    def _runtime_headers(self, request: ModelRequest | None = None) -> dict[str, str]:
+        context = ClientRuntimeContext.from_metadata(
+            request.metadata if request is not None else None,
+            provider_scope=self._provider_scope,
+        )
+        return {
+            "X-TelePilot-Provider-ID": str(self._gateway_provider_id),
+            "X-TelePilot-Request-Scope": self._gateway_request_scope,
+            "X-TelePilot-Request-ID": context.request_id,
+            "X-TelePilot-Session-ID": context.session_id,
+            "X-TelePilot-Run-ID": context.run_id,
+            "X-TelePilot-Turn-ID": context.turn_id,
+            "X-TelePilot-Turn-Index": str(context.turn_index),
+        }
+
+    def _client_kwargs(self, timeout_seconds: int | None) -> dict[str, object]:
+        return {
+            "timeout": _timeout_for_call(self._base_url, timeout_seconds),
+            "transport": httpx.AsyncHTTPTransport(uds=self._gateway_socket_path),
+            "trust_env": False,
+        }
 
 
 # ────────────────────────────────────────────────────────────
@@ -4364,9 +4402,6 @@ def build_client(
       ``identity_override`` 供协议检测按顺序显式指定身份使用，正式业务调用留空
       即用 Provider 配置的 ``client_identity_profile``。
     """
-    api_key = ""
-    if provider_row.api_key_enc:
-        api_key = decrypt_str(provider_row.api_key_enc)
     model = (override_model or provider_row.default_model or "").strip()
     if not model:
         raise ValueError("LLM provider 没配 default_model，且当次调用也未提供 model 覆盖")
@@ -4377,6 +4412,21 @@ def build_client(
         or getattr(provider_row, "api_format", None)
         or default_api_format_for(provider_row.provider)
     )
+    execution_backend = getattr(provider_row, "execution_backend", "direct") or "direct"
+    if execution_backend == LLM_EXECUTION_BACKEND_CODEX_GATEWAY:
+        if fmt != LLM_API_FORMAT_RESPONSES:
+            raise ValueError("内置 Codex Gateway 仅支持 Responses")
+        from .gateway_runtime import DEFAULT_GATEWAY_SOCKET
+
+        return GatewayResponsesClient(
+            provider_id=int(provider_row.id),
+            model=model,
+            socket_path=os.getenv("TELEPILOT_GATEWAY_SOCKET", DEFAULT_GATEWAY_SOCKET),
+            request_scope=request_scope,
+        )
+    api_key = ""
+    if provider_row.api_key_enc:
+        api_key = decrypt_str(provider_row.api_key_enc)
     protocol_profile = resolve_protocol_profile(
         fmt,
         getattr(provider_row, "protocol_profile", LLM_PROTOCOL_PROFILE_STANDARD),
@@ -4452,15 +4502,26 @@ def build_client_from_dto(
         proxy_url: 代理 URL（优先于 dto.proxy_url）
         identity_override: 显式身份档案（协议检测用）；留空用 dto 配置。
     """
-    api_key = ""
-    if dto.api_key_enc:
-        api_key = decrypt_str(dto.api_key_enc)
     model = (override_model or dto.default_model or "").strip()
     if not model:
         raise ValueError("LLM provider 没配 default_model，且当次调用也未提供 model 覆盖")
 
     # api_format_override 用于联网搜索等单次调用协议覆盖；否则按 provider 配置。
     fmt = api_format_override or dto.api_format or default_api_format_for(dto.provider)
+    if dto.execution_backend == LLM_EXECUTION_BACKEND_CODEX_GATEWAY:
+        if fmt != LLM_API_FORMAT_RESPONSES:
+            raise ValueError("内置 Codex Gateway 仅支持 Responses")
+        from .gateway_runtime import DEFAULT_GATEWAY_SOCKET
+
+        return GatewayResponsesClient(
+            provider_id=dto.id,
+            model=model,
+            socket_path=os.getenv("TELEPILOT_GATEWAY_SOCKET", DEFAULT_GATEWAY_SOCKET),
+            request_scope=request_scope,
+        )
+    api_key = ""
+    if dto.api_key_enc:
+        api_key = decrypt_str(dto.api_key_enc)
     protocol_profile = resolve_protocol_profile(
         fmt,
         dto.protocol_profile,
@@ -4522,6 +4583,7 @@ def build_client_from_dto(
 
 __all__ = [
     "AnthropicClient",
+    "GatewayResponsesClient",
     "LLMCallFailed",
     "LLMClient",
     "LLMError",
