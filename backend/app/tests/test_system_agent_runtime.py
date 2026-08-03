@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.services.llm_agent import AgentResult
+from app.services.llm_client import LLMError
 from app.services.llm_dto import LLMProviderDTO
 from app.services.llm_protocol import (
     ModelResponse,
@@ -67,6 +68,32 @@ def _providers() -> tuple[LLMProviderDTO, LLMProviderDTO]:
         api_key_enc="encrypted",
     )
     return primary, fallback
+
+
+def test_run_trace_usage_includes_gateway_transport_facts() -> None:
+    provider = LLMProviderDTO(
+        id=9,
+        name="gateway",
+        provider="openai",
+        execution_backend="codex_gateway",
+        api_format="responses",
+        default_model="gpt-x",
+    )
+
+    usage = runtime_module._usage_payload(
+        ModelUsage(input_tokens=3, output_tokens=2),
+        provider,
+        "gpt-x",
+        execution_backend="codex_gateway",
+        gateway_version="0.1.0-beta.1",
+        gateway_request_id="gw-trace-1",
+        gateway_stage=None,
+    )
+
+    assert usage["execution_backend"] == "codex_gateway"
+    assert usage["gateway_version"] == "0.1.0-beta.1"
+    assert usage["gateway_request_id"] == "gw-trace-1"
+    assert usage["gateway_stage"] is None
 
 
 async def _patch_runtime_config(  # noqa: ANN001
@@ -469,6 +496,14 @@ async def test_runtime_emits_provider_switch_confirmation(monkeypatch) -> None:
                     "model": fallback.default_model,
                 }
             ],
+            last_error=LLMError(
+                "gateway unavailable",
+                category="gateway_unavailable",
+                request_id="gw-switch-1",
+                gateway_stage="transport",
+                gateway_version="0.1.0-beta.1",
+                execution_backend="codex_gateway",
+            ),
         )
 
     async def run(model_call, request, _tools, **_kwargs):  # noqa: ANN001
@@ -492,6 +527,10 @@ async def test_runtime_emits_provider_switch_confirmation(monkeypatch) -> None:
     error = next(event for event in events if event["type"] == "error")
     assert error["code"] == "AGENT_PROVIDER_SWITCH_REQUIRED"
     assert error["provider_switch"]["candidates"][0]["provider_id"] == fallback.id
+    assert error["execution_backend"] == "codex_gateway"
+    assert error["gateway_version"] == "0.1.0-beta.1"
+    assert error["gateway_request_id"] == "gw-switch-1"
+    assert error["gateway_stage"] == "transport"
     assert events[-1]["type"] == "done"
     assert events[-1]["ok"] is False
 

@@ -594,9 +594,9 @@ class FetchModelsPreviewRequest(BaseModel):
     """
 
     provider: Literal["openai", "anthropic", "ollama"]
-    api_format: Literal["chat_completions", "responses", "anthropic_messages"] = (
-        LLM_API_FORMAT_CHAT_COMPLETIONS
-    )
+    api_format: Literal[
+        "chat_completions", "responses", "anthropic_messages"
+    ] = LLM_API_FORMAT_CHAT_COMPLETIONS
     protocol_profile: LLMProtocolProfile = LLM_PROTOCOL_PROFILE_STANDARD
     base_url: str | None = Field(default=None, max_length=255)
     api_key: str | None = Field(default=None, max_length=512)
@@ -623,9 +623,9 @@ class QuickVerifyProviderRequest(BaseModel):
     # 不在 Pydantic Field 上做长度拒绝，避免默认 422 把敏感 input 原样带回；
     # 路由会在进入流式响应前用不含输入值的结构化错误拒绝超长 Key。
     api_key: str | None = None
-    api_format: Literal[
-        "chat_completions", "responses", "anthropic_messages"
-    ] = LLM_API_FORMAT_CHAT_COMPLETIONS
+    api_format: Literal["chat_completions", "responses", "anthropic_messages"] = (
+        LLM_API_FORMAT_CHAT_COMPLETIONS
+    )
     protocol_profile: LLMProtocolProfile = LLM_PROTOCOL_PROFILE_STANDARD
     client_identity_profile: Literal[
         "auto",
@@ -854,6 +854,10 @@ class ChatTestModelResult(BaseModel):
     status_code: int | None = None
     client_identity_profile: str | None = None
     effective_api_format: str | None = None
+    execution_backend: str | None = None
+    gateway_version: str | None = None
+    gateway_request_id: str | None = None
+    gateway_stage: str | None = None
     streaming: bool = False
     """本次结果是否通过上游原生流式协议获得。"""
     stream_fallback: bool = False
@@ -991,6 +995,10 @@ class LivenessResultItem(BaseModel):
     suggestion: str | None = None
     client_identity_profile: str | None = None
     effective_api_format: str | None = None
+    execution_backend: str | None = None
+    gateway_version: str | None = None
+    gateway_request_id: str | None = None
+    gateway_stage: str | None = None
     skipped: bool = False
 
 

@@ -11,15 +11,17 @@ import (
 )
 
 type Route struct {
-	ProviderID           int64
-	InternalModel        string
-	UpstreamModel        string
-	BaseURL              string
-	APIKey               string
-	ProxyURL             string
-	TimeoutSeconds       int
-	CompatibilityHeaders map[string]string
-	MaxConcurrency       int
+	ProviderID                   int64
+	InternalModel                string
+	UpstreamModel                string
+	BaseURL                      string
+	APIKey                       string
+	ProxyURL                     string
+	TimeoutSeconds               int
+	CompatibilityHeaders         map[string]string
+	LivenessCompatibilityHeaders map[string]string
+	ModelsEndpoints              []string
+	MaxConcurrency               int
 }
 
 type Table struct {
@@ -49,6 +51,9 @@ func NewTable(snapshot contract.ConfigSnapshot) (*Table, error) {
 		provider.Models = slices.Clone(provider.Models)
 		provider.ModelMapping = cloneMap(provider.ModelMapping)
 		provider.CompatibilityHeaders = cloneMap(provider.CompatibilityHeaders)
+		provider.LivenessCompatibilityHeaders = cloneMap(provider.LivenessCompatibilityHeaders)
+		provider.ModelsCompatibilityHeaders = cloneMap(provider.ModelsCompatibilityHeaders)
+		provider.ModelsEndpoints = slices.Clone(provider.ModelsEndpoints)
 		table.providers[provider.ID] = provider
 		modelRoutes := make(map[string]Route, len(provider.Models))
 		for _, model := range provider.Models {
@@ -60,6 +65,7 @@ func NewTable(snapshot contract.ConfigSnapshot) (*Table, error) {
 				ProviderID: provider.ID, InternalModel: fmt.Sprintf("tp_%d/%s", provider.ID, model), UpstreamModel: upstream,
 				BaseURL: strings.TrimRight(provider.BaseURL, "/"), APIKey: provider.APIKey, ProxyURL: provider.ProxyURL,
 				TimeoutSeconds: provider.TimeoutSeconds, CompatibilityHeaders: cloneMap(provider.CompatibilityHeaders), MaxConcurrency: provider.MaxConcurrency,
+				LivenessCompatibilityHeaders: cloneMap(provider.LivenessCompatibilityHeaders),
 			}
 		}
 		table.routes[provider.ID] = modelRoutes
@@ -82,6 +88,23 @@ func (t *Table) Models(providerID int64) []string {
 		return nil
 	}
 	return slices.Clone(provider.Models)
+}
+
+func (t *Table) ProviderRoute(providerID int64) (Route, bool) {
+	provider, ok := t.providers[providerID]
+	if !ok {
+		return Route{}, false
+	}
+	return Route{
+		ProviderID:           provider.ID,
+		BaseURL:              strings.TrimRight(provider.BaseURL, "/"),
+		APIKey:               provider.APIKey,
+		ProxyURL:             provider.ProxyURL,
+		TimeoutSeconds:       provider.TimeoutSeconds,
+		CompatibilityHeaders: cloneMap(provider.ModelsCompatibilityHeaders),
+		ModelsEndpoints:      slices.Clone(provider.ModelsEndpoints),
+		MaxConcurrency:       provider.MaxConcurrency,
+	}, true
 }
 
 func validateProvider(provider contract.ProviderConfig) error {
@@ -116,6 +139,30 @@ func validateProvider(provider contract.ProviderConfig) error {
 		lower := strings.ToLower(strings.TrimSpace(name))
 		if lower == "authorization" || lower == "host" || strings.HasPrefix(lower, "x-telepilot-") || strings.HasPrefix(lower, "chatgpt-") {
 			return fmt.Errorf("compatibility header %q is reserved", name)
+		}
+	}
+	for name := range provider.ModelsCompatibilityHeaders {
+		lower := strings.ToLower(strings.TrimSpace(name))
+		if lower == "authorization" || lower == "host" || strings.HasPrefix(lower, "x-telepilot-") || strings.HasPrefix(lower, "chatgpt-") {
+			return fmt.Errorf("models compatibility header %q is reserved", name)
+		}
+	}
+	for name := range provider.LivenessCompatibilityHeaders {
+		lower := strings.ToLower(strings.TrimSpace(name))
+		if lower == "authorization" || lower == "host" || strings.HasPrefix(lower, "x-telepilot-") || strings.HasPrefix(lower, "chatgpt-") {
+			return fmt.Errorf("liveness compatibility header %q is reserved", name)
+		}
+	}
+	if len(provider.ModelsEndpoints) == 0 {
+		return errors.New("at least one models endpoint is required")
+	}
+	for _, endpoint := range provider.ModelsEndpoints {
+		parsedEndpoint, endpointErr := url.Parse(endpoint)
+		if endpointErr != nil || (parsedEndpoint.Scheme != "http" && parsedEndpoint.Scheme != "https") || parsedEndpoint.Host == "" {
+			return errors.New("models endpoint must be an absolute HTTP(S) URL")
+		}
+		if !strings.EqualFold(parsedEndpoint.Scheme, parsed.Scheme) || !strings.EqualFold(parsedEndpoint.Host, parsed.Host) {
+			return errors.New("models endpoint must use the Provider base URL origin")
 		}
 	}
 	return nil

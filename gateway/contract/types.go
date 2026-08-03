@@ -1,6 +1,6 @@
 package contract
 
-const ProtocolVersion = "1"
+const ProtocolVersion = "2"
 
 type VersionInfo struct {
 	Version         string `json:"version"`
@@ -31,15 +31,18 @@ type ConfigSnapshot struct {
 }
 
 type ProviderConfig struct {
-	ID                   int64             `json:"id"`
-	BaseURL              string            `json:"base_url"`
-	APIKey               string            `json:"api_key"`
-	Models               []string          `json:"models"`
-	ModelMapping         map[string]string `json:"model_mapping,omitempty"`
-	ProxyURL             string            `json:"proxy_url,omitempty"`
-	TimeoutSeconds       int               `json:"timeout_seconds,omitempty"`
-	CompatibilityHeaders map[string]string `json:"compatibility_headers,omitempty"`
-	MaxConcurrency       int               `json:"max_concurrency,omitempty"`
+	ID                           int64             `json:"id"`
+	BaseURL                      string            `json:"base_url"`
+	APIKey                       string            `json:"api_key"`
+	Models                       []string          `json:"models"`
+	ModelMapping                 map[string]string `json:"model_mapping,omitempty"`
+	ProxyURL                     string            `json:"proxy_url,omitempty"`
+	TimeoutSeconds               int               `json:"timeout_seconds,omitempty"`
+	CompatibilityHeaders         map[string]string `json:"compatibility_headers,omitempty"`
+	LivenessCompatibilityHeaders map[string]string `json:"liveness_compatibility_headers,omitempty"`
+	ModelsCompatibilityHeaders   map[string]string `json:"models_compatibility_headers,omitempty"`
+	ModelsEndpoints              []string          `json:"models_endpoints,omitempty"`
+	MaxConcurrency               int               `json:"max_concurrency,omitempty"`
 }
 
 type ConfigStatus struct {

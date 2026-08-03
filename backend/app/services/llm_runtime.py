@@ -69,6 +69,10 @@ class UsageRecord:
     provider_name: str | None = None
     model: str | None = None
     client_identity_profile: str | None = None
+    execution_backend: str | None = None
+    gateway_version: str | None = None
+    gateway_request_id: str | None = None
+    gateway_stage: str | None = None
     input_tokens: int = 0
     output_tokens: int = 0
     latency_ms: int = 0
@@ -189,6 +193,83 @@ def resolve_usage_client_identity_profile(
         api_format,
         recommended_profile=profile.recommended_identity,
     ).profile
+
+
+def usage_transport_fields(
+    provider: LLMProviderDTO,
+    outcome: object | None = None,
+) -> dict[str, str | None]:
+    """Return the actual transport facts without inventing legacy history."""
+
+    backend = str(getattr(provider, "execution_backend", "direct") or "direct")
+    if backend != "codex_gateway":
+        return {
+            "execution_backend": backend,
+            "gateway_version": None,
+            "gateway_request_id": None,
+            "gateway_stage": None,
+        }
+    gateway_version = getattr(outcome, "gateway_version", None)
+    if backend == "codex_gateway" and not gateway_version:
+        try:
+            from .gateway_runtime import gateway_runtime_manager
+
+            gateway_version = gateway_runtime_manager.status().version
+        except Exception:  # noqa: BLE001 - usage must not affect inference
+            gateway_version = None
+    return {
+        "execution_backend": backend,
+        "gateway_version": str(gateway_version or "").strip()[:64] or None,
+        "gateway_request_id": (
+            str(
+                getattr(outcome, "gateway_request_id", None)
+                or getattr(outcome, "request_id", None)
+                or ""
+            ).strip()[:128]
+            or None
+        ),
+        "gateway_stage": str(getattr(outcome, "gateway_stage", None) or "").strip()[:64] or None,
+    }
+
+
+def diagnostic_error_kwargs(
+    exc: BaseException | None,
+    *,
+    execution_backend: str | None = None,
+) -> dict[str, Any]:
+    """Preserve unified diagnostic facts when runtime wraps a client error."""
+
+    current = exc
+    for _ in range(4):
+        if current is None:
+            break
+        if any(
+            getattr(current, name, None) is not None
+            for name in (
+                "status_code",
+                "category",
+                "upstream_error_code",
+                "request_id",
+                "gateway_stage",
+                "gateway_version",
+                "upstream_summary",
+                "execution_backend",
+            )
+        ):
+            return {
+                "status_code": getattr(current, "status_code", None),
+                "category": getattr(current, "category", None),
+                "upstream_error_code": getattr(current, "upstream_error_code", None),
+                "request_id": getattr(current, "request_id", None),
+                "gateway_stage": getattr(current, "gateway_stage", None),
+                "gateway_version": getattr(current, "gateway_version", None),
+                "upstream_summary": getattr(current, "upstream_summary", None),
+                "execution_backend": (
+                    getattr(current, "execution_backend", None) or execution_backend
+                ),
+            }
+        current = current.__cause__ or current.__context__
+    return {"execution_backend": execution_backend} if execution_backend else {}
 
 
 def preview_text_for_usage(
@@ -605,6 +686,7 @@ async def call_with_fallback(
                     used_fallback=is_fallback,
                     fallback_chain=chain.get_provider_names(),
                     request_preview=request_preview_for_usage(system, user),
+                    **usage_transport_fields(provider_dto, last_error),
                 )
             )
             if budget_check.scope == "premium_daily" and idx < len(all_providers) - 1:
@@ -659,6 +741,7 @@ async def call_with_fallback(
                 fallback_chain=chain.get_provider_names(),
                 request_preview=request_preview_for_usage(system, user),
                 response_preview=preview_text_for_usage(result.text),
+                **usage_transport_fields(provider_dto, result),
             )
             await _emit_usage(usage_record)
             await llm_account_budget.settle(
@@ -700,24 +783,26 @@ async def call_with_fallback(
                 success=False,
             )
 
+            # 每个真实 Provider 尝试都独立落账；否则 Gateway 失败后 direct
+            # 成功会抹掉触发 fallback 的 request id / stage 等诊断事实。
+            usage_record = UsageRecord(
+                provider_id=provider_dto.id,
+                account_id=account_id,
+                triggered_by_account_id=triggered_by_account_id,
+                provider_name=provider_dto.name,
+                model=model,
+                client_identity_profile=client_identity_profile,
+                latency_ms=latency_ms,
+                success=False,
+                error_type=error_type,
+                source=source,
+                used_fallback=is_fallback,
+                fallback_chain=chain.get_provider_names(),
+                request_preview=request_preview_for_usage(system, user),
+                **usage_transport_fields(provider_dto, exc),
+            )
+            await _emit_usage(usage_record)
             if idx == len(all_providers) - 1 or not _should_try_next_provider(exc):
-                # 记录失败 usage
-                usage_record = UsageRecord(
-                    provider_id=provider_dto.id,
-                    account_id=account_id,
-                    triggered_by_account_id=triggered_by_account_id,
-                    provider_name=provider_dto.name,
-                    model=model,
-                    client_identity_profile=client_identity_profile,
-                    latency_ms=latency_ms,
-                    success=False,
-                    error_type=error_type,
-                    source=source,
-                    used_fallback=is_fallback,
-                    fallback_chain=chain.get_provider_names(),
-                    request_preview=request_preview_for_usage(system, user),
-                )
-                await _emit_usage(usage_record)
                 raise LLMCallFailed(
                     f"所有 provider 都失败。最后错误: {type(last_error).__name__}: {last_error}",
                     provider_id=provider_dto.id,
@@ -725,6 +810,10 @@ async def call_with_fallback(
                     error_type=error_type,
                     retryable=False,
                     scope=scope,
+                    **diagnostic_error_kwargs(
+                        last_error,
+                        execution_backend=provider_dto.execution_backend,
+                    ),
                 ) from last_error
 
     raise LLMCallFailed(
@@ -733,6 +822,7 @@ async def call_with_fallback(
         error_type="exhausted",
         retryable=False,
         scope=_error_scope(last_error) if last_error else LLMErrorScope.UNKNOWN,
+        **diagnostic_error_kwargs(last_error),
     )
 
 
@@ -848,6 +938,7 @@ async def invoke_model_with_fallback(
                         fallback_chain=chain.get_provider_names(),
                         request_preview=request_preview,
                         response_preview=preview_text_for_usage(response.text),
+                        **usage_transport_fields(provider, response),
                     )
                 )
                 await llm_account_budget.settle(
@@ -878,6 +969,7 @@ async def invoke_model_with_fallback(
                             ),
                         ),
                         "error_type": _classify_error(exc),
+                        "execution_backend": provider.execution_backend,
                     },
                 )
                 await llm_account_budget.settle(
@@ -904,6 +996,7 @@ async def invoke_model_with_fallback(
                         response_preview=preview_text_for_usage(
                             f"{type(exc).__name__}: {exc}"
                         ),
+                        **usage_transport_fields(provider, exc),
                     )
                 )
                 if _should_try_next_provider(exc):
@@ -915,6 +1008,10 @@ async def invoke_model_with_fallback(
                     error_type=_classify_error(exc),
                     retryable=False,
                     scope=_error_scope(exc),
+                    **diagnostic_error_kwargs(
+                        exc,
+                        execution_backend=provider.execution_backend,
+                    ),
                 ) from exc
 
         switch_from_provider_name = provider.name
@@ -930,12 +1027,17 @@ async def invoke_model_with_fallback(
                 error_type=_classify_error(last_error),
                 retryable=False,
                 scope=_error_scope(last_error),
+                **diagnostic_error_kwargs(
+                    last_error,
+                    execution_backend=provider.execution_backend,
+                ),
             ) from last_error
 
     raise LLMCallFailed(
         f"所有 provider 均不兼容或调用失败: {last_error}",
         error_type="exhausted",
         scope=_error_scope(last_error) if last_error else LLMErrorScope.UNKNOWN,
+        **diagnostic_error_kwargs(last_error),
     )
 
 
@@ -1034,6 +1136,7 @@ async def stream_model_with_fallback(
             candidate_emitted_delta = False
             provider_call_started = False
             candidate_settled = False
+            active_client: Any | None = None
             try:
                 for attempt in range(max_retries + 1):
                     terminal_response: ModelResponse | None = None
@@ -1046,6 +1149,7 @@ async def stream_model_with_fallback(
                         )
                         if inspect.isawaitable(client):
                             client = await client
+                        active_client = client
                         await _emit_structured_progress(
                             progress_callback,
                             {
@@ -1055,6 +1159,7 @@ async def stream_model_with_fallback(
                                 "model": provider_request.model,
                                 "attempt": attempt + 1,
                                 "max_retries": max_retries,
+                                "execution_backend": provider.execution_backend,
                             },
                         )
                         provider_call_started = True
@@ -1088,6 +1193,7 @@ async def stream_model_with_fallback(
                                 response_preview=preview_text_for_usage(
                                     terminal_response.text
                                 ),
+                                **usage_transport_fields(provider, terminal_response),
                             )
                         )
                         settled_tokens = terminal_response.usage.total_tokens or estimated_tokens
@@ -1131,6 +1237,7 @@ async def stream_model_with_fallback(
                                     response_preview=preview_text_for_usage(
                                         f"{type(exc).__name__}: {exc}"
                                     ),
+                                    **usage_transport_fields(provider, exc),
                                 )
                             )
                             raise LLMCallFailed(
@@ -1140,6 +1247,10 @@ async def stream_model_with_fallback(
                                 error_type=_classify_error(exc),
                                 retryable=False,
                                 scope=_error_scope(exc),
+                                **diagnostic_error_kwargs(
+                                    exc,
+                                    execution_backend=provider.execution_backend,
+                                ),
                             ) from exc
                         if not _is_retryable_error(exc) or attempt >= max_retries:
                             break
@@ -1159,6 +1270,7 @@ async def stream_model_with_fallback(
                                 "max_retries": max_retries,
                                 "delay_seconds": delay,
                                 "error_type": _classify_error(exc),
+                                "execution_backend": provider.execution_backend,
                             },
                         )
                         await asyncio.sleep(delay)
@@ -1191,6 +1303,7 @@ async def stream_model_with_fallback(
                         response_preview=preview_text_for_usage(
                             f"{type(exc).__name__}: {exc}"
                         ),
+                        **usage_transport_fields(provider, exc),
                     )
                 )
                 await _emit_structured_progress(
@@ -1213,6 +1326,10 @@ async def stream_model_with_fallback(
                     error_type=_classify_error(exc),
                     retryable=False,
                     scope=_error_scope(exc),
+                    **diagnostic_error_kwargs(
+                        exc,
+                        execution_backend=provider.execution_backend,
+                    ),
                 ) from exc
             except (GeneratorExit, asyncio.CancelledError) as exc:
                 if not candidate_settled:
@@ -1243,6 +1360,10 @@ async def stream_model_with_fallback(
                             used_fallback=index > 0,
                             fallback_chain=chain.get_provider_names(),
                             request_preview=request_preview,
+                            **usage_transport_fields(
+                                provider,
+                                active_client or exc,
+                            ),
                         )
                     )
                 raise
@@ -1259,12 +1380,17 @@ async def stream_model_with_fallback(
                 error_type=_classify_error(last_error),
                 retryable=False,
                 scope=_error_scope(last_error),
+                **diagnostic_error_kwargs(
+                    last_error,
+                    execution_backend=provider.execution_backend,
+                ),
             ) from last_error
 
     raise LLMCallFailed(
         f"所有 provider 均不兼容或调用失败: {last_error}",
         error_type="exhausted",
         scope=_error_scope(last_error) if last_error else LLMErrorScope.UNKNOWN,
+        **diagnostic_error_kwargs(last_error),
     )
 
 
@@ -1367,6 +1493,7 @@ async def _invoke_model_with_retry(
                 "model": request.model,
                 "attempt": attempt + 1,
                 "max_retries": max_retries,
+                "execution_backend": provider.execution_backend,
             },
         )
         try:

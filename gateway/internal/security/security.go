@@ -23,6 +23,17 @@ func Redact(value string) string {
 	return out
 }
 
+func RedactKnown(value string, knownSecrets ...string) string {
+	out := value
+	for _, secret := range knownSecrets {
+		secret = strings.TrimSpace(secret)
+		if secret != "" {
+			out = strings.ReplaceAll(out, secret, "<redacted>")
+		}
+	}
+	return Redact(out)
+}
+
 func StripInternalHeaders(header http.Header) {
 	for name := range header {
 		if strings.HasPrefix(strings.ToLower(name), "x-telepilot-") {

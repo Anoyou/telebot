@@ -70,6 +70,10 @@ class AgentResult:
     tool_calls: int
     stop_reason: StopReason
     reasoning_content: str | None = None
+    execution_backend: str = "direct"
+    gateway_version: str | None = None
+    gateway_request_id: str | None = None
+    gateway_stage: str | None = None
 
 
 class AgentLimitError(RuntimeError):
@@ -376,6 +380,10 @@ async def run_agent(
                 tool_calls=tool_call_count,
                 stop_reason=response.stop_reason,
                 reasoning_content="\n\n".join(reasoning_parts) or None,
+                execution_backend=response.execution_backend,
+                gateway_version=response.gateway_version,
+                gateway_request_id=response.gateway_request_id,
+                gateway_stage=response.gateway_stage,
             )
 
         # 对工具调用前可能已抵达的自然语言草稿只作临时预览。确认本轮要
@@ -465,6 +473,10 @@ async def run_agent(
         tool_calls=tool_call_count,
         stop_reason=final_response.stop_reason,
         reasoning_content="\n\n".join(reasoning_parts) or None,
+        execution_backend=final_response.execution_backend,
+        gateway_version=final_response.gateway_version,
+        gateway_request_id=final_response.gateway_request_id,
+        gateway_stage=final_response.gateway_stage,
     )
 
 

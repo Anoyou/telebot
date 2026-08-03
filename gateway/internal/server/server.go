@@ -115,6 +115,13 @@ func (s *Server) version(w http.ResponseWriter, _ *http.Request) {
 }
 
 func writeError(w http.ResponseWriter, status int, code, message string, retryable bool, requestID, stage string) {
+	w.Header().Set("X-TelePilot-Gateway-Version", version.Release)
+	if requestID != "" {
+		w.Header().Set("X-TelePilot-Gateway-Request-ID", requestID)
+	}
+	if stage != "" {
+		w.Header().Set("X-TelePilot-Gateway-Stage", stage)
+	}
 	writeJSON(w, status, contract.ErrorEnvelope{Error: contract.GatewayError{Code: code, Message: message, Retryable: retryable, RequestID: requestID, GatewayStage: stage}})
 }
 

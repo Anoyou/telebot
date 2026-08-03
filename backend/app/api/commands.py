@@ -171,6 +171,7 @@ async def _emit_llm_diagnostic_usage(
             fallback_chain=[str(getattr(provider_row, "name", "") or getattr(provider_row, "id", ""))],
             request_preview=request_preview_for_usage(system, user_prompt),
             response_preview=preview_text_for_usage(getattr(result, "text", None)),
+            **llm_runtime.usage_transport_fields(provider_row, result or error),
         )
     )
 
@@ -178,6 +179,9 @@ async def _emit_llm_diagnostic_usage(
 def _diagnostic_error_type(error: Exception | None) -> str | None:
     if error is None:
         return None
+    category = str(getattr(error, "category", "") or "").strip()
+    if category:
+        return category
     msg = str(error).lower()
     if "timeout" in msg:
         return "timeout"
@@ -1258,6 +1262,7 @@ async def fetch_models(
     from ..crypto import decrypt_str
     from ..db.models.command import (
         LLM_API_FORMAT_ANTHROPIC_MESSAGES,
+        LLM_EXECUTION_BACKEND_CODEX_GATEWAY,
         default_api_format_for,
     )
 
@@ -1274,74 +1279,83 @@ async def fetch_models(
             422,
         )
 
-    base_url = normalize_base_url(row.base_url or "https://api.openai.com/v1")
-    api_key = decrypt_str(row.api_key_enc) if row.api_key_enc else ""
-    proxy_url = await _resolve_proxy_url(db, row.proxy_id)
+    if getattr(row, "execution_backend", "direct") == LLM_EXECUTION_BACKEND_CODEX_GATEWAY:
+        from ..services.llm_client import GatewayResponsesClient, LLMError, build_client
 
-    headers = {"Accept": "application/json"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-    try:
-        headers = plan_request_headers(
-            system_headers=headers,
-            compatibility_headers=request_headers_for_scope(
-                getattr(row, "request_headers_enc", None),
-                REQUEST_SCOPE_MODELS,
-            ),
-        )
-    except RequestHeaderConfigError as exc:
-        raise _llm_err("FETCH_REQUEST_HEADERS_INVALID", str(exc), 422) from None
+        gateway_client = build_client(row, request_scope=REQUEST_SCOPE_MODELS)
+        if not isinstance(gateway_client, GatewayResponsesClient):
+            raise _llm_err("FETCH_GATEWAY_INVALID", "Gateway Provider 未使用 Gateway transport", 500)
+        try:
+            new_ids = await gateway_client.list_models()
+        except LLMError as exc:
+            raise _llm_err(
+                "FETCH_GATEWAY",
+                f"Gateway 拉取模型失败：{str(exc)[:300]}",
+                502,
+            ) from None
+    else:
+        base_url = normalize_base_url(row.base_url or "https://api.openai.com/v1")
+        api_key = decrypt_str(row.api_key_enc) if row.api_key_enc else ""
+        proxy_url = await _resolve_proxy_url(db, row.proxy_id)
 
-    client_kwargs: dict[str, object] = {"timeout": httpx.Timeout(15.0, connect=8.0)}
-    if proxy_url:
-        client_kwargs["proxy"] = proxy_url
-
-    try:
-        async with httpx.AsyncClient(**client_kwargs) as cli:
-            for endpoint in provider_models_endpoints(
-                base_url,
-                fmt,
-                protocol_profile=getattr(row, "protocol_profile", None),
-            ):
-                resp = await cli.get(endpoint, headers=headers)
-                if resp.status_code not in {404, 405}:
-                    break
-    except httpx.HTTPError as exc:
-        raise _llm_err(
-            "FETCH_NETWORK",
-            f"拉取失败：{type(exc).__name__}: {str(exc) or '(无详情；常见 SSL/DNS/代理问题)'}",
-            502,
-        ) from None
-
-    if resp.status_code >= 400:
-        # 把 api_key 从 body 里剥掉再返
-        body = resp.text[:300]
+        headers = {"Accept": "application/json"}
         if api_key:
-            body = body.replace(api_key, "<redacted>")
-        raise _llm_err(
-            "FETCH_HTTP",
-            f"接口返回 {resp.status_code}: {body}",
-            502,
-        )
+            headers["Authorization"] = f"Bearer {api_key}"
+        try:
+            headers = plan_request_headers(
+                system_headers=headers,
+                compatibility_headers=request_headers_for_scope(
+                    getattr(row, "request_headers_enc", None),
+                    REQUEST_SCOPE_MODELS,
+                ),
+            )
+        except RequestHeaderConfigError as exc:
+            raise _llm_err("FETCH_REQUEST_HEADERS_INVALID", str(exc), 422) from None
 
-    try:
-        data = resp.json()
-    except Exception:
-        raise _llm_err("FETCH_BAD_JSON", "响应不是合法 JSON") from None
+        client_kwargs: dict[str, object] = {"timeout": httpx.Timeout(15.0, connect=8.0)}
+        if proxy_url:
+            client_kwargs["proxy"] = proxy_url
 
-    # OpenAI 兼容：{data: [{id, object: "model", ...}, ...]}
-    items = data.get("data") if isinstance(data, dict) else None
-    if not isinstance(items, list):
-        raise _llm_err(
-            "FETCH_BAD_SHAPE",
-            f"响应缺 'data' 数组（实际顶层 keys: {list(data.keys())[:5] if isinstance(data, dict) else type(data).__name__}）",
-        )
-    new_ids: list[str] = []
-    for it in items:
-        if isinstance(it, dict) and isinstance(it.get("id"), str):
-            mid = it["id"].strip()
-            if mid:
-                new_ids.append(mid)
+        try:
+            async with httpx.AsyncClient(**client_kwargs) as cli:
+                for endpoint in provider_models_endpoints(
+                    base_url,
+                    fmt,
+                    protocol_profile=getattr(row, "protocol_profile", None),
+                ):
+                    resp = await cli.get(endpoint, headers=headers)
+                    if resp.status_code not in {404, 405}:
+                        break
+        except httpx.HTTPError as exc:
+            raise _llm_err(
+                "FETCH_NETWORK",
+                f"拉取失败：{type(exc).__name__}: {str(exc) or '(无详情；常见 SSL/DNS/代理问题)'}",
+                502,
+            ) from None
+
+        if resp.status_code >= 400:
+            body = resp.text[:300]
+            if api_key:
+                body = body.replace(api_key, "<redacted>")
+            raise _llm_err("FETCH_HTTP", f"接口返回 {resp.status_code}: {body}", 502)
+
+        try:
+            data = resp.json()
+        except Exception:
+            raise _llm_err("FETCH_BAD_JSON", "响应不是合法 JSON") from None
+
+        items = data.get("data") if isinstance(data, dict) else None
+        if not isinstance(items, list):
+            raise _llm_err(
+                "FETCH_BAD_SHAPE",
+                f"响应缺 'data' 数组（实际顶层 keys: {list(data.keys())[:5] if isinstance(data, dict) else type(data).__name__}）",
+            )
+        new_ids = []
+        for item in items:
+            if isinstance(item, dict) and isinstance(item.get("id"), str):
+                model_id = item["id"].strip()
+                if model_id:
+                    new_ids.append(model_id)
 
     # 合并：保留已 enabled 状态 + custom 条目
     existing: dict[str, dict] = {
@@ -1563,9 +1577,14 @@ async def chat_test_models(
                 empty_response=not bool(text),
                 error=None if text else "上游请求已完成，但返回文本为空。",
                 **transport_metadata,
+                **_gateway_transport_metadata(result),
             )
         except asyncio.CancelledError:
-            cancelled = LLMError("模型对话测活已取消")
+            cancelled = LLMError(
+                "模型对话测活已取消",
+                category=llm_diagnostics.DIAG_CANCELLED,
+                **_gateway_error_metadata(cli),
+            )
             try:
                 await asyncio.shield(
                     _emit_llm_diagnostic_usage(
@@ -1603,6 +1622,7 @@ async def chat_test_models(
                 error=str(exc),
                 status_code=exc.status_code,
                 **transport_metadata,
+                **_gateway_transport_metadata(exc),
             )
         except Exception as exc:  # noqa: BLE001
             elapsed_ms = int((_time.monotonic() - started) * 1000)
@@ -1697,6 +1717,7 @@ async def stream_chat_test_models(
             stream_fallback = False
             fallback_response_consumed = False
             stream_terminal_received = False
+            gateway_outcome: object | None = None
             await emit(
                 {
                     "type": "start",
@@ -1731,6 +1752,7 @@ async def stream_chat_test_models(
                                     output_tokens = int(chunk.output_tokens)
                                 if chunk.done:
                                     stream_terminal_received = True
+                                    gateway_outcome = chunk
                                 if getattr(chunk, "stream_fallback", False):
                                     streaming = False
                                     stream_fallback = True
@@ -1775,6 +1797,7 @@ async def stream_chat_test_models(
                             actual_model = completed.model or actual_model
                             input_tokens = int(completed.input_tokens or 0)
                             output_tokens = int(completed.output_tokens or 0)
+                            gateway_outcome = completed
                         elif not stream_terminal_received:
                             raise LLMError(
                                 "模型流式响应提前结束，没有返回最终状态。",
@@ -1790,6 +1813,12 @@ async def stream_chat_test_models(
                     model=actual_model or model_id,
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
+                    execution_backend=str(
+                        getattr(gateway_outcome, "execution_backend", "direct") or "direct"
+                    ),
+                    gateway_version=getattr(gateway_outcome, "gateway_version", None),
+                    gateway_request_id=getattr(gateway_outcome, "gateway_request_id", None),
+                    gateway_stage=getattr(gateway_outcome, "gateway_stage", None),
                 )
                 await _emit_llm_diagnostic_usage(
                     provider_row=row,
@@ -1816,6 +1845,7 @@ async def stream_chat_test_models(
                     streaming=streaming,
                     stream_fallback=stream_fallback,
                     **transport_metadata,
+                    **_gateway_transport_metadata(gateway_outcome),
                 )
                 await emit(
                     {
@@ -1830,8 +1860,16 @@ async def stream_chat_test_models(
                     model=actual_model or model_id,
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
+                    execution_backend=str(getattr(cli, "execution_backend", "direct") or "direct"),
+                    gateway_version=getattr(cli, "gateway_version", None),
+                    gateway_request_id=getattr(cli, "gateway_request_id", None),
+                    gateway_stage=getattr(cli, "gateway_stage", None),
                 )
-                cancelled = LLMError("模型流式测活已取消")
+                cancelled = LLMError(
+                    "模型流式测活已取消",
+                    category=llm_diagnostics.DIAG_CANCELLED,
+                    **_gateway_error_metadata(cli),
+                )
                 try:
                     await asyncio.shield(
                         _emit_llm_diagnostic_usage(
@@ -1874,6 +1912,7 @@ async def stream_chat_test_models(
                     streaming=streaming,
                     stream_fallback=stream_fallback,
                     **transport_metadata,
+                    **_gateway_transport_metadata(exc),
                 )
                 await emit(
                     {
@@ -2013,6 +2052,10 @@ def _liveness_result_items(raw: list[dict[str, Any]]) -> list[LivenessResultItem
             suggestion=r.get("suggestion"),
             client_identity_profile=r.get("client_identity_profile"),
             effective_api_format=r.get("effective_api_format"),
+            execution_backend=r.get("execution_backend"),
+            gateway_version=r.get("gateway_version"),
+            gateway_request_id=r.get("gateway_request_id"),
+            gateway_stage=r.get("gateway_stage"),
             skipped=bool(r.get("skipped")),
         )
         for r in raw
@@ -2047,6 +2090,33 @@ def _liveness_transport_metadata(
     return {
         "effective_api_format": effective_api_format,
         "client_identity_profile": effective_identity,
+        "execution_backend": str(getattr(row, "execution_backend", "direct") or "direct"),
+    }
+
+
+def _gateway_transport_metadata(outcome: object | None) -> dict[str, str | None]:
+    if str(getattr(outcome, "execution_backend", "") or "") != "codex_gateway":
+        return {
+            "gateway_version": None,
+            "gateway_request_id": None,
+            "gateway_stage": None,
+        }
+    return {
+        "gateway_version": str(getattr(outcome, "gateway_version", None) or "").strip() or None,
+        "gateway_request_id": str(
+            getattr(outcome, "gateway_request_id", None) or getattr(outcome, "request_id", None) or ""
+        ).strip()
+        or None,
+        "gateway_stage": str(getattr(outcome, "gateway_stage", None) or "").strip() or None,
+    }
+
+
+def _gateway_error_metadata(outcome: object | None) -> dict[str, str | None]:
+    metadata = _gateway_transport_metadata(outcome)
+    return {
+        "gateway_version": metadata["gateway_version"],
+        "request_id": metadata["gateway_request_id"],
+        "gateway_stage": metadata["gateway_stage"],
     }
 
 
@@ -2185,10 +2255,15 @@ async def full_liveness_run(
                     "output_tokens": int(result.output_tokens or 0),
                     "preview": text[:240] or None,
                     **transport_metadata,
+                    **_gateway_transport_metadata(result),
                 },
             )
         except asyncio.CancelledError:
-            cancelled = LLMError("全局模型巡检已取消")
+            cancelled = LLMError(
+                "全局模型巡检已取消",
+                category=llm_diagnostics.DIAG_CANCELLED,
+                **_gateway_error_metadata(cli),
+            )
             try:
                 await asyncio.shield(
                     _emit_llm_diagnostic_usage(
@@ -2225,6 +2300,7 @@ async def full_liveness_run(
                     "error_category": status,
                     "suggestion": llm_liveness.diag.suggestion_for(status),
                     **transport_metadata,
+                    **_gateway_transport_metadata(exc),
                 },
             )
         except Exception as exc:  # noqa: BLE001

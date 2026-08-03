@@ -18,12 +18,18 @@ from ..crypto import decrypt_str
 from ..db.base import AsyncSessionLocal
 from ..db.models.command import LLM_API_FORMAT_RESPONSES, LLMProvider
 from .llm_dto import LLMProviderDTO
-from .llm_request_headers import REQUEST_SCOPE_INFERENCE, request_headers_for_scope
+from .llm_protocol import provider_endpoint, provider_models_endpoints
+from .llm_request_headers import (
+    REQUEST_SCOPE_INFERENCE,
+    REQUEST_SCOPE_LIVENESS,
+    REQUEST_SCOPE_MODELS,
+    request_headers_for_scope,
+)
 from .redactor import redact_text
 
 log = logging.getLogger(__name__)
 
-GATEWAY_PROTOCOL_VERSION = "1"
+GATEWAY_PROTOCOL_VERSION = "2"
 DEFAULT_GATEWAY_BINARY = "/usr/local/bin/telepilot-gateway"
 DEFAULT_GATEWAY_SOCKET = "/run/telepilot/gateway.sock"
 
@@ -163,7 +169,10 @@ class GatewayRuntimeManager:
             items.append(
                 {
                     "id": provider.id,
-                    "base_url": provider.base_url,
+                    "base_url": provider_endpoint(
+                        provider.base_url,
+                        LLM_API_FORMAT_RESPONSES,
+                    ).removesuffix("/responses"),
                     "api_key": decrypt_str(provider.api_key_enc),
                     "models": models,
                     "proxy_url": provider.proxy_url or "",
@@ -171,6 +180,21 @@ class GatewayRuntimeManager:
                     "compatibility_headers": request_headers_for_scope(
                         provider.request_headers_enc,
                         REQUEST_SCOPE_INFERENCE,
+                    ),
+                    "liveness_compatibility_headers": request_headers_for_scope(
+                        provider.request_headers_enc,
+                        REQUEST_SCOPE_LIVENESS,
+                    ),
+                    "models_compatibility_headers": request_headers_for_scope(
+                        provider.request_headers_enc,
+                        REQUEST_SCOPE_MODELS,
+                    ),
+                    "models_endpoints": list(
+                        provider_models_endpoints(
+                            provider.base_url,
+                            LLM_API_FORMAT_RESPONSES,
+                            protocol_profile=provider.protocol_profile,
+                        )
                     ),
                     "max_concurrency": 8,
                 }

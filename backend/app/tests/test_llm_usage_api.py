@@ -84,7 +84,7 @@ async def test_reset_recent_llm_usage_deletes_rows_and_commits() -> None:
     assert db.committed is True
 
 
-def test_llm_usage_item_exposes_recorded_client_identity() -> None:
+def test_llm_usage_item_exposes_recorded_transport_facts() -> None:
     row = SimpleNamespace(
         id=1,
         account_id=2,
@@ -92,6 +92,10 @@ def test_llm_usage_item_exposes_recorded_client_identity() -> None:
         provider_name="公开 Provider",
         model="model-a",
         client_identity_profile="codex_cli",
+        execution_backend="codex_gateway",
+        gateway_version="0.1.0-beta.1",
+        gateway_request_id="gw-api-1",
+        gateway_stage="upstream",
         source="system_agent",
         input_tokens=10,
         output_tokens=4,
@@ -107,3 +111,7 @@ def test_llm_usage_item_exposes_recorded_client_identity() -> None:
     item = LLMUsageItem.from_row(row)
 
     assert item.client_identity_profile == "codex_cli"
+    assert item.execution_backend == "codex_gateway"
+    assert item.gateway_version == "0.1.0-beta.1"
+    assert item.gateway_request_id == "gw-api-1"
+    assert item.gateway_stage == "upstream"

@@ -112,6 +112,7 @@ def test_liveness_transport_metadata_resolves_effective_identity() -> None:
     assert commands_api._liveness_transport_metadata(row) == {
         "effective_api_format": "responses",
         "client_identity_profile": "openai_sdk",
+        "execution_backend": "direct",
     }
     assert commands_api._liveness_transport_metadata(
         row,
@@ -120,6 +121,7 @@ def test_liveness_transport_metadata_resolves_effective_identity() -> None:
     ) == {
         "effective_api_format": "anthropic_messages",
         "client_identity_profile": "claude_code",
+        "execution_backend": "direct",
     }
 
 
@@ -313,7 +315,7 @@ async def test_full_liveness_cancel_records_single_diagnostic_usage(monkeypatch)
     assert job.status == "cancelled"
     assert len(emitted) == 1
     assert emitted[0].success is False
-    assert emitted[0].error_type == "llmerror"
+    assert emitted[0].error_type == "cancelled"
 
 
 # ════════════════════════════════════════════════════════════
@@ -2784,7 +2786,7 @@ async def test_stream_chat_disconnect_records_single_cancelled_usage(monkeypatch
 
     assert len(emitted) == 1
     assert emitted[0].success is False
-    assert emitted[0].error_type == "llmerror"
+    assert emitted[0].error_type == "cancelled"
     assert emitted[0].response_preview == "partial"
 
 

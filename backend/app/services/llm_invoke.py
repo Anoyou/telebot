@@ -331,6 +331,7 @@ async def _emit_transcribe_usage(
             fallback_chain=[provider.name],
             request_preview=request_preview,
             response_preview=preview_text_for_usage(response_text),
+            **llm_runtime.usage_transport_fields(provider),
         )
     )
 

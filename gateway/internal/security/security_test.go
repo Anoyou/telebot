@@ -16,6 +16,15 @@ func TestRedactSecrets(t *testing.T) {
 	}
 }
 
+func TestRedactKnownSecret(t *testing.T) {
+	output := RedactKnown("upstream echoed opaque-value and models-only", "opaque-value", "models-only")
+	for _, secret := range []string{"opaque-value", "models-only"} {
+		if strings.Contains(output, secret) {
+			t.Fatalf("known secret leaked: %s", output)
+		}
+	}
+}
+
 func TestStripInternalHeaders(t *testing.T) {
 	header := http.Header{"X-Telepilot-Provider-Id": {"42"}, "Content-Type": {"application/json"}}
 	StripInternalHeaders(header)

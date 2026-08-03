@@ -26,13 +26,18 @@ import (
 const maxBodyBytes = 16 << 20
 
 type Handler struct {
-	store       *control.Store
-	mu          sync.Mutex
-	providerSem map[int64]chan struct{}
+	store          *control.Store
+	mu             sync.Mutex
+	providerSem    map[int64]chan struct{}
+	clientForRoute func(routing.Route) *http.Client
 }
 
 func NewHandler(store *control.Store) *Handler {
-	return &Handler{store: store, providerSem: make(map[int64]chan struct{})}
+	return &Handler{
+		store:          store,
+		providerSem:    make(map[int64]chan struct{}),
+		clientForRoute: httpClient,
+	}
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -96,17 +101,23 @@ func (h *Handler) responses(w http.ResponseWriter, r *http.Request) {
 	upstreamRequest.Header.Set("Authorization", "Bearer "+route.APIKey)
 	upstreamRequest.Header.Set("Content-Type", "application/json")
 	upstreamRequest.Header.Set("Accept", "text/event-stream")
-	for name, value := range route.CompatibilityHeaders {
+	upstreamRequest.Close = true
+	compatibilityHeaders, scopeErr := compatibilityHeadersForRequest(route, r)
+	if scopeErr != nil {
+		writeError(w, http.StatusBadRequest, contract.GatewayError{Code: "request_invalid", Message: scopeErr.Error(), RequestID: requestID(r), GatewayStage: "routing"})
+		return
+	}
+	route.CompatibilityHeaders = compatibilityHeaders
+	for name, value := range compatibilityHeaders {
 		upstreamRequest.Header.Set(name, value)
 	}
 	security.StripInternalHeaders(upstreamRequest.Header)
 
-	response, err := httpClient(route).Do(upstreamRequest)
+	client := h.clientForRoute(route)
+	defer client.CloseIdleConnections()
+	response, err := doUpstreamRequest(client, upstreamRequest, r.Context())
 	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return
-		}
-		writeError(w, http.StatusBadGateway, contract.GatewayError{Code: "network_error", Message: security.Redact(err.Error()), Retryable: true, RequestID: requestID(r), GatewayStage: "upstream"})
+		writeUpstreamRequestError(w, r, err, route)
 		return
 	}
 	defer response.Body.Close()
@@ -115,7 +126,7 @@ func (h *Handler) responses(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-TelePilot-Gateway-Stage", "upstream")
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		errorBody, _ := io.ReadAll(io.LimitReader(response.Body, 1<<20))
-		writeError(w, response.StatusCode, diagnostics.FromUpstream(response.StatusCode, errorBody, requestID(r)))
+		writeError(w, normalizedUpstreamStatus(response.StatusCode), diagnostics.FromUpstream(response.StatusCode, errorBody, requestID(r), routeSecretValues(route)...))
 		return
 	}
 	contentType := strings.ToLower(response.Header.Get("Content-Type"))
@@ -147,17 +158,72 @@ func (h *Handler) responses(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 	table := h.store.Current()
-	providerID, err := providerID(r)
-	if table == nil || err != nil {
-		writeError(w, http.StatusBadRequest, contract.GatewayError{Code: "request_invalid", Message: "Provider route is unavailable", RequestID: requestID(r), GatewayStage: "routing"})
+	if table == nil {
+		writeError(w, http.StatusServiceUnavailable, contract.GatewayError{Code: "gateway_unavailable", Message: "Provider snapshot is not ready", Retryable: true, RequestID: requestID(r), GatewayStage: "config"})
 		return
 	}
-	models := table.Models(providerID)
-	data := make([]map[string]any, 0, len(models))
-	for _, model := range models {
-		data = append(data, map[string]any{"id": model, "object": "model", "owned_by": "provider"})
+	providerID, err := providerID(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, contract.GatewayError{Code: "request_invalid", Message: err.Error(), RequestID: requestID(r), GatewayStage: "routing"})
+		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": data})
+	route, ok := table.ProviderRoute(providerID)
+	if !ok {
+		writeError(w, http.StatusNotFound, contract.GatewayError{Code: "provider_missing", Message: "Provider route is unavailable", RequestID: requestID(r), GatewayStage: "routing"})
+		return
+	}
+	release, ok := h.acquire(route)
+	if !ok {
+		writeError(w, http.StatusServiceUnavailable, contract.GatewayError{Code: "gateway_overloaded", Message: "Provider concurrency limit reached", Retryable: true, RequestID: requestID(r), GatewayStage: "admission"})
+		return
+	}
+	defer release()
+	client := h.clientForRoute(route)
+	defer client.CloseIdleConnections()
+	var response *http.Response
+	for index, endpoint := range route.ModelsEndpoints {
+		upstreamRequest, requestErr := http.NewRequestWithContext(r.Context(), http.MethodGet, endpoint, nil)
+		if requestErr != nil {
+			writeError(w, http.StatusBadGateway, contract.GatewayError{Code: "gateway_unavailable", Message: "Failed to create upstream request", Retryable: true, RequestID: requestID(r), GatewayStage: "request"})
+			return
+		}
+		upstreamRequest.Header.Set("Authorization", "Bearer "+route.APIKey)
+		upstreamRequest.Header.Set("Accept", "application/json")
+		upstreamRequest.Close = true
+		for name, value := range route.CompatibilityHeaders {
+			upstreamRequest.Header.Set(name, value)
+		}
+		security.StripInternalHeaders(upstreamRequest.Header)
+		response, err = doUpstreamRequest(client, upstreamRequest, r.Context())
+		if err != nil {
+			writeUpstreamRequestError(w, r, err, route)
+			return
+		}
+		if (response.StatusCode == http.StatusNotFound || response.StatusCode == http.StatusMethodNotAllowed) && index < len(route.ModelsEndpoints)-1 {
+			_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 1<<20))
+			_ = response.Body.Close()
+			continue
+		}
+		break
+	}
+	if response == nil {
+		writeError(w, http.StatusBadGateway, contract.GatewayError{Code: "gateway_unavailable", Message: "No upstream model endpoint is configured", Retryable: false, RequestID: requestID(r), GatewayStage: "config"})
+		return
+	}
+	defer response.Body.Close()
+	setGatewayHeaders(w, requestID(r), "upstream")
+	body, readErr := io.ReadAll(io.LimitReader(response.Body, maxBodyBytes+1))
+	if readErr != nil || len(body) > maxBodyBytes {
+		writeError(w, http.StatusBadGateway, contract.GatewayError{Code: "invalid_response", Message: "Upstream model list could not be read", RequestID: requestID(r), GatewayStage: "response"})
+		return
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		writeError(w, normalizedUpstreamStatus(response.StatusCode), diagnostics.FromUpstream(response.StatusCode, body, requestID(r), routeSecretValues(route)...))
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
 }
 
 func (h *Handler) acquire(route routing.Route) (func(), bool) {
@@ -193,6 +259,56 @@ func requestID(r *http.Request) string {
 	return strings.TrimSpace(r.Header.Get("X-TelePilot-Request-ID"))
 }
 
+func compatibilityHeadersForRequest(route routing.Route, r *http.Request) (map[string]string, error) {
+	switch strings.TrimSpace(r.Header.Get("X-TelePilot-Request-Scope")) {
+	case "", "inference":
+		return route.CompatibilityHeaders, nil
+	case "liveness":
+		return route.LivenessCompatibilityHeaders, nil
+	default:
+		return nil, errors.New("X-TelePilot-Request-Scope must be inference or liveness")
+	}
+}
+
+func routeSecretValues(route routing.Route) []string {
+	values := make([]string, 0, len(route.CompatibilityHeaders)+2)
+	values = append(values, route.APIKey, route.ProxyURL)
+	for _, value := range route.CompatibilityHeaders {
+		values = append(values, value)
+	}
+	return values
+}
+
+func writeUpstreamRequestError(w http.ResponseWriter, r *http.Request, err error, route routing.Route) {
+	if r.Context().Err() != nil {
+		return
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		writeError(w, http.StatusGatewayTimeout, contract.GatewayError{Code: "timeout", Message: "Upstream request timed out", Retryable: true, RequestID: requestID(r), GatewayStage: "upstream"})
+		return
+	}
+	writeError(w, http.StatusBadGateway, contract.GatewayError{Code: "network_error", Message: security.RedactKnown(err.Error(), routeSecretValues(route)...), Retryable: true, RequestID: requestID(r), GatewayStage: "upstream"})
+}
+
+func normalizedUpstreamStatus(status int) int {
+	if status < 400 || status > 599 {
+		return http.StatusBadGateway
+	}
+	return status
+}
+
+func doUpstreamRequest(client *http.Client, request *http.Request, downstream context.Context) (*http.Response, error) {
+	transport, canCancel := client.Transport.(interface{ CancelRequest(*http.Request) })
+	if !canCancel {
+		return client.Do(request)
+	}
+	stopCancel := context.AfterFunc(downstream, func() {
+		transport.CancelRequest(request)
+	})
+	defer stopCancel()
+	return client.Do(request)
+}
+
 func httpClient(route routing.Route) *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.DialContext = (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext
@@ -205,7 +321,13 @@ func httpClient(route routing.Route) *http.Client {
 	if timeout <= 0 {
 		timeout = 90 * time.Second
 	}
-	return &http.Client{Transport: transport, Timeout: timeout}
+	return &http.Client{
+		Transport: transport,
+		Timeout:   timeout,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 }
 
 func copySSE(w io.Writer, reader io.Reader, upstreamModel, publicModel string) error {
@@ -299,7 +421,18 @@ func restoreModelValue(value any, upstreamModel, publicModel string) {
 }
 
 func writeError(w http.ResponseWriter, status int, gatewayError contract.GatewayError) {
+	setGatewayHeaders(w, gatewayError.RequestID, gatewayError.GatewayStage)
 	writeJSON(w, status, contract.ErrorEnvelope{Error: gatewayError})
+}
+
+func setGatewayHeaders(w http.ResponseWriter, requestID, stage string) {
+	w.Header().Set("X-TelePilot-Gateway-Version", version.Release)
+	if requestID != "" {
+		w.Header().Set("X-TelePilot-Gateway-Request-ID", requestID)
+	}
+	if stage != "" {
+		w.Header().Set("X-TelePilot-Gateway-Stage", stage)
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

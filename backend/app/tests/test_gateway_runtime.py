@@ -52,6 +52,15 @@ async def test_snapshot_sync_is_revisioned_and_deduplicated(monkeypatch: pytest.
     assert first.state == second.state == "ready"
     assert first.revision == second.revision == 1
     assert request.await_count == 1
+    snapshot = request.await_args.kwargs["json_body"]
+    assert snapshot["gateway_protocol_version"] == "2"
+    provider = snapshot["providers"][0]
+    assert provider["base_url"] == "https://upstream.example/v1"
+    assert provider["liveness_compatibility_headers"] == {}
+    assert provider["models_endpoints"] == [
+        "https://upstream.example/v1/models",
+        "https://upstream.example/models",
+    ]
 
 
 @pytest.mark.asyncio

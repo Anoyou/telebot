@@ -2862,6 +2862,50 @@
             ],
             "title": "Error"
           },
+          "execution_backend": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Execution Backend"
+          },
+          "gateway_request_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gateway Request Id"
+          },
+          "gateway_stage": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gateway Stage"
+          },
+          "gateway_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gateway Version"
+          },
           "input_tokens": {
             "default": 0,
             "title": "Input Tokens",
@@ -6893,6 +6937,15 @@
             "title": "Default Model",
             "type": "string"
           },
+          "execution_backend": {
+            "default": "direct",
+            "enum": [
+              "direct",
+              "codex_gateway"
+            ],
+            "title": "Execution Backend",
+            "type": "string"
+          },
           "modality": {
             "default": "text",
             "enum": [
@@ -7034,6 +7087,11 @@
           },
           "default_model": {
             "title": "Default Model",
+            "type": "string"
+          },
+          "execution_backend": {
+            "default": "direct",
+            "title": "Execution Backend",
             "type": "string"
           },
           "has_api_key": {
@@ -7216,6 +7274,21 @@
               }
             ],
             "title": "Default Model"
+          },
+          "execution_backend": {
+            "anyOf": [
+              {
+                "enum": [
+                  "direct",
+                  "codex_gateway"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Execution Backend"
           },
           "modality": {
             "anyOf": [
@@ -7474,6 +7547,50 @@
             ],
             "title": "Error Type"
           },
+          "execution_backend": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Execution Backend"
+          },
+          "gateway_request_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gateway Request Id"
+          },
+          "gateway_stage": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gateway Stage"
+          },
+          "gateway_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gateway Version"
+          },
           "id": {
             "title": "Id",
             "type": "integer"
@@ -7572,6 +7689,10 @@
           "provider_name",
           "model",
           "client_identity_profile",
+          "execution_backend",
+          "gateway_version",
+          "gateway_request_id",
+          "gateway_stage",
           "source",
           "input_tokens",
           "output_tokens",
@@ -8417,6 +8538,50 @@
               }
             ],
             "title": "Error Category"
+          },
+          "execution_backend": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Execution Backend"
+          },
+          "gateway_request_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gateway Request Id"
+          },
+          "gateway_stage": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gateway Stage"
+          },
+          "gateway_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gateway Version"
           },
           "input_tokens": {
             "default": 0,

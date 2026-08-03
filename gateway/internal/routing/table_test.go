@@ -7,9 +7,9 @@ import (
 )
 
 func TestSameModelNeverCrossesProviderCredentials(t *testing.T) {
-	table, err := NewTable(contract.ConfigSnapshot{SchemaVersion: 1, ProtocolVersion: "1", Revision: 1, Providers: []contract.ProviderConfig{
-		{ID: 31, BaseURL: "https://one.example/v1", APIKey: "key-one", Models: []string{"gpt-x"}},
-		{ID: 32, BaseURL: "https://two.example/v1", APIKey: "key-two", Models: []string{"gpt-x"}},
+	table, err := NewTable(contract.ConfigSnapshot{SchemaVersion: 1, ProtocolVersion: contract.ProtocolVersion, Revision: 1, Providers: []contract.ProviderConfig{
+		{ID: 31, BaseURL: "https://one.example/v1", APIKey: "key-one", Models: []string{"gpt-x"}, ModelsEndpoints: []string{"https://one.example/v1/models"}},
+		{ID: 32, BaseURL: "https://two.example/v1", APIKey: "key-two", Models: []string{"gpt-x"}, ModelsEndpoints: []string{"https://two.example/v1/models"}},
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -28,8 +28,8 @@ func TestSameModelNeverCrossesProviderCredentials(t *testing.T) {
 }
 
 func TestInvalidProviderRejectsWholeTable(t *testing.T) {
-	_, err := NewTable(contract.ConfigSnapshot{SchemaVersion: 1, ProtocolVersion: "1", Revision: 2, Providers: []contract.ProviderConfig{
-		{ID: 1, BaseURL: "https://ok.example/v1", APIKey: "ok", Models: []string{"a"}},
+	_, err := NewTable(contract.ConfigSnapshot{SchemaVersion: 1, ProtocolVersion: contract.ProtocolVersion, Revision: 2, Providers: []contract.ProviderConfig{
+		{ID: 1, BaseURL: "https://ok.example/v1", APIKey: "ok", Models: []string{"a"}, ModelsEndpoints: []string{"https://ok.example/v1/models"}},
 		{ID: 2, BaseURL: "file:///run/telepilot/gateway.sock", APIKey: "bad", Models: []string{"b"}},
 	}})
 	if err == nil {

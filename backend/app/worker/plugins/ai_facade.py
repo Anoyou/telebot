@@ -12,7 +12,7 @@ import asyncio
 import inspect
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from sqlalchemy import select
@@ -350,8 +350,11 @@ class PluginAI:
         )
         quota_ticket: plugin_ai_quota.PluginAIQuotaTicket | None = None
         agent_actual_tokens = 0
+        active_provider = primary
+        active_model = selected_model
         used_provider = primary
         used_fallback = False
+        attempted_models: dict[int, str] = {}
         try:
             quota_ticket = await plugin_ai_quota.acquire(
                 self.plugin_key,
@@ -359,18 +362,34 @@ class PluginAI:
                 estimated_tokens=limits.max_total_tokens,
             )
 
+            async def track_model_progress(event: dict[str, Any]) -> None:
+                if str(event.get("type") or "") != "model_attempt":
+                    return
+                provider_id = event.get("provider_id")
+                attempted_model = str(event.get("model") or "").strip()
+                if isinstance(provider_id, int) and attempted_model:
+                    attempted_models[provider_id] = attempted_model
+
             async def model_call(current: ModelRequest):
-                nonlocal used_provider, used_fallback
+                nonlocal active_model, active_provider, used_provider, used_fallback
+                provider_request = replace(current, model=active_model)
                 response, actual_provider, fallback = await invoke_structured(
-                    primary,
+                    active_provider,
                     providers,
-                    current,
+                    provider_request,
                     account_id=self.account_id,
                     source=f"plugin:{self.plugin_key}:agent",
                     matched_tag=matched_tag,
+                    progress_callback=track_model_progress,
                 )
                 used_provider = actual_provider
-                used_fallback = used_fallback or fallback
+                used_fallback = used_fallback or fallback or actual_provider.id != primary.id
+                active_provider = actual_provider
+                active_model = (
+                    attempted_models.get(actual_provider.id)
+                    or _tools_model_for_dto(actual_provider)
+                    or active_model
+                )
                 return response
 
             callbacks = (
@@ -512,6 +531,8 @@ class PluginAI:
         estimated_tokens = 0
         provider_call_started = False
         stream_terminal_received = False
+        active_client: Any | None = None
+        terminal_chunk: Any | None = None
 
         async def settle_interrupted(error_type: str) -> None:
             """Conservatively charge a stream once provider execution started."""
@@ -540,6 +561,7 @@ class PluginAI:
                 started_at=started_at,
                 request_preview=llm_runtime.request_preview_for_usage(system_prompt, user_prompt),
                 response_preview=llm_runtime.preview_text_for_usage("".join(response_preview_parts)),
+                outcome=active_client,
             )
 
         try:
@@ -562,6 +584,7 @@ class PluginAI:
             )
             if inspect.isawaitable(client):
                 client = await client
+            active_client = client
             provider_call_started = True
             async with asyncio.timeout(clamped_timeout):
                 async for chunk in client.stream_complete(
@@ -574,6 +597,7 @@ class PluginAI:
                 ):
                     if getattr(chunk, "done", False):
                         stream_terminal_received = True
+                        terminal_chunk = chunk
                         final_input_tokens = int(getattr(chunk, "input_tokens", None) or 0)
                         final_output_tokens = int(getattr(chunk, "output_tokens", None) or 0)
                         final_model = str(getattr(chunk, "model", None) or final_model or "")
@@ -613,6 +637,7 @@ class PluginAI:
                 started_at=started_at,
                 request_preview=llm_runtime.request_preview_for_usage(system_prompt, user_prompt),
                 response_preview=llm_runtime.preview_text_for_usage("".join(response_preview_parts)),
+                outcome=terminal_chunk,
             )
         except plugin_ai_quota.PluginAIQuotaExceeded as exc:
             raise AIQuotaError(str(exc)) from exc
@@ -937,6 +962,7 @@ async def _emit_stream_usage(
     error_type: str | None = None,
     request_preview: str | None = None,
     response_preview: str | None = None,
+    outcome: object | None = None,
 ) -> None:
     await llm_runtime._emit_usage(
         llm_runtime.UsageRecord(
@@ -955,6 +981,7 @@ async def _emit_stream_usage(
             fallback_chain=[provider.name],
             request_preview=request_preview,
             response_preview=response_preview,
+            **llm_runtime.usage_transport_fields(provider, outcome),
         )
     )
 

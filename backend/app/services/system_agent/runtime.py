@@ -28,7 +28,7 @@ from ..llm_dto import LLMProviderDTO
 from ..llm_invoke import invoke_structured, stream_structured
 from ..llm_protocol import MessageRole, ModelMessage, ModelRequest, ModelUsage, ToolCall, ToolResult
 from ..llm_protocol import ToolSpec as LlmToolSpec
-from ..llm_runtime import ProviderSwitchRequired
+from ..llm_runtime import ProviderSwitchRequired, diagnostic_error_kwargs
 from .config import (
     load_system_context_flags,
     resolve_agent_providers,
@@ -836,10 +836,17 @@ class SystemAgentRuntime:
                 exc.provider_name,
             )
             timings = finalize_stage_timings(ok=False)
+            error_facts = diagnostic_error_kwargs(exc.last_error)
+            execution_backend = error_facts.get("execution_backend") or active_provider.execution_backend
+            gateway_facts = error_facts if execution_backend == "codex_gateway" else {}
             yield next_event(
                 "error",
                 code="AGENT_PROVIDER_SWITCH_REQUIRED",
                 message=str(exc)[:500],
+                execution_backend=execution_backend,
+                gateway_version=gateway_facts.get("gateway_version"),
+                gateway_request_id=gateway_facts.get("request_id"),
+                gateway_stage=gateway_facts.get("gateway_stage"),
                 provider_switch={
                     "from_provider_name": exc.provider_name,
                     "candidates": exc.candidates,
@@ -855,10 +862,17 @@ class SystemAgentRuntime:
         except Exception as exc:  # noqa: BLE001
             log.exception("system agent run failed session=%s", session.id)
             timings = finalize_stage_timings(ok=False)
+            error_facts = diagnostic_error_kwargs(exc)
+            execution_backend = error_facts.get("execution_backend") or active_provider.execution_backend
+            gateway_facts = error_facts if execution_backend == "codex_gateway" else {}
             yield next_event(
                 "error",
                 code="AGENT_RUN_FAILED",
                 message=redact_turn_text(str(exc))[:500],
+                execution_backend=execution_backend,
+                gateway_version=gateway_facts.get("gateway_version"),
+                gateway_request_id=gateway_facts.get("request_id"),
+                gateway_stage=gateway_facts.get("gateway_stage"),
             )
             yield next_event("done", ok=False, stage_timings=timings)
             return
@@ -898,6 +912,10 @@ class SystemAgentRuntime:
             route_domains=list(route.domains),
             stage_timings=timings,
             elapsed_ms=timings.get("total_ms"),
+            execution_backend=result.execution_backend,
+            gateway_version=result.gateway_version,
+            gateway_request_id=result.gateway_request_id,
+            gateway_stage=result.gateway_stage,
         )
 
         yield next_event(
@@ -1220,6 +1238,10 @@ def _usage_payload(
     route_domains: list[str] | None = None,
     stage_timings: dict[str, Any] | None = None,
     elapsed_ms: int | None = None,
+    execution_backend: str | None = None,
+    gateway_version: str | None = None,
+    gateway_request_id: str | None = None,
+    gateway_stage: str | None = None,
 ) -> dict[str, Any]:
     """usage schema_version=2：实际调用数与暴露工具数分拆；含 stage_timings。"""
 
@@ -1231,6 +1253,10 @@ def _usage_payload(
         "provider_name": provider.name,
         "model": model,
         "api_format": str(getattr(provider, "api_format", None) or "chat_completions"),
+        "execution_backend": execution_backend or provider.execution_backend,
+        "gateway_version": gateway_version,
+        "gateway_request_id": gateway_request_id,
+        "gateway_stage": gateway_stage,
         "requested_provider_id": req_p.id,
         "requested_provider_name": req_p.name,
         "requested_model": req_m,

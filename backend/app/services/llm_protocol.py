@@ -225,6 +225,10 @@ class ModelResponse:
     # Provider-native chain-of-thought (DeepSeek reasoning_content / Anthropic thinking)。
     # 与 content 分离，便于工具轮完整回传；text 属性仍只暴露最终可见正文。
     reasoning_content: str | None = None
+    execution_backend: str = "direct"
+    gateway_version: str | None = None
+    gateway_request_id: str | None = None
+    gateway_stage: str | None = None
 
     @property
     def text(self) -> str:

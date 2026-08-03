@@ -8,11 +8,11 @@ import (
 	"github.com/anoyou/telepilot/gateway/internal/security"
 )
 
-func FromUpstream(status int, body []byte, requestID string) contract.GatewayError {
+func FromUpstream(status int, body []byte, requestID string, knownSecrets ...string) contract.GatewayError {
 	code, message := structuredError(body)
 	category := categoryFor(status, code, message)
 	return contract.GatewayError{
-		Code: category, Message: security.Redact(message), Retryable: retryable(category),
+		Code: category, Message: security.RedactKnown(message, knownSecrets...), Retryable: retryable(category),
 		StatusCode: status, UpstreamErrorCode: code, RequestID: requestID, GatewayStage: "upstream",
 	}
 }

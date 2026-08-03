@@ -374,6 +374,77 @@ async def test_agent_uses_manifest_allowlist_and_shared_runtime(monkeypatch) -> 
 
 
 @pytest.mark.asyncio
+async def test_agent_sticks_to_provider_after_fallback(monkeypatch) -> None:
+    providers = {
+        1: _provider(1, name="gateway", api_format="responses"),
+        2: _provider(2, name="direct", api_format="responses"),
+    }
+    starts: list[int] = []
+
+    async def _loader():
+        return providers
+
+    async def lookup(_arguments: dict[str, Any]) -> dict[str, Any]:
+        return {"ok": True}
+
+    async def _run_agent(model_call, request, _tools, **_kwargs):
+        await model_call(request)
+        response = await model_call(request)
+        return AgentResult(
+            text=response.text,
+            model=response.model,
+            messages=request.messages,
+            usage=response.usage,
+            steps=2,
+            tool_calls=1,
+            stop_reason=StopReason.COMPLETED,
+        )
+
+    async def _invoke(primary, _providers, request, **kwargs):
+        starts.append(primary.id)
+        actual = providers[2] if len(starts) == 1 else primary
+        progress = kwargs.get("progress_callback")
+        if progress is not None:
+            await progress({"type": "model_attempt", "provider_id": actual.id, "model": request.model})
+        return (
+            ModelResponse(
+                model=request.model,
+                content=(TextContent("done"),),
+                usage=ModelUsage(input_tokens=1, output_tokens=1),
+            ),
+            actual,
+            actual.id != primary.id,
+        )
+
+    monkeypatch.setattr(ai_facade, "run_agent", _run_agent)
+    monkeypatch.setattr(ai_facade, "invoke_structured", _invoke)
+    monkeypatch.setattr(ai_facade.plugin_ai_quota, "acquire", AsyncNoop(return_value=object()))
+    monkeypatch.setattr(ai_facade.plugin_ai_quota, "release", AsyncNoop())
+    facade = PluginAI(
+        account_id=7,
+        plugin_key="demo",
+        provider_loader=_loader,
+        allow_agent=True,
+        manifest={
+            "capabilities": {"agent_tools": {"enabled": True}},
+            "agent_tools": [
+                {
+                    "name": "lookup",
+                    "description": "Lookup",
+                    "parameters": {"type": "object", "properties": {}},
+                }
+            ],
+        },
+    )
+
+    result = await facade.run_agent("sys", "user", handlers={"lookup": lookup})
+
+    assert result.text == "done"
+    assert starts == [1, 2]
+    assert result.provider_id == 2
+
+
+@pytest.mark.asyncio
 async def test_agent_failure_settles_plugin_quota_with_consumed_tokens(monkeypatch) -> None:
     async def _loader():
         return {1: _provider(1, api_format="responses")}

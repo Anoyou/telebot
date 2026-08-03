@@ -5283,6 +5283,14 @@ export interface components {
             empty_response: boolean;
             /** Error */
             error?: string | null;
+            /** Execution Backend */
+            execution_backend?: string | null;
+            /** Gateway Request Id */
+            gateway_request_id?: string | null;
+            /** Gateway Stage */
+            gateway_stage?: string | null;
+            /** Gateway Version */
+            gateway_version?: string | null;
             /**
              * Input Tokens
              * @default 0
@@ -6803,6 +6811,12 @@ export interface components {
             /** Default Model */
             default_model: string;
             /**
+             * Execution Backend
+             * @default direct
+             * @enum {string}
+             */
+            execution_backend: "direct" | "codex_gateway";
+            /**
              * Modality
              * @default text
              * @enum {string}
@@ -6867,6 +6881,11 @@ export interface components {
             created_at: string;
             /** Default Model */
             default_model: string;
+            /**
+             * Execution Backend
+             * @default direct
+             */
+            execution_backend: string;
             /** Has Api Key */
             has_api_key: boolean;
             /** Id */
@@ -6923,6 +6942,8 @@ export interface components {
             cost_tier?: number | null;
             /** Default Model */
             default_model?: string | null;
+            /** Execution Backend */
+            execution_backend?: ("direct" | "codex_gateway") | null;
             /** Modality */
             modality?: ("text" | "vision" | "audio" | "multimodal") | null;
             /** Models */
@@ -6987,6 +7008,14 @@ export interface components {
             created_at: string;
             /** Error Type */
             error_type: string | null;
+            /** Execution Backend */
+            execution_backend: string | null;
+            /** Gateway Request Id */
+            gateway_request_id: string | null;
+            /** Gateway Stage */
+            gateway_stage: string | null;
+            /** Gateway Version */
+            gateway_version: string | null;
             /** Id */
             id: number;
             /** Input Tokens */
@@ -7273,6 +7302,14 @@ export interface components {
             error?: string | null;
             /** Error Category */
             error_category?: string | null;
+            /** Execution Backend */
+            execution_backend?: string | null;
+            /** Gateway Request Id */
+            gateway_request_id?: string | null;
+            /** Gateway Stage */
+            gateway_stage?: string | null;
+            /** Gateway Version */
+            gateway_version?: string | null;
             /**
              * Input Tokens
              * @default 0
