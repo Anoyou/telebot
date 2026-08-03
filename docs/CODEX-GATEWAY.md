@@ -16,6 +16,19 @@ Gateway Provider 保存前会检查内置二进制和协议兼容性。Gateway �
 
 Provider 与其引用代理的 Web/System Agent 写入共享进程锁和 PostgreSQL 事务 advisory lock：候选快照必须在数据库 commit 前同步；commit、取消或同步失败时会从已提交数据库快照补偿恢复。同步结果不确定时 Gateway 子进程会先停止并后台重试，避免继续使用未提交的路由或凭据。
 
+### Gateway 管理的 Codex 请求身份
+
+Gateway 不是把普通请求只换一个 UA。它依据 TelePilot 传入的 Provider 作用域伪名、会话、Run、Turn 与序号，为每个请求生成并同步以下公开传输契约：
+
+- 稳定且 Provider 隔离的 `prompt_cache_key`、`Session_id`、session/thread/request ID；
+- installation、session、thread、turn、window 对应的 `client_metadata`；
+- 同一份 `X-Codex-Turn-Metadata` 与 `X-Codex-Window-Id` 兼容投影；
+- 固定审查基线的 Codex `User-Agent`、`Originator` 与 `Version`。
+
+身份字段在 Provider 兼容请求头之后由 Gateway 强制覆盖，避免自定义头拆散同一会话身份。TelePilot 原始账号、Telegram、Agent 会话 ID 不会出站；Gateway 收到的是已按 Provider 作用域 HMAC 伪名化的值，并再次转换为稳定 UUID。实现与测试基线见 `gateway/UPSTREAM.md`。
+
+这仍不等于导入官方账号：Gateway 不生成 OAuth、ChatGPT Account ID、Cookie、设备证明、attestation 或 Agent Identity。若上游要求其中任一凭据，系统会明确报告 `official_account_required`，不会伪造或降级绕过。
+
 ## 健康状态
 
 「系统状态」展示三种稳定状态：
@@ -32,7 +45,8 @@ Provider 与其引用代理的 Web/System Agent 写入共享进程锁和 Postgre
 
 - `gateway_unavailable`：Gateway 未启动、Socket 不可达、协议不兼容或配置未就绪。先看系统状态，再确认运行镜像包含 `/usr/local/bin/telepilot-gateway`。
 - `gateway_overloaded`：Gateway 全局或单 Provider 并发上限已满。等待当前请求结束后重试；Gateway 不会无限排队。
-- `client_rejected` / `official_account_required`：上游拒绝当前客户端或要求官方账号运行时。它们不等同于 API Key 错误。
+- `client_rejected`：上游拒绝当前客户端。Gateway 已补齐公开 Codex 请求契约；若仍出现该错误，先核对 Provider 是否确实支持 API-Key 形式的 Codex Responses，再检查固定上游基线是否需要升级。
+- `official_account_required`：上游明确要求 OAuth / ChatGPT 账号等官方账号运行时；它不等同于 API Key 错误，也不由 Gateway 伪造。
 - `quota_exhausted`、`rate_limited`、`upstream_error`、`timeout`：由 TelePilot runtime 按现有规则决定重试或切换其它 Provider。Gateway 自己不做语义重试。
 
 若 Gateway Provider 失败，TelePilot 可以按配置切换到另一个 Provider；不会在同一个 Provider 内绕过 Gateway 偷跑 direct。流已经输出文本后不会切换，避免拼接两次回答。
@@ -81,7 +95,7 @@ Gateway 只在 Unix Socket 上提供内部 HTTP，不能加入 FastAPI OpenAPI�
 
 - Provider API Key 只通过目录权限 `0700`、Socket 权限 `0600` 的 Unix Socket 控制面进入 Gateway 内存，不写 Gateway 配置文件。Socket 只供 Web 容器内同一运行用户访问，与 updater 挂载的宿主 Docker socket 无关。
 - Gateway 不记录 Base URL、请求正文、响应正文、Authorization、API Key、兼容请求头值或代理凭据；未选择 Provider 代理时不会继承进程的 `HTTP_PROXY` / `HTTPS_PROXY`。
-- TelePilot 内部 `X-TelePilot-*` 请求头在 Gateway 边界剥离，用户不能覆盖系统鉴权头、Gateway 内部头或 Codex 身份头。
+- TelePilot 内部 `X-TelePilot-*` 请求头只用于生成 Provider 隔离的 Codex 会话身份，并在 Gateway 边界剥离；用户不能覆盖系统鉴权头、Gateway 内部头或 Codex 身份头。
 - 上游重定向不会被自动跟随，避免自定义认证头跨 origin 泄露；上游错误在进入日志、API、usage 或 RunTrace 前脱敏。
 - Gateway 不读取、导入、存储或同步 Codex OAuth、账号身份、设备证明或 `~/.codex/auth.json`。
 - Provider 删除、变更或 Gateway 终止时，旧路由和凭据引用从内存清理；Socket 只允许同一运行用户访问。

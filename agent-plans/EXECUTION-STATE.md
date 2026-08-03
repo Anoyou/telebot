@@ -25,7 +25,7 @@
 - [x] WP-C3 Agent、插件、测活与 usage 验收 — done `1892beee`
 - [x] WP-C4 Provider UI、健康与文档 — done `6dbeeaeb`
 
-开发工作包已完成；计划 §15.4 的真实受限 Provider 对照、§16 的多架构镜像与线上 Deploy Check 属于发布前外部验收，尚未用本文件标记为已通过。
+开发工作包已完成；发布审查补齐了 Codex session/thread/turn/window/installation、prompt cache 与出站身份契约。2026-08-03 对原受限 Provider #32 的对照请求未复现原 `official clients` 403，但 Provider 反代当前返回 `502 Lucky Bad Gateway`；该结果既不能证明身份已被接受，也不能标记为真实模型成功。amd64/arm64 Gateway 二进制与完整 Web runtime 镜像已完成本地构建检查，线上 Deploy Check 仍属于发布后外部验收。
 
 ---
 

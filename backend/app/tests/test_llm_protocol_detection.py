@@ -34,6 +34,12 @@ def test_classify_403_client_rejected_when_identity_hint() -> None:
     )
 
 
+def test_client_rejected_suggestion_points_to_gateway_without_claiming_oauth_support() -> None:
+    suggestion = diag.suggestion_for(diag.DIAG_CLIENT_REJECTED)
+    assert "内置 Gateway" in suggestion
+    assert "OAuth" not in suggestion
+
+
 def test_classify_403_plain_permission_is_permission_denied() -> None:
     assert diag.classify_status_code(403, "forbidden") == diag.DIAG_PERMISSION_DENIED
 

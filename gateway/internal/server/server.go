@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -84,6 +85,13 @@ func (s *Server) Inflight() int64 { return s.inflight.Load() }
 
 func (s *Server) limit(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 控制面和健康检查必须保留独立通道。若数据面占满全局并发后连配置
+		// PUT 都返回 503，主进程会按“快照结果未知”停止 Gateway，形成级联故障。
+		if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" || r.URL.Path == "/version" ||
+			strings.HasPrefix(r.URL.Path, "/internal/v1/") {
+			next.ServeHTTP(w, r)
+			return
+		}
 		select {
 		case s.sem <- struct{}{}:
 			s.inflight.Add(1)

@@ -25,8 +25,13 @@
 
 ## [Unreleased]
 
+## [0.91.0-beta.2] - 2026-08-03 · minor（次版本预发布） · Codex Gateway 请求身份与发布收口
+
 ### 修复
 
+- 补齐 Gateway 的 Codex Responses 请求身份：为每个 Provider 隔离生成 prompt cache、session/thread/turn/window/installation 元数据，并同步请求体与兼容头，避免仅模拟 UA 时仍被上游判定为非官方客户端。
+- 为 Gateway 健康与配置控制面保留独立并发通道，避免数据面满载时配置同步 503 触发整个 Gateway 级联停止。
+- 修正客户端受限错误建议：不再笼统归因 API Key，Responses Provider 会优先提示内置 Gateway，确需 OAuth/官方账号时保持明确拒绝伪造。
 - 修正生产更新失败后的人工回滚提示，要求同时恢复记录的 commit 与 Web、Frontend、Updater 三张镜像；涉及迁移时明确恢复迁移前备份，避免代码与镜像混装。
 
 ### 文档

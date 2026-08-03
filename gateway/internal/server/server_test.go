@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"io"
 	"net"
 	"net/http"
 	"path/filepath"
@@ -49,6 +50,57 @@ func TestReadyRequiresSnapshot(t *testing.T) {
 	_ = response.Body.Close()
 	if response.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("ready status = %d", response.StatusCode)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_ = srv.Shutdown(ctx)
+	<-done
+}
+
+func TestControlPlaneRemainsAvailableWhenDataPlaneIsSaturated(t *testing.T) {
+	socket := filepath.Join(t.TempDir(), "gateway.sock")
+	started := make(chan struct{})
+	release := make(chan struct{})
+	data := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/hold" {
+			close(started)
+			<-release
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	srv := New(socket, 1, func() bool { return true }, data)
+	done := make(chan error, 1)
+	go func() { done <- srv.Serve() }()
+	waitForSocket(t, socket)
+	client := unixClient(socket)
+
+	dataDone := make(chan error, 1)
+	go func() {
+		response, err := client.Get("http://unix/v1/hold")
+		if err == nil {
+			_, _ = io.Copy(io.Discard, response.Body)
+			_ = response.Body.Close()
+		}
+		dataDone <- err
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("data request did not acquire concurrency slot")
+	}
+
+	response, err := client.Get("http://unix/healthz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("health status under saturation = %d", response.StatusCode)
+	}
+
+	close(release)
+	if err := <-dataDone; err != nil {
+		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()

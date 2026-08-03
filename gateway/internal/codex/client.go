@@ -92,8 +92,8 @@ func (h *Handler) responses(w http.ResponseWriter, r *http.Request) {
 	if _, exists := payload["instructions"]; !exists {
 		payload["instructions"] = ""
 	}
-	upstreamBody, _ := json.Marshal(payload)
-	upstreamRequest, err := http.NewRequestWithContext(r.Context(), http.MethodPost, route.BaseURL+"/responses", bytes.NewReader(upstreamBody))
+	identity := buildRequestIdentity(route, r)
+	upstreamRequest, err := http.NewRequestWithContext(r.Context(), http.MethodPost, route.BaseURL+"/responses", nil)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, contract.GatewayError{Code: "gateway_unavailable", Message: "Failed to create upstream request", Retryable: true, RequestID: requestID(r), GatewayStage: "request"})
 		return
@@ -111,7 +111,11 @@ func (h *Handler) responses(w http.ResponseWriter, r *http.Request) {
 	for name, value := range compatibilityHeaders {
 		upstreamRequest.Header.Set(name, value)
 	}
+	applyCodexIdentity(payload, upstreamRequest, identity)
 	security.StripInternalHeaders(upstreamRequest.Header)
+	upstreamBody, _ := json.Marshal(payload)
+	upstreamRequest.Body = io.NopCloser(bytes.NewReader(upstreamBody))
+	upstreamRequest.ContentLength = int64(len(upstreamBody))
 
 	client := h.clientForRoute(route)
 	defer client.CloseIdleConnections()

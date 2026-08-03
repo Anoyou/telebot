@@ -77,7 +77,7 @@ _SUGGESTIONS = {
     DIAG_RATE_LIMITED: "触发频率或额度限制；稍后重试或降低该 Provider 的并发。",
     DIAG_AUTH_FAILED: "鉴权失败：请检查 API Key 是否有效、是否有该模型权限。",
     DIAG_PERMISSION_DENIED: "上游已识别凭据但拒绝访问；请检查模型、项目、区域或账号权限。",
-    DIAG_CLIENT_REJECTED: "上游限制了当前客户端；兼容请求头不等于官方运行时，请改用受支持的接入方式。",
+    DIAG_CLIENT_REJECTED: "上游限制了当前客户端；Responses Provider 可改用内置 Gateway，若仍被拒绝则需使用上游支持的官方接入方式。",
     DIAG_OFFICIAL_ACCOUNT_REQUIRED: "上游要求官方账号运行时；TelePilot 不会伪造或导入账号身份凭据。",
     DIAG_ACCOUNT_POLICY: "请求被账号或内容策略拒绝；请检查上游账号策略与请求内容。",
     DIAG_PROTOCOL_REJECTED: "该端点不接受此协议的请求格式；确认 Base URL 与 API Format 是否匹配。",

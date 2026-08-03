@@ -18,17 +18,19 @@ import (
 	"github.com/anoyou/telepilot/gateway/internal/routing"
 )
 
-func TestProviderRouteRewritesModelAndUsesLivenessHeaders(t *testing.T) {
+func TestProviderRouteRewritesModelAndUsesCompleteCodexIdentity(t *testing.T) {
 	var gotAuth, gotModel, leakedHeader, inferenceScope, livenessScope string
+	var gotHeaders http.Header
+	var gotPayload map[string]any
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
+		gotHeaders = r.Header.Clone()
 		leakedHeader = r.Header.Get("X-TelePilot-Session-ID")
 		inferenceScope = r.Header.Get("X-Inference-Scope")
 		livenessScope = r.Header.Get("X-Liveness-Scope")
 		body, _ := io.ReadAll(r.Body)
-		var payload map[string]any
-		_ = json.Unmarshal(body, &payload)
-		gotModel, _ = payload["model"].(string)
+		_ = json.Unmarshal(body, &gotPayload)
+		gotModel, _ = gotPayload["model"].(string)
 		w.Header().Set("Content-Type", "text/event-stream")
 		fmt.Fprintf(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"model\":%q,\"output\":[]}}\n\n", gotModel)
 	}))
@@ -39,6 +41,9 @@ func TestProviderRouteRewritesModelAndUsesLivenessHeaders(t *testing.T) {
 	request.Header.Set("X-TelePilot-Provider-ID", "1")
 	request.Header.Set("X-TelePilot-Request-ID", "req-1")
 	request.Header.Set("X-TelePilot-Session-ID", "private-session")
+	request.Header.Set("X-TelePilot-Run-ID", "private-run")
+	request.Header.Set("X-TelePilot-Turn-ID", "private-turn")
+	request.Header.Set("X-TelePilot-Turn-Index", "3")
 	request.Header.Set("X-TelePilot-Request-Scope", "liveness")
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, request)
@@ -48,8 +53,102 @@ func TestProviderRouteRewritesModelAndUsesLivenessHeaders(t *testing.T) {
 	if gotAuth != "Bearer secret-one" || gotModel != "upstream-model" || leakedHeader != "" || inferenceScope != "" || livenessScope != "liveness-only" {
 		t.Fatalf("auth=%q model=%q leaked=%q inference=%q liveness=%q", gotAuth, gotModel, leakedHeader, inferenceScope, livenessScope)
 	}
+	for name, want := range map[string]string{
+		"User-Agent":            codexUserAgent,
+		"Originator":            codexOriginator,
+		"Version":               codexClientVersion,
+		"Session_id":            stringValue(gotPayload["prompt_cache_key"]),
+		"X-Codex-Window-Id":     stringValue(nestedValue(gotPayload, "client_metadata", "x-codex-window-id")),
+		"X-Codex-Turn-Metadata": stringValue(nestedValue(gotPayload, "client_metadata", "x-codex-turn-metadata")),
+	} {
+		if got := gotHeaders.Get(name); got == "" || got != want {
+			t.Fatalf("%s=%q want=%q headers=%#v payload=%#v", name, got, want, gotHeaders, gotPayload)
+		}
+	}
+	clientMetadata, ok := gotPayload["client_metadata"].(map[string]any)
+	if !ok {
+		t.Fatalf("client_metadata missing: %#v", gotPayload)
+	}
+	for _, name := range []string{"x-codex-installation-id", "session_id", "thread_id", "turn_id", "x-codex-window-id", "x-codex-turn-metadata"} {
+		if stringValue(clientMetadata[name]) == "" {
+			t.Fatalf("client_metadata.%s missing: %#v", name, clientMetadata)
+		}
+	}
+	var turnMetadata map[string]any
+	if err := json.Unmarshal([]byte(stringValue(clientMetadata["x-codex-turn-metadata"])), &turnMetadata); err != nil {
+		t.Fatalf("turn metadata invalid: %v", err)
+	}
+	if turnMetadata["request_kind"] != "turn" || turnMetadata["turn_index"] != float64(3) {
+		t.Fatalf("turn metadata incomplete: %#v", turnMetadata)
+	}
 	if strings.Contains(recorder.Body.String(), "upstream-model") || !strings.Contains(recorder.Body.String(), "public-model") {
 		t.Fatalf("public model was not restored: %s", recorder.Body.String())
+	}
+}
+
+func TestCodexIdentityOverridesConflictingPayloadMetadata(t *testing.T) {
+	payload := map[string]any{
+		"prompt_cache_key": "user-cache",
+		"client_metadata": map[string]any{
+			"custom":                  "kept",
+			"x-codex-installation-id": "user-installation",
+			"x-codex-window-id":       "user-window",
+		},
+	}
+	upstream := httptest.NewRequest(http.MethodPost, "https://upstream.example/responses", nil)
+	upstream.Header.Set("User-Agent", "user-agent")
+	upstream.Header.Set("Originator", "user-originator")
+	downstream := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	downstream.Header.Set("X-TelePilot-Session-ID", "session")
+	downstream.Header.Set("X-TelePilot-Turn-ID", "turn")
+
+	identity := buildRequestIdentity(routing.Route{ProviderID: 9, APIKey: "secret"}, downstream)
+	applyCodexIdentity(payload, upstream, identity)
+
+	metadata := payload["client_metadata"].(map[string]any)
+	if payload["prompt_cache_key"] != identity.promptCacheKey || metadata["custom"] != "kept" {
+		t.Fatalf("payload identity merge failed: %#v", payload)
+	}
+	for _, forbidden := range []string{"user-cache", "user-installation", "user-window", "user-agent", "user-originator"} {
+		encoded, _ := json.Marshal(payload)
+		if strings.Contains(string(encoded), forbidden) || strings.Contains(fmt.Sprint(upstream.Header), forbidden) {
+			t.Fatalf("caller-controlled identity survived: %s payload=%s headers=%#v", forbidden, encoded, upstream.Header)
+		}
+	}
+}
+
+func TestCodexIdentityIsStableAndCredentialScoped(t *testing.T) {
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	request.Header.Set("X-TelePilot-Session-ID", "session")
+	request.Header.Set("X-TelePilot-Turn-ID", "turn")
+	route := routing.Route{ProviderID: 9, BaseURL: "https://one.example/v1", APIKey: "secret-one"}
+
+	first := buildRequestIdentity(route, request)
+	second := buildRequestIdentity(route, request)
+	if first != second {
+		t.Fatalf("same route and session produced unstable identity: first=%#v second=%#v", first, second)
+	}
+	for name, candidate := range map[string]requestIdentity{
+		"provider": buildRequestIdentity(routing.Route{ProviderID: 10, BaseURL: route.BaseURL, APIKey: route.APIKey}, request),
+		"base_url": buildRequestIdentity(routing.Route{ProviderID: route.ProviderID, BaseURL: "https://two.example/v1", APIKey: route.APIKey}, request),
+		"api_key":  buildRequestIdentity(routing.Route{ProviderID: route.ProviderID, BaseURL: route.BaseURL, APIKey: "secret-two"}, request),
+	} {
+		if candidate.promptCacheKey == first.promptCacheKey || candidate.installationID == first.installationID {
+			t.Fatalf("%s change did not isolate identity: first=%#v candidate=%#v", name, first, candidate)
+		}
+	}
+	encoded := strings.Join([]string{
+		first.installationID,
+		first.sessionID,
+		first.threadID,
+		first.turnID,
+		first.windowID,
+		first.promptCacheKey,
+	}, "|")
+	for _, raw := range []string{"session", "turn", route.APIKey, route.BaseURL} {
+		if strings.Contains(encoded, raw) {
+			t.Fatalf("raw identity material leaked into upstream identifiers: %s", encoded)
+		}
 	}
 }
 
@@ -299,6 +398,16 @@ func TestDownstreamCancellationCancelsUpstreamRequest(t *testing.T) {
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func nestedValue(payload map[string]any, objectName, name string) any {
+	object, _ := payload[objectName].(map[string]any)
+	return object[name]
+}
+
+func stringValue(value any) string {
+	text, _ := value.(string)
+	return text
+}
 
 func (fn roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
 	return fn(request)
