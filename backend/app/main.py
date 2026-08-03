@@ -236,6 +236,14 @@ async def lifespan(app: FastAPI):
     except Exception:  # noqa: BLE001
         logging.exception("加载客户端身份 UA 版本覆盖失败，使用默认版本继续启动")
 
+    # Gateway 是 optional runtime；失败只使对应 Provider degraded，不影响全局 readiness。
+    try:
+        from .services.gateway_runtime import reconcile_gateway_runtime
+
+        await reconcile_gateway_runtime()
+    except Exception:  # noqa: BLE001
+        logging.exception("内置 Gateway 启动或配置同步失败；direct Provider 继续可用")
+
     try:
         interrupted_jobs = await plugin_config_action_jobs.startup_plugin_config_action_jobs()
         if interrupted_jobs:
@@ -331,6 +339,12 @@ async def lifespan(app: FastAPI):
             task.cancel()
         if retry_tasks:
             await asyncio.gather(*retry_tasks, return_exceptions=True)
+        try:
+            from .services.gateway_runtime import gateway_runtime_manager
+
+            await gateway_runtime_manager.shutdown()
+        except Exception:  # noqa: BLE001
+            logging.exception("停止内置 Gateway 失败")
         if system_agent_run_manager is not None:
             try:
                 await system_agent_run_manager.shutdown()

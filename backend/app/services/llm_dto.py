@@ -52,6 +52,7 @@ class LLMProviderDTO:
     api_format: str | None = None
     protocol_profile: str = "standard"
     client_identity_profile: str = "auto"
+    execution_backend: str = "direct"
     web_search_api_format: str | None = None
     base_url: str | None = None
     default_model: str = ""
@@ -87,6 +88,7 @@ class LLMProviderDTO:
             api_format=d.get("api_format"),
             protocol_profile=str(d.get("protocol_profile", "standard") or "standard"),
             client_identity_profile=str(d.get("client_identity_profile", "auto") or "auto"),
+            execution_backend=str(d.get("execution_backend", "direct") or "direct"),
             web_search_api_format=d.get("web_search_api_format"),
             base_url=d.get("base_url"),
             default_model=str(d.get("default_model", "") or ""),
@@ -109,6 +111,7 @@ class LLMProviderDTO:
             api_format=getattr(row, "api_format", None),
             protocol_profile=str(getattr(row, "protocol_profile", "standard") or "standard"),
             client_identity_profile=str(getattr(row, "client_identity_profile", "auto") or "auto"),
+            execution_backend=str(getattr(row, "execution_backend", "direct") or "direct"),
             web_search_api_format=getattr(row, "web_search_api_format", None),
             base_url=row.base_url,
             default_model=str(row.default_model or ""),
@@ -130,6 +133,7 @@ class LLMProviderDTO:
             "api_format": self.api_format,
             "protocol_profile": self.protocol_profile,
             "client_identity_profile": self.client_identity_profile,
+            "execution_backend": self.execution_backend,
             "web_search_api_format": self.web_search_api_format,
             "base_url": self.base_url,
             "default_model": self.default_model,

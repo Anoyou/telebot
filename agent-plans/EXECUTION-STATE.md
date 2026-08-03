@@ -20,7 +20,7 @@
 
 ### 阶段 C：TelePilot 全链路接入
 
-- [ ] WP-C1 运行时管理与配置同步 — pending
+- [x] WP-C1 运行时管理与配置同步 — done（本提交）
 - [ ] WP-C2 Provider schema 与 Client Builder — pending
 - [ ] WP-C3 Agent、插件、测活与 usage 验收 — pending
 - [ ] WP-C4 Provider UI、健康与文档 — pending
