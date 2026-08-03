@@ -20,3 +20,30 @@ type GatewayError struct {
 	RequestID    string `json:"request_id,omitempty"`
 	GatewayStage string `json:"gateway_stage,omitempty"`
 }
+
+type ConfigSnapshot struct {
+	SchemaVersion   int              `json:"schema_version"`
+	ProtocolVersion string           `json:"gateway_protocol_version"`
+	Revision        int64            `json:"revision"`
+	Providers       []ProviderConfig `json:"providers"`
+}
+
+type ProviderConfig struct {
+	ID                   int64             `json:"id"`
+	BaseURL              string            `json:"base_url"`
+	APIKey               string            `json:"api_key"`
+	Models               []string          `json:"models"`
+	ModelMapping         map[string]string `json:"model_mapping,omitempty"`
+	ProxyURL             string            `json:"proxy_url,omitempty"`
+	TimeoutSeconds       int               `json:"timeout_seconds,omitempty"`
+	CompatibilityHeaders map[string]string `json:"compatibility_headers,omitempty"`
+	MaxConcurrency       int               `json:"max_concurrency,omitempty"`
+}
+
+type ConfigStatus struct {
+	Ready         bool   `json:"ready"`
+	Revision      int64  `json:"revision"`
+	ProviderCount int    `json:"provider_count"`
+	SyncedAt      string `json:"synced_at,omitempty"`
+	Error         string `json:"error,omitempty"`
+}

@@ -15,7 +15,7 @@
 ### 阶段 B：独立 Gateway 模块
 
 - [x] WP-B1 进程骨架与契约 — done（本提交）
-- [ ] WP-B2 Provider 快照与精确路由 — pending
+- [x] WP-B2 Provider 快照与精确路由 — done（本提交）
 - [ ] WP-B3 Codex Responses 数据面 — pending
 
 ### 阶段 C：TelePilot 全链路接入

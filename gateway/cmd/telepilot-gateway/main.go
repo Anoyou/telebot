@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/anoyou/telepilot/gateway/internal/control"
 	"github.com/anoyou/telepilot/gateway/internal/security"
 	"github.com/anoyou/telepilot/gateway/internal/server"
 )
@@ -19,7 +20,8 @@ func main() {
 	flag.Parse()
 
 	logger := log.New(os.Stderr, "telepilot-gateway ", log.LstdFlags|log.LUTC)
-	srv := server.New(*socket, *maxConcurrency, nil, nil)
+	store := control.NewStore()
+	srv := server.New(*socket, *maxConcurrency, store.Ready, control.Handler(store))
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
