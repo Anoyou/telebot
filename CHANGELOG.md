@@ -25,6 +25,16 @@
 
 ## [Unreleased]
 
+### 修复
+
+- 修正生产更新失败后的人工回滚提示，要求同时恢复记录的 commit 与 Web、Frontend、Updater 三张镜像；涉及迁移时明确恢复迁移前备份，避免代码与镜像混装。
+
+### 文档
+
+- 按当前代码反向同步 System Agent 持久队列、运行中 steer/输入/审批、租约恢复、待确认收件箱和 Gateway 可观测性边界。
+- 补齐插件 MessageOps 上下文方法矩阵、`apply` 与 message-id 存储契约、账号配置存储、专属配置页路由、Webhook 执行链和命中调试入口。
+- 扩充内置 Codex Gateway 的 Unix Socket 契约、生产镜像、插件 AI、部署验收、密钥轮换及回滚说明，并明确真实受限 Provider 与多架构/线上门禁仍需外部验收。
+
 ## [0.91.0-beta.1] - 2026-08-03 · minor（次版本预发布） · 内置 Codex Gateway 与全链路 Agent 接入
 
 ### 新增

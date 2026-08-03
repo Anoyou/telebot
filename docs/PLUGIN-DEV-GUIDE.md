@@ -42,7 +42,7 @@ Event Bus、Trace 和 MessageOps 是两条标准消息链路共用的内部契�
 - 按钮回调的 `payload.sender` 是实际点击账号，不能直接把其中的姓名写回群消息；群内公开姓名必须调用 `resolve_public_sender_identity()`。返回的 `display_name` 已由平台过滤 Unicode 控制符、零宽字符和不可见空白，并限制为 10 个字符；`is_admin` 表示平台已确认的本群管理员状态，插件不能通过是否存在 `tag` 猜测管理员身份。插件已有独立公开标签时可调用 `sanitize_public_display_name()` 使用同一规则。身份只通过 UserBot 核验；匿名管理员只显示管理员标签，普通成员标签不会覆盖姓名，查询失败时平台会隐藏姓名。
 - `resolve_public_sender_identity()` / `resolve_public_sender_identities()` 的身份结果不做应用层缓存，每次调用都会实时读取当前群权限。UserBot 实体恢复只读取本地实体缓存或 Redis 中可重新校验的近期发言 `message_id`，不会在按钮 callback 内扫描群历史；锚点不保存姓名、username、管理员状态或标签。插件不要另行缓存这些身份字段。
 - 明确需要“账号 UserBot 在所有已加入群里看到的姓名”时，调用 `ctx.identities.resolve_userbot(chat_id=..., user_id=..., fallback_display_name=...)`。该入口不会调用 Interaction Bot，并会保留 UserBot 联系人实体中的姓名；仍会通过 UserBot 群权限隐藏匿名管理员。当前 loader 的默认身份注入同样只使用 UserBot。
-- `ctx.messages.send/send_photo/edit/edit_rich/edit_caption/payout(...)` 和普通标准 action 默认按 `parse_mode="plain"` 发送；图片/文件 caption 更新用 `edit_caption`，不要把媒体消息交给 `edit_message` 猜类型。标题、任务列表、折叠详情、表格等 Telegram 原生结构改用 `ctx.messages.send_rich()` 或 `ctx.messages.edit_rich()`，并从 `html` / `markdown` / `blocks` 三选一。Rich Message 默认由 Interaction Bot 发送/编辑；显式 Userbot 支持 HTML、Markdown 和可无损转换的纯文本 blocks，并要求 Premium 与能力开关。
+- `ctx.messages` 的 helper 随上下文不同。Event Bus / `on_interaction` 的缓冲 facade 提供 `send_photo/send_file/edit_rich/edit_caption/update_session`；常驻、插件命令、legacy 消息、裸直通和 scheduler/后台 callback 注入 live facade，这些 helper 不存在，应使用文档化标准 action + `ctx.messages.apply([...])`。完整矩阵见 [API 参考：`ctx.messages` 上下文 × 方法矩阵](./PLUGIN-API-REFERENCE.md#43-ctxmessages-上下文--方法矩阵)。普通文本和 caption 默认 `parse_mode="plain"`；媒体 caption 用 `edit_caption`，原生 Rich Message 从 `html` / `markdown` / `blocks` 三选一。
 - userbot 会话没有原生 inline 按钮能力。平台会把按钮降级成“回复序号选择”的文本面板，并把命中的回复合成为 callback 事件回投插件；强依赖按钮的入口应配合 `keyword_only` / `default_trigger_modes` 关闭命令触发。
 - Inline 按钮有两种完全不同的行为：当前 Interaction Bot 发按钮、用户点击，是 `callback_query`，插件用 `answer_callback` ACK；第三方 Bot 发按钮、TelePilot UserBot 主动点击，是 MTProto 客户端操作，**不是** callback ACK。后者必须声明 `click_bot_button` 权限，并在 UserBot 执行链路调用 `ctx.messages.click_callback_button(...)`；Interaction Bot 插件入口不支持。旧的 `message.buttons[row][column].click()` 已被安全阻断。完整边界和示例见 [API 参考：Inline 按钮的两种场景](./PLUGIN-API-REFERENCE.md#inline-按钮的两种完全不同场景)。
 
@@ -68,7 +68,7 @@ Event Bus、Trace 和 MessageOps 是两条标准消息链路共用的内部契�
 3. 用 `tp_plugin check <dir>` 做 manifest、事件订阅和权限推导审计；它只报告问题，不自动改文件。
 4. 用 `tp_plugin register <dir>` 登记本地插件目录；外部目录与 `plugins/local_imports` 旧副本冲突时，确认后再加 `--force`。
 5. 在账号配置里打开 `{"dev_mode": {"dry_run": true}}`，先让发送和 payout 出口只记录、不真实投递。
-6. 用 `POST /api/dispatch/simulate` 贴账号和消息文本，看命中哪条规则、插件、入口及未命中原因。
+6. 优先打开侧栏一级「命中调试」页面，选择账号并粘贴消息文本；需要自动化或对照 OpenAPI 时再直接调用 `POST /api/dispatch/simulate`。
 7. 需要完整链路 trace 时，优先用 manifest 的 `strict_trace` 常驻追踪资金/高风险插件；临时排查用 `POST /api/dispatch/router-debug-trace` 打开短 TTL router trace。
 8. 需要回归样本时，打开 `{"dev_mode": {"recording": true}}` 录入站信封 JSONL，再用 `tp_replay run <recording.jsonl>` 离线 dry-run 回放。
 

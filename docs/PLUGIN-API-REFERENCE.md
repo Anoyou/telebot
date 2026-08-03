@@ -108,6 +108,9 @@ class Plugin:
     async def on_message(self, ctx: PluginContext, event) -> None:
         """历史消息事件回调。"""
 
+    async def on_message_edited(self, ctx: PluginContext, event) -> None:
+        """历史消息编辑回调；只有显式重写该方法的插件才会收到。"""
+
     async def on_command(self, ctx: PluginContext, cmd: str, args: list[str], event) -> bool:
         """指令派发回调。返回 True 表示已处理。"""
         return False
@@ -264,11 +267,26 @@ if attempts is not None and attempts > 5:
 | `ctx.http` | `await ctx.http.get(url, params={...})` / `await ctx.http.post(url, json={...})` | 安全 HTTP facade；第三方插件需声明 `external_http` + `allowed_hosts` |
 | `ctx.ai` | `await ctx.ai.complete(system="...", user="...")` | 文本 LLM facade；第三方插件需声明 `ai_text` |
 | `ctx.ai` | `await ctx.ai.run_agent(..., handlers={...})` | 有界工具调用；第三方插件需声明独立 `ai_agent` 与工具双白名单 |
-| `ctx.messages` | `await ctx.messages.send(...)` / `send_photo(...)` / `edit_caption(...)` / `click_callback_button(...)` / `answer_callback(...)` | 交互入口消息操作 facade；只生成平台标准动作，由 TelePilot 统一代发、审计和执行 |
+| `ctx.messages` | `await ctx.messages.send(...)` / `apply([...])` | MessageOps facade；具体 helper 取决于交互缓冲或常驻/命令/调度上下文，见下方矩阵 |
 | `ctx.identities` | 通常通过 `resolve_public_sender_identity(ctx, ...)` 间接使用；UserBot 专用场景可调用 `resolve_userbot(...)` | 平台注入的群内安全身份 facade；只返回标签、姓名、管理员状态和解析状态，不向插件开放成员目录 |
 | `ctx.conversation(...)` | `async with ctx.conversation(peer)` | 仅真实 `TelegramClient` 的 builtin/内部兼容场景可靠；普通安装插件的 `SandboxClient` 不支持其 handler/raw MTProto 要求 |
 
-### 4.3 权限边界与禁止事项
+### 4.3 `ctx.messages` 上下文 × 方法矩阵
+
+上表的 `send_photo/edit_caption` 示例只适用于交互缓冲 facade，不能据此推断所有入口都有同名 helper。`ctx.messages` 会按入口注入不同的 Python 类：
+
+| 上下文 | facade | 可直接调用的方法 |
+| --- | --- | --- |
+| Event Bus / `on_interaction` 的当前交互入口 | 缓冲 facade | `send`、`send_rich`、`send_photo`、`send_file`、`edit`、`edit_rich`、`edit_caption`、`delete`、`pin`、`answer_callback`、`answer_inline_query`、`payout`、`update_session`、`read_saved_message_id`、`delete_saved_message_id`；UserBot 执行链路才允许 `click_callback_button` |
+| 常驻上下文、插件命令、legacy `on_message` / `on_message_edited`、裸直通、scheduler/后台 callback | live facade | `apply`、`send`、`send_rich`、`edit`、`delete`、`pin`、`answer_callback`、`click_callback_button`、`answer_inline_query`、`payout`、`read_saved_message_id`、`delete_saved_message_id` |
+
+live facade 当前没有 `send_photo`、`send_file`、`edit_rich`、`edit_caption`、`update_session` helper；直接调用会得到属性不存在错误。后台需要发送媒体或编辑 caption 时，构造文档化的标准 action 后调用 `await ctx.messages.apply([action], entry_key="...")`。`update_session` 只在拥有当前交互会话的入口中使用，不把后台任务伪装成会话更新。
+
+`apply(actions, entry_key=None)` 是公共 live 执行入口：它会规范化 action、补 trace context 并立即交给 UserBot/Event Bus 动作执行器；返回 `None`，部分动作失败会写插件日志，不会把失败 action 列表作为返回值。交互缓冲 facade 也提供 `apply` 供延迟或即时提交，但 Interaction Bot 入口仍拒绝 `click_callback_button`。
+
+`read_saved_message_id(key)` 与 `delete_saved_message_id(key)` 只访问平台拥有、按账号和插件隔离的 message-id 命名空间，不开放原始 Redis。普通纯 `BufferedMessageOps` 没有 live 存储时读取返回 `None`、删除返回 `False`；平台注入的交互 adapter 和 live facade 会转发到真实存储。
+
+### 4.4 权限边界与禁止事项
 
 1. 第三方插件必须遵循 `manifest.permissions` 最小授权，未声明的客户端能力不可调用。
 2. 第三方插件不得假设 `ctx.engine` 恒可用；需要状态持久化时优先使用 `ctx.storage`。确需 Redis 的 NX、hash/list/set 等已开放语义时才访问 `ctx.redis`，并接受自动命名空间和方法白名单；不要假设它是原始 Redis client。
@@ -277,7 +295,7 @@ if attempts is not None and attempts > 5:
 5. 禁止依赖 worker 私有实现或 monkey patch 运行时对象来“扩权”。
 6. 禁止把敏感凭据直接打到日志；`ctx.log` 只记录最小必要信息。
 
-### 4.4 配置/账号/运行时数据访问建议
+### 4.5 配置/账号/运行时数据访问建议
 
 1. 配置：通过 `ctx.config` 读取；按 `config_schema` 的 `level` 设计字段，不自行拼接跨账号配置。
 2. 账号：通过 `ctx.account_id` 做所有业务隔离键；插件持久化状态优先放进 `ctx.storage`，由平台按账号 + 插件隔离。
@@ -391,9 +409,9 @@ MANIFEST = Manifest(
 
 | level | 作用域 | 存储位置 | 说明 |
 |-------|--------|---------|------|
-| `global` | 全局（所有账号共享） | plugin_config | API Key、通用参数等 |
-| `account` | 单个账号 | rule.config | 聊天 ID、行为开关等 |
-| （不填） | 默认 account | rule.config | 向后兼容 |
+| `global` | 全局（所有账号共享） | `plugin_config` | API Key、通用参数等 |
+| `account` | 单个账号 | 普通/`single` 模式写入 `account_feature.config`；`rules` 模式的每条规则写入 `rule.config` | 聊天 ID、行为开关等 |
+| （不填） | 默认 account | 与 `account` 相同 | 向后兼容 |
 
 **优先级：** 账号级配置 > 插件全局配置 > config_schema 中的 default
 
@@ -2207,14 +2225,14 @@ config_schema={
 
 规则配置页每条 rule 存储独立的 `config` JSON，通过 CRUD API 管理。前端专属页面提供：规则列表 + 创建/编辑对话框 + 试运行（dry-run）。这只定义配置数据和页面形态；真正的 Telegram 消息投递仍应通过 Event Bus 的 `event_subscriptions`、标准事件信封和标准 action 完成。
 
-#### 适配清单（6 处必改）
+#### 专属规则页适配清单
 
 | # | 文件 | 修改内容 |
 |---|------|---------|
 | 1 | `frontend/src/api/types.ts` | 添加 `XxxRuleConfig` 接口（描述单条规则的 config 字段） |
 | 2 | `frontend/src/pages/Plugins/configs/XxxConfig.tsx` | **新建**：规则列表页（参考 `AutoReply.tsx` 或 `Forward.tsx`） |
 | 3 | 插件包内 `manifest.py` | `config_schema["x-ui-mode"] = "rules"`；新插件应放在远程仓库或 `plugins/local_imports/xxx/` 后由 Web 安装 |
-| 4 | `frontend/src/App.tsx` | ① import 新页面组件 ② 添加路由 `:aid/features/xxx` ③ 在 `FEATURE_CONFIG_PAGES` 中添加 key |
+| 4 | `frontend/src/App.tsx` | lazy import 新页面组件，并在通用 `:featureKey` 路由之前添加 `:aid/features/xxx` 显式路由 |
 | 5 | `frontend/src/pages/Plugins/_shared/featureConfig.ts` | 在共享的 `FEATURE_CONFIG_PAGE_KEYS` Set 中添加 key |
 | 6 | `backend/app/db/models/feature.py` | 添加 `FEATURE_XXX = "xxx"` 常量（如已有可跳过） |
 
@@ -2281,24 +2299,17 @@ config_schema={
 }
 ```
 
-#### 4. App.tsx — 路由 + 注册
+#### 4. App.tsx — 专属路由
 
 ```tsx
-// ① import
-import { XxxConfig } from "@/pages/Plugins/configs/XxxConfig";
+// ① lazy import（与现有配置页一致）
+const XxxConfig = lazy(() => import("@/pages/Plugins/configs/XxxConfig"));
 
-// ② 路由
+// ② 放在 :aid/features/:featureKey 通用路由之前
 <Route path=":aid/features/xxx" element={<XxxConfig />} />
-
-// ③ FEATURE_CONFIG_PAGES 注册
-const FEATURE_CONFIG_PAGES: Record<string, { title: string; description: string }> = {
-  auto_reply: { title: "自动回复", description: "..." },
-  xxx:        { title: "插件显示名", description: "..." },
-  // ...
-};
 ```
 
-路由路径格式固定为 `:aid/features/{plugin_key}`，`plugin_key` 必须与 `MANIFEST.key` 一致。
+路由路径格式固定为 `:aid/features/{plugin_key}`，`plugin_key` 必须与 `MANIFEST.key` 一致。当前代码没有 `FEATURE_CONFIG_PAGES`；不要按旧文档重新创建这份重复注册表。没有专属 React 页面时，`App.tsx` 已有的 `:aid/features/:featureKey` 会承接通用 schema 配置页，无需新增路由。
 
 #### 5. FEATURE_CONFIG_PAGE_KEYS — 共享入口点
 
@@ -2307,7 +2318,7 @@ const FEATURE_CONFIG_PAGES: Record<string, { title: string; description: string 
 ```tsx
 // frontend/src/pages/Plugins/_shared/featureConfig.ts
 const FEATURE_CONFIG_PAGE_KEYS = new Set([
-  "auto_reply", "autorepeat", "forward", "game24", "codex_image",
+  "auto_reply", "autorepeat", "chatgpt_image", "codex_image", "scheduler", "game24",
   "xxx",  // ← 新增
 ]);
 ```
@@ -2392,7 +2403,7 @@ if key == FEATURE_XXX:
 
 - 创建 `frontend/src/pages/Plugins/configs/XxxConfig.tsx`，直接展示/编辑单个 config 对象
 - `manifest.py` 中声明 `config_schema["x-ui-mode"] = "single"`
-- 其余适配步骤与规则配置专属页相同（App.tsx 路由 + FEATURE_CONFIG_PAGES + 两个 PAGE_KEYS）
+- 只有确实新增专属 React 页面时，才添加 App.tsx 显式路由和 `FEATURE_CONFIG_PAGE_KEYS`；使用通用 `GenericPluginConfigPage` 的插件只需正确声明 schema，不改前端注册表
 - 后端不需要 dry-run 分支
 
 #### 页面布局约定
@@ -2567,7 +2578,6 @@ class DemoPlugin(Plugin):
 - [ ] `config_schema` 已声明详细使用说明：优先使用 `x-usage-guide` / `x-usage-steps`，或只读 `usage_preview`
 - [ ] `types.ts` 中 `XxxRuleConfig` 接口与 `manifest.py` config_schema 字段一致
 - [ ] 如果有专属页面：`App.tsx` 中路由路径 `:aid/features/{key}` 与插件 key 一致
-- [ ] 如果有专属页面：`App.tsx` 中 `FEATURE_CONFIG_PAGES` 包含该 key
 - [ ] 如果有专属页面：`frontend/src/pages/Plugins/_shared/featureConfig.ts` 的 `FEATURE_CONFIG_PAGE_KEYS` 包含该 key
 - [ ] 如果是指令型插件：`command` 字段可配置，`Plugin.command_config_keys = {"command"}`，说明文案动态读取当前指令
 - [ ] 指令型插件的帮助、取消/结束、撤销、自动删除、冷却/超时、消息模板等用户常调行为已尽量配置化；帮助模板支持 `{prefix}`，不硬编码 `,命令`

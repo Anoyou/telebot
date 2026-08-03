@@ -10,7 +10,7 @@ TelePilot 可以让单个 LLM Provider 选择「直接 API」或「内置 Codex 
 2. 「内置 Codex Gateway」固定使用 Responses API 与 Codex Responses 档案，身份由 Gateway 管理。
 3. direct 与 Gateway 之间切换不会清空 API Key、代理、兼容请求头或已保存的客户端身份；切回 direct 后恢复原协议、联网协议和身份配置。LLM Provider 代理仅支持 HTTP/HTTPS/SOCKS5；被 Provider 引用的代理不能改成 MTProxy。
 4. Gateway Provider 必须配置 API Key；Base URL 留空时会物化当前服务类型的默认地址。未保存的凭据不会临时注入 Gateway，新建后再通过真实 Gateway 读取模型列表并测活。
-5. Gateway 只支持文本/工具调用的 Responses 路径。Chat Completions、Anthropic Messages、语音转写和图片生成必须使用 direct Provider。
+5. Gateway 只支持文本、图片输入与工具调用的 Responses 路径。Chat Completions、Anthropic Messages、语音转写和 `/images/generations` 图片生成必须使用 direct Provider。
 
 Gateway Provider 保存前会检查内置二进制和协议兼容性。Gateway 不可用时保存失败，不会在同一 Provider 内静默改走 direct。
 
@@ -41,6 +41,8 @@ Provider 与其引用代理的 Web/System Agent 写入共享进程锁和 Postgre
 
 生产 Web 镜像使用多阶段构建内置静态 Gateway 二进制。Gateway 与 Web 镜像原子升级和回滚，不新增 Compose service、端口、volume 或用户安装步骤。服务器只需按原方式拉取并重建或更新 TelePilot。
 
+生产镜像只从 Go builder 复制 `/usr/local/bin/telepilot-gateway`、License 和第三方声明；runtime 不包含 Go 工具链、Cockpit、CLIProxyAPI 管理面或额外 Gateway 配置文件。不要在服务器另装 Gateway、另起 Compose service、发布 Socket 端口或把 Socket bind-mount 到宿主机。
+
 开发入口：
 
 ```bash
@@ -55,9 +57,29 @@ make gateway-run
 
 Gateway 当前协议版本为 `2`。后端与二进制协议版本不一致时会失败关闭，不能通过忽略未知字段继续运行。
 
+### 内部开发契约（不是公网 API）
+
+Gateway 只在 Unix Socket 上提供内部 HTTP，不能加入 FastAPI OpenAPI、反向代理或第三方插件契约：
+
+| 方法与路径 | 用途 |
+| --- | --- |
+| `GET /healthz` | 只证明 Go 进程存活 |
+| `GET /readyz` | 已有完整 Provider 快照并可精确路由 |
+| `GET /version` | 返回 Gateway SemVer、`gateway_protocol_version`、固定上游基线和构建 commit |
+| `PUT /internal/v1/config` | 接收完整内存快照；schema 1、protocol 2，revision 必须单调递增，未知字段或任一 Provider 非法时整批拒绝 |
+| `GET /internal/v1/config/status` | 返回 ready、revision、Provider 数、同步时间和脱敏错误 |
+| `POST /v1/responses` | Responses SSE/非流式、文本与图片输入、reasoning、工具调用与取消传输 |
+| `GET /v1/models` | 按指定 Provider 的候选端点读取模型列表 |
+
+数据面至少携带 `X-TelePilot-Provider-ID`、`X-TelePilot-Request-Scope` 和 `X-TelePilot-Request-ID`；Agent 调用还可携带伪名化 session/run/turn 元数据。Gateway 根据 Provider ID + 用户模型名精确选路，由内部路由名隔离同名模型，转发前删除所有 `X-TelePilot-*` 头并恢复上游模型名。调用方不得自行构造这些头绕过 Client Builder。
+
+错误统一使用顶层 `error` 对象，对象字段包括 `code`、`message`、`retryable`、`request_id` 和 `gateway_stage`；响应头可回传脱敏的 Gateway version、request ID 和 stage。新增字段或错误码时，应先改 `gateway/contract`、Go 契约测试和 Python client，再同步 usage/OpenAPI 可见投影；不能只改一端。
+
+升级和普通回滚跟随 Web 镜像完成。回滚到不认识 `execution_backend` 的旧版前，先把所有 Gateway Provider 切回 direct；若跨越新增该字段的数据库迁移，还必须使用迁移前备份恢复数据库，不能只切代码或镜像。生产人工恢复步骤见 [公网部署指南](./DEPLOY-PUBLIC.md#人工回滚)。
+
 ## 安全边界
 
-- Provider API Key 只通过权限为 `0600` 的 Unix Socket 控制面进入 Gateway 内存，不写 Gateway 配置文件。
+- Provider API Key 只通过目录权限 `0700`、Socket 权限 `0600` 的 Unix Socket 控制面进入 Gateway 内存，不写 Gateway 配置文件。Socket 只供 Web 容器内同一运行用户访问，与 updater 挂载的宿主 Docker socket 无关。
 - Gateway 不记录 Base URL、请求正文、响应正文、Authorization、API Key、兼容请求头值或代理凭据；未选择 Provider 代理时不会继承进程的 `HTTP_PROXY` / `HTTPS_PROXY`。
 - TelePilot 内部 `X-TelePilot-*` 请求头在 Gateway 边界剥离，用户不能覆盖系统鉴权头、Gateway 内部头或 Codex 身份头。
 - 上游重定向不会被自动跟随，避免自定义认证头跨 origin 泄露；上游错误在进入日志、API、usage 或 RunTrace 前脱敏。

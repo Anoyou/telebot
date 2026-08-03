@@ -8,22 +8,24 @@
 
 ### 阶段 A：错误语义收口
 
-- [x] WP-A1 统一诊断事实 — done（本提交）
-- [x] WP-A2 全调用面接入 — done（本提交）
-- [x] WP-A3 前端与用量展示 — done（本提交）
+- [x] WP-A1 统一诊断事实 — done `cd305088`
+- [x] WP-A2 全调用面接入 — done `546277d3`
+- [x] WP-A3 前端与用量展示 — done `e6e8b430`
 
 ### 阶段 B：独立 Gateway 模块
 
-- [x] WP-B1 进程骨架与契约 — done（本提交）
-- [x] WP-B2 Provider 快照与精确路由 — done（本提交）
-- [x] WP-B3 Codex Responses 数据面 — done（本提交）
+- [x] WP-B1 进程骨架与契约 — done `b63267fd`
+- [x] WP-B2 Provider 快照与精确路由 — done `726d9495`
+- [x] WP-B3 Codex Responses 数据面 — done `cb3192f1`
 
 ### 阶段 C：TelePilot 全链路接入
 
-- [x] WP-C1 运行时管理与配置同步 — done（本提交）
-- [x] WP-C2 Provider schema 与 Client Builder — done（本提交）
-- [x] WP-C3 Agent、插件、测活与 usage 验收 — done
-- [x] WP-C4 Provider UI、健康与文档 — done（本提交）
+- [x] WP-C1 运行时管理与配置同步 — done `88374f4e`
+- [x] WP-C2 Provider schema 与 Client Builder — done `03e8aac6`
+- [x] WP-C3 Agent、插件、测活与 usage 验收 — done `1892beee`
+- [x] WP-C4 Provider UI、健康与文档 — done `6dbeeaeb`
+
+开发工作包已完成；计划 §15.4 的真实受限 Provider 对照、§16 的多架构镜像与线上 Deploy Check 属于发布前外部验收，尚未用本文件标记为已通过。
 
 ---
 

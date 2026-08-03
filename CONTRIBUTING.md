@@ -19,7 +19,7 @@ git status --short --branch -uall
 
 | 依赖 | 当前要求 |
 | --- | --- |
-| Python | 3.12 或 3.13 |
+| Python | 3.12 或 3.13；Makefile 默认命令名为 `python3.12`，只有 3.13 时用 `make install PYTHON=python3.13` |
 | Node.js | 22，与 CI 一致 |
 | pnpm | 10.23，版本声明在 `frontend/package.json` |
 | Go | 1.23 或更高；仅开发内置 Codex Gateway 时需要 |
@@ -201,7 +201,7 @@ backend/.venv/bin/python scripts/validate-installed-interaction-plugins.py
 - 可编辑字段用表单控件，只读状态、ID 和渲染结果使用展示组件。
 - 新页面要覆盖 loading、empty、error、disabled 和 success 状态。
 - 桌面、834px 平板和 iPhone 13 宽度下不能出现横向滚动、按钮重叠或长中文溢出。
-- 修改公开 API 后更新 `frontend/src/api/` 类型；需要重新生成 OpenAPI 类型时先启动后端，再运行 `make codegen`。
+- 修改公开 API 后更新 `frontend/src/api/` 类型；`make codegen` 会直接导入应用并离线导出 OpenAPI，不需要先启动后端。若导入失败，应先修复依赖或应用初始化错误，不要改用运行中的旧服务生成快照。
 
 前端基础验证：
 
@@ -301,7 +301,7 @@ pnpm --dir frontend test:visual
 - 页面主入口、平台模块、部署步骤、备份恢复或更新流程。
 - System Agent 工具、权限、Action 确认和隐私边界。
 
-长期文档不要硬编码容易过期的当前版本号。版本历史放在 `CHANGELOG.md`，当前版本从四处版本文件读取。接口请求体以 FastAPI `/docs` 和 Pydantic schema 为准，CLI 参数以 `--help` 为准。
+长期文档不要硬编码容易过期的当前版本号。版本历史放在 `CHANGELOG.md`，当前版本以四个源版本文件与生成的 OpenAPI `info.version` 共五处一致为准。接口请求体以 FastAPI `/docs` 和 Pydantic schema 为准，CLI 参数以 `--help` 为准。
 
 ## 版本与发布
 
@@ -310,7 +310,7 @@ pnpm --dir frontend test:visual
 - 开发过程中把变更写入 `CHANGELOG.md` 的 `Unreleased`，不要为每个小提交单独迭代版本号。
 - 准备 beta 检查点、稳定发布、推送稳定检查点、创建 release/PR，或维护者明确要求发版时，才统一决定版本号。
 - 发布前执行 `git fetch origin --prune`，同时检查 `origin/main` 与仍活跃的发布/开发分支。
-- beta 检查点和稳定发布必须同步更新 `backend/app/__init__.py`、`backend/pyproject.toml`、`frontend/package.json`、`frontend/src/lib/version.ts`，并用中文更新 `CHANGELOG.md`。
+- beta 检查点和稳定发布必须同步更新 `backend/app/__init__.py`、`backend/pyproject.toml`、`frontend/package.json`、`frontend/src/lib/version.ts`，运行 `make codegen` 同步 `openapi/telepilot.openapi.json` 的 `info.version` 与 `frontend/src/api/schema.ts`，并用中文更新 `CHANGELOG.md`。
 - Commit、PR 和 release 文案使用中文。
 
 SemVer 判断：破坏兼容为 MAJOR，用户可感知的新能力或主入口变化为 MINOR，Bug、文案、小 UI、测试和兼容补丁为 PATCH。0.x 阶段的 `0.X.0` 表示阶段性能力版本，`0.X.Y` 表示同阶段补丁。

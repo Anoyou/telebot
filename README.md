@@ -221,7 +221,7 @@ make plugin-register dir=plugins/local_imports/my_game
 
 TelePilot 仍处于 0.x 快速迭代阶段，主要面向单租户、自托管和个人可信环境。`main` 是稳定发布线，开发分支使用对应正式版本的 `beta.N` 预发布号；接口、页面和插件契约仍可能调整。升级前请阅读 [CHANGELOG](./CHANGELOG.md) 并完成备份。
 
-当前源码版本以 `backend/app/__init__.py`、`backend/pyproject.toml`、`frontend/package.json` 与 `frontend/src/lib/version.ts` 为准。仓库历史名称仍是 `Telebot`，部分数据库默认值、Docker volume 和兼容字段保留旧名称，避免已有部署升级后连接到空数据；产品名称和界面统一使用 TelePilot。
+当前源码版本以 `backend/app/__init__.py`、`backend/pyproject.toml`、`frontend/package.json` 与 `frontend/src/lib/version.ts` 四个源文件为准，并由 `make codegen` 同步到 `openapi/telepilot.openapi.json` 的 `info.version` 作为第五处发布校验。仓库历史名称仍是 `Telebot`，部分数据库默认值、Docker volume 和兼容字段保留旧名称，避免已有部署升级后连接到空数据；产品名称和界面统一使用 TelePilot。
 
 ## License
 

@@ -125,6 +125,8 @@ docker compose logs --tail=100 web
 
 仅代码且不含迁移时，更新器会在健康失败时自动回滚。最近一次成功切换前的镜像引用记录在 `.git/telepilot-deploy-previous.json`，可用于人工恢复；不要只改 Git commit 而继续使用新镜像。
 
+人工恢复必须同时恢复该 JSON 中的 commit 与 Web、Frontend、Updater 三张镜像；完整可复制步骤见 [公网部署指南的人工回滚](../docs/DEPLOY-PUBLIC.md#人工回滚)。没有完整旧镜像且确认无迁移时，才使用目标旧 commit 的 `make prod-up PROD_UP_ARGS=--source-build` 救援。
+
 维护者必须从自定义分支验证尚未发布镜像的代码时，显式使用本地构建救援模式：
 
 ```bash

@@ -3,7 +3,7 @@
 #   make up          一键开发启动（pg + redis + 后端 + 前端）★最常用
 #   make down        一键停止
 #   make logs        实时跟踪后端 + 前端日志
-#   make status      四组件状态总览
+#   make status      开发组件状态总览
 #   make prod-up     一键生产部署（纯 docker compose）
 #   make prod-update 增量更新生产栈（文件同步优先，必要时构建服务）
 #   make nuke        彻底清理（删数据 + venv + node_modules + .env）
@@ -30,8 +30,8 @@ help:
 	@echo "  make restart       ★ 改完代码后一键重启（down + up；确定性新代码）"
 	@echo "  make logs          跟踪后端+前端日志（Ctrl+C 退出 tail）"
 	@echo "  make logs be|fe|db 单独看某个组件日志"
-	@echo "  make status        四组件状态总览"
-	@echo "  make prod-up       一键生产部署（纯 docker compose 4 容器）"
+	@echo "  make status        开发组件状态总览"
+	@echo "  make prod-up       一键生产部署（纯 docker compose 5 容器）"
 	@echo "  make init-prod-env 生成生产 .env（随机密钥 + 数据库密码）"
 	@echo "  make prod-update   增量更新生产栈（文件同步优先，必要时构建服务）"
 	@echo "  make prod-down     停止生产栈"

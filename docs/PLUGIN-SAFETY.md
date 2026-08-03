@@ -256,7 +256,7 @@ UserBot 主动点击第三方 Bot callback 必须声明 `click_bot_button` 权�
 | UserBot 主动点击第三方 Bot callback | 声明 `click_bot_button` 权限，在 UserBot 执行链路调用 `ctx.messages.click_callback_button(...)`；Interaction Bot 插件入口（包括 `ctx.messages.apply`）不支持 | 只允许 callback 类型；平台重新读取 callback data，并执行 Bot/文字复核、限流、Trace、ActionEvent、dry-run；成功后保护 20 秒，超时/未知结果保护 5 分钟 |
 | Inline Query | 返回 `answer_inline_query`；选择结果用 `chosen_inline_result` 记录 | 旧 hook 没有统一 trace，不作为新插件入口 |
 | 付款/发奖 | 返回 `settlement` 或 `userbot_reply` 受控动作；普通 Bot 只公告结果 | 不把外部转账通知 Bot 当主动发送通道 |
-| 定时任务/后台任务 | 保存目标 chat/session 后通过 `ctx.messages` 或标准 action 输出 | 直接使用受控 client 发消息只作为旧调度代码兼容，不作为新模板 |
+| 定时任务/后台任务 | 保存目标 chat/session 后通过 live `ctx.messages` 输出；媒体、caption、Rich edit 等没有 live helper 的动作使用 `ctx.messages.apply([标准 action])` | 不假设后台 facade 拥有交互缓冲 facade 的全部方法；直接使用受控 client 发消息只作为旧调度代码兼容 |
 | 启停阶段 | 默认不发；确需通知时必须有显式配置开关并记录日志 | 不在 `on_startup` / `on_shutdown` 里无条件群发 |
 | 成员管理 | 声明 `moderate_chat`，由受控 facade 执行并记录审计 | 不开放 raw MTProto 或 live client 给远程插件 |
 

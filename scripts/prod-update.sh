@@ -160,7 +160,12 @@ on_error() {
   err "增量更新失败"
   if [[ -n "$OLD_COMMIT" ]]; then
     warn "当前更新前 commit：$OLD_COMMIT"
-    warn "如需回滚代码，请人工确认后执行：git checkout $OLD_COMMIT && make prod-up"
+    warn "人工恢复前请用 git rev-parse --git-path telepilot-deploy-previous.json 定位恢复点，同时恢复其中的 commit 与 web/frontend/updater 镜像；不要只切换 Git commit 后继续使用新镜像。"
+    if (( REQUIRES_MIGRATION == 1 )); then
+      warn "本次涉及数据库迁移；必须使用迁移前备份恢复数据库和持久卷，再恢复旧代码与旧镜像。"
+    else
+      warn "若记录的旧镜像已不可用，可在确认数据库无需回退后使用 make prod-up PROD_UP_ARGS=--source-build 救援。"
+    fi
   fi
 }
 trap on_error ERR

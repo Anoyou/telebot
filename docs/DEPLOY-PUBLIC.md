@@ -203,6 +203,15 @@ cd /opt/telepilot
 TELEPILOT_UPDATE_BRANCH=Beta make prod-update PROD_UPDATE_ARGS=--dry-run
 ```
 
+维护者确认需要跳过增量分类、强制切换完整生产应用镜像时使用：
+
+```bash
+cd /opt/telepilot
+TELEPILOT_UPDATE_BRANCH=Beta make prod-update PROD_UPDATE_ARGS=--full
+```
+
+`--full` 仍然拉取并验签 GitHub Actions 预构建的 Web、Frontend、Updater 镜像，不是在服务器本地 build；迁移备份、镜像 provenance、健康检查和回滚边界不会因此跳过。
+
 ### Web 面板自更新
 
 生产栈会启动一个仅 Docker 内网可访问的 `updater` 服务。它挂载项目目录和 Docker socket，由已登录的 Web 后端通过共享 token 发起更新任务，不对公网暴露端口。
@@ -250,15 +259,46 @@ SHA-256。随后回到 Web 面板重试即可，不需要执行 `gh auth login`�
 数据库、业务容器或 Git 工作树。目标 updater 镜像接管后会替换旧容器，后续常规版本会
 在镜像校验前重新加载目标更新逻辑，可继续直接使用 Web 面板更新，无需重复执行修复。
 
-没有数据库迁移时，可回滚到指定版本：
+### 人工回滚
+
+不要只切换 Git commit 后继续使用 `.env` 中的新镜像。`prod-up` 会校验 Web、Frontend、Updater 三张镜像的 revision、source、digest 和 attestation 必须与当前 checkout 一致；代码与镜像混装会被拒绝，旧脚本也可能无法发现这种漂移。
+
+最近一次部署切换前的 commit 和三张镜像保存在 Git 内部状态文件中（普通 checkout 下是 `.git/telepilot-deploy-previous.json`）。没有数据库迁移时，先停写并检查该文件，再同时恢复 commit 与镜像：
 
 ```bash
 cd /opt/telepilot
-git checkout <tag-or-commit>
+PREVIOUS_STATE_FILE="$(git rev-parse --git-path telepilot-deploy-previous.json)"
+
+read -r PREVIOUS_COMMIT PREVIOUS_WEB_IMAGE PREVIOUS_FRONTEND_IMAGE PREVIOUS_UPDATER_IMAGE < <(
+  python3 - "$PREVIOUS_STATE_FILE" <<'PY'
+import json
+import sys
+
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+images = data.get("images") or {}
+values = [data.get("commit"), images.get("web"), images.get("frontend"), images.get("updater")]
+if not all(isinstance(value, str) and value for value in values):
+    raise SystemExit("恢复点缺少 commit 或三张镜像，停止自动恢复")
+print(*values)
+PY
+)
+
+# 在当前脚本仍可用时先把旧镜像引用写回 .env，再切换代码。
+source scripts/_lib.sh
+set_env_value .env TELEPILOT_WEB_IMAGE "$PREVIOUS_WEB_IMAGE"
+set_env_value .env TELEPILOT_FRONTEND_IMAGE "$PREVIOUS_FRONTEND_IMAGE"
+set_env_value .env TELEPILOT_UPDATER_IMAGE "$PREVIOUS_UPDATER_IMAGE"
+git switch --detach "$PREVIOUS_COMMIT"
 make prod-up
 ```
 
-`make prod-up` 默认拉取 `.env` 指定的镜像并启动容器，在 `web` 容器启动时执行 `alembic upgrade head`。只有维护者救援时才使用 `make prod-up PROD_UP_ARGS=--source-build` 在服务器本地构建。包含迁移的更新会在拉取代码前自动运行备份；一旦新版 web 可能已经执行迁移，健康失败也不会自动切回旧代码，而会保留 pending 状态要求按恢复流程处理。切回旧 commit 不会撤销 schema，必须用迁移前备份恢复数据库。恢复前确认 `.env` 中的 `MASTER_KEY` 与备份时一致，再按 `deploy/restore.sh` 恢复数据库、sessions 与插件卷。
+恢复后执行本节验收清单，并确认三项 `.env` 镜像引用、容器实际镜像与 `PREVIOUS_COMMIT` 对应。需要重新跟随发布分支时，再显式切回原分支；不要长期在 detached HEAD 上运行在线更新。
+
+如果恢复点没有完整三张镜像，且已确认本次没有执行数据库迁移，可在目标旧 commit 使用 `make prod-up PROD_UP_ARGS=--source-build` 本地构建救援。它是维护者兜底，不等价于常规回滚，也不绕过备份要求。
+
+包含迁移的更新会在拉取代码前自动运行备份；一旦新版 Web 可能已经执行迁移，健康失败也不会自动切回旧代码，而会保留 pending 状态要求按恢复流程处理。切回旧 commit 或旧镜像不会撤销 schema，必须先恢复迁移前数据库备份，再恢复 sessions 与插件卷。恢复前确认 `.env` 中的 `MASTER_KEY` 与备份时一致，并按 `deploy/restore.sh <db.sql> <sessions.tgz> [plugins-installed.tgz] [plugin-repos.tgz]` 传入同一时间戳的完整备份组。
+
+回滚到不认识 `execution_backend` 字段的 TelePilot 版本前，先在当前版本把所有 Gateway Provider 切回 direct。Gateway 跟随 Web 镜像回滚，不应在服务器另装、另起或保留一个外置 Gateway。
 
 ## 7. 备份
 
@@ -288,6 +328,7 @@ make prod-up
 8. 浏览器 Cookie 带 `Secure`，确认 `COOKIE_SECURE=true` 生效。
 9. 服务器安全组只对公网开放 `80/tcp` 和 `443/tcp`，不要额外开放 `8000`。
 10. 登录后确认概览、日志、交互、插件、设置页可打开。
+11. 如果配置了 Gateway Provider，确认系统状态中的 Gateway 为 `ready`，并对该 Provider 完成一次真实 Responses 测活；`degraded` 只能阻断对应 Provider，不应让 `/readyz`、Web、Worker 或 direct Provider 失败。
 
 ## 9. 常见问题
 

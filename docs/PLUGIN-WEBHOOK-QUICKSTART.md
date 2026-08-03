@@ -1,6 +1,6 @@
 # 入站 Webhook Quickstart
 
-入站 Webhook 把外部 HTTP 事件交给指定账号的插件。外部系统向 TelePilot 发送 JSON，账号 Worker 完成鉴权和事件归一化，再按插件的 `event_subscriptions` 匹配 `hook_key`。
+入站 Webhook 把外部 HTTP 事件交给指定账号的插件。外部系统向 TelePilot 发送 JSON，Web/API 进程先完成平台能力 gate、入口限流、账号/Token/Hook 校验和事件归一化，再通过 IPC 投递账号 Worker；Worker 按插件的 `event_subscriptions` 匹配 `hook_key` 并执行插件。HTTP `202` 只证明 Worker 已确认接收，不等于插件动作已成功。
 
 当系统设置中 **入站 Webhook 平台能力**关闭时，公开投递 URL 最前层返回 `404`（不访问 DB、不校验 Token），配置与 Token 仍保留；重新开启后即可继续投递。详见 [平台能力热插拔](./PLATFORM-CAPABILITIES.md)。
 
@@ -125,7 +125,7 @@ HTTP `202` 表示账号 Worker 已确认接收，不表示插件动作已经成�
 | 状态 | 错误码 | 处理方式 |
 | --- | --- | --- |
 | `401` | `WEBHOOK_TOKEN_INVALID` | 检查账号是否选对，Token 是否放在请求头；重置后旧 Token 会立即失效 |
-| `404` | `WEBHOOK_HOOK_NOT_FOUND` | 确认插件已为该账号启用，订阅的 `hook_key` 与 URL 一致 |
+| `404` | `WEBHOOK_HOOK_NOT_FOUND` | URL 中的 Hook 不存在或当前已停用；到「入站 Webhook」页面检查该账号的 Hook keys。插件未启用不会由这一检查直接产生该错误 |
 | `413` | `WEBHOOK_BODY_TOO_LARGE` | 请求正文不得超过 64 KiB |
 | `429` | `WEBHOOK_INGRESS_RATE_LIMITED` | 当前来源 IP 请求过多，按 `Retry-After` 退避 |
 | `429` | `WEBHOOK_RATE_LIMITED` | 按 `Retry-After` 退避，不要立即并发重试 |
