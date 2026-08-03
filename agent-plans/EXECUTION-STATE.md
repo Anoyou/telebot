@@ -14,7 +14,7 @@
 
 ### 阶段 B：独立 Gateway 模块
 
-- [ ] WP-B1 进程骨架与契约 — pending
+- [x] WP-B1 进程骨架与契约 — done（本提交）
 - [ ] WP-B2 Provider 快照与精确路由 — pending
 - [ ] WP-B3 Codex Responses 数据面 — pending
 
