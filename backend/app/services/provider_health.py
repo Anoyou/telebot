@@ -68,18 +68,26 @@ def _key(provider_id: int, model: str) -> str:
 
 def classify_error(exc: BaseException | str | None) -> ErrorClass:
     text = str(exc or "").lower()
+    category = str(getattr(exc, "category", "") or text).lower()
     scope = str(getattr(exc, "scope", "") or "").lower()
     code = getattr(exc, "status_code", None) or getattr(exc, "status", None)
     try:
         code_i = int(code) if code is not None else None
     except (TypeError, ValueError):
         code_i = None
-    if code_i in {401, 403} or "unauthorized" in text or "forbidden" in text:
+    if category in {
+        "auth_failed",
+        "permission_denied",
+        "client_rejected",
+        "official_account_required",
+        "account_policy",
+        "quota_exhausted",
+    } or code_i in {401, 403} or "unauthorized" in text or "forbidden" in text:
         return ErrorClass.CREDENTIAL
-    if code_i == 429 or "rate limit" in text or "too many requests" in text:
+    if category == "rate_limited" or code_i == 429 or "rate limit" in text or "too many requests" in text:
         return ErrorClass.RATE_LIMIT
     # 能力不支持 / 参数错误：记录但不算健康故障
-    if scope in {"capability_mismatch", "request_invalid"} or any(
+    if category in {"request_invalid", "context_limit", "model_missing", "endpoint_missing"} or scope in {"capability_mismatch", "request_invalid"} or any(
         token in text
         for token in (
             "capability_mismatch",
@@ -96,7 +104,7 @@ def classify_error(exc: BaseException | str | None) -> ErrorClass:
         )
     ):
         return ErrorClass.CAPABILITY
-    if code_i is not None and code_i >= 500:
+    if category in {"timeout", "network_error", "gateway_unavailable", "gateway_overloaded", "upstream_error"} or (code_i is not None and code_i >= 500):
         return ErrorClass.TRANSIENT
     if any(
         token in text

@@ -347,7 +347,7 @@ async def run_liveness_pool(
                 },
             )
         except Exception as exc:  # noqa: BLE001
-            status = diag.classify_exception(exc)
+            status = str(getattr(exc, "category", "") or diag.classify_exception(exc))
             payload = {"error": diag.redact(f"{type(exc).__name__}: {exc}")}
             return (task, status, payload)
         return (task, status, payload)
@@ -407,9 +407,13 @@ async def run_liveness_pool(
                 _record(task, status, payload)
                 if status == diag.DIAG_RATE_LIMITED:
                     provider_cap[task.provider_id] = 1
-                elif status == diag.DIAG_AUTH_FAILED:
+                elif status in {
+                    diag.DIAG_AUTH_FAILED,
+                    diag.DIAG_CLIENT_REJECTED,
+                    diag.DIAG_OFFICIAL_ACCOUNT_REQUIRED,
+                }:
                     stopped_providers.add(task.provider_id)
-                    _drain_provider(task.provider_id, diag.DIAG_AUTH_FAILED)
+                    _drain_provider(task.provider_id, status)
     finally:
         cancel_waiter.cancel()
         await asyncio.gather(cancel_waiter, return_exceptions=True)

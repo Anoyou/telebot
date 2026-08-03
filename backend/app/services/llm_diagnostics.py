@@ -123,6 +123,7 @@ _OFFICIAL_ACCOUNT_HINTS = (
 _POLICY_HINTS = ("account policy", "safety policy", "content policy", "moderation", "policy violation")
 _CONTEXT_HINTS = ("context_length_exceeded", "context window", "maximum context length", "too many tokens")
 _QUOTA_HINTS = ("insufficient_quota", "quota exceeded", "billing", "credit balance", "monthly limit")
+_WRAPPED_UPSTREAM_HINTS = ("upstream request failed", "upstream service failed", "error from provider")
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,6 +213,8 @@ def classify_status_code(status_code: int, body: str | Mapping[str, Any]) -> str
         return DIAG_QUOTA_EXHAUSTED
     if any(hint in body_lower for hint in _POLICY_HINTS):
         return DIAG_ACCOUNT_POLICY
+    if any(hint in body_lower for hint in _WRAPPED_UPSTREAM_HINTS):
+        return DIAG_UPSTREAM_ERROR
     if status_code == 401:
         return DIAG_AUTH_FAILED
     if status_code == 403:
@@ -281,10 +284,13 @@ def diagnose_http_error(
 ) -> LLMDiagnostic:
     code, message = _structured_error(body)
     category = classify_status_code(status_code, body)
+    wrapped_upstream = status_code < 500 and any(
+        hint in message.lower() for hint in _WRAPPED_UPSTREAM_HINTS
+    )
     return LLMDiagnostic(
         category=category,
-        retryable=is_retryable(category),
-        scope=scope_for(category),
+        retryable=is_retryable(category) and not wrapped_upstream,
+        scope="provider_local" if wrapped_upstream else scope_for(category),
         safe_message=suggestion_for(category),
         status_code=status_code,
         upstream_error_code=code,
@@ -305,6 +311,21 @@ def diagnose_exception(exc: BaseException, *, request_id: str | None = None, gat
         gateway_stage=gateway_stage,
         upstream_summary=redact(str(exc)) or None,
     )
+
+
+def classify_message(message: str, *, retryable: bool = False) -> str:
+    """最后兜底的文本分类；只在没有结构化状态和异常类型时使用。"""
+
+    value = str(message or "")
+    lowered = value.lower()
+    for status in (401, 403, 404, 429, 502, 503, 504):
+        if re.search(rf"(?:^|\D){status}(?:\D|$)", value):
+            return classify_status_code(status, value)
+    if "timeout" in lowered or "timed out" in lowered:
+        return DIAG_TIMEOUT
+    if retryable or any(token in lowered for token in ("network", "connect", "proxy", "ssl")):
+        return DIAG_NETWORK_ERROR
+    return DIAG_INVALID_RESPONSE
 
 
 def is_valid_json(text: str) -> bool:
@@ -359,6 +380,7 @@ __all__ = [
     "DIAG_INVALID_RESPONSE",
     "LLMDiagnostic",
     "classify_exception",
+    "classify_message",
     "classify_status_code",
     "diagnose_exception",
     "diagnose_http_error",

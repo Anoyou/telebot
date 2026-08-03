@@ -15,6 +15,14 @@ def test_classify_error_categories() -> None:
     assert ph.classify_error("invalid parameter temperature") == ph.ErrorClass.CAPABILITY
 
 
+def test_unified_categories_drive_health_without_string_guessing() -> None:
+    from app.services.llm_client import LLMError
+
+    assert ph.classify_error(LLMError("opaque", category="permission_denied")) == ph.ErrorClass.CREDENTIAL
+    assert ph.classify_error(LLMError("opaque", category="context_limit")) == ph.ErrorClass.CAPABILITY
+    assert ph.classify_error(LLMError("opaque", category="gateway_unavailable")) == ph.ErrorClass.TRANSIENT
+
+
 def test_capability_errors_do_not_cool() -> None:
     ph.record_failure(9, "cap-model", "does not support tools")
     h = ph.get_health(9, "cap-model")

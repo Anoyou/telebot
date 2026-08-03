@@ -9,7 +9,7 @@
 ### 阶段 A：错误语义收口
 
 - [x] WP-A1 统一诊断事实 — done（本提交）
-- [ ] WP-A2 全调用面接入 — pending
+- [x] WP-A2 全调用面接入 — done（本提交）
 - [ ] WP-A3 前端与用量展示 — pending
 
 ### 阶段 B：独立 Gateway 模块

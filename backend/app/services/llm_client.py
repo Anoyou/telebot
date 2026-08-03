@@ -1650,7 +1650,7 @@ class OpenAIClient(LLMClient):
             # 不要把 api_key 回显到错误里；构造前先剥离
             raise LLMError(
                 _safe_error_message(
-                    f"OpenAI 接口返回 {resp.status_code}: {resp.text[:200]}{_hint_for_status(resp.status_code)}",
+                    f"OpenAI 接口返回 {resp.status_code}: {resp.text[:200]}{_diagnostic_hint(resp.status_code, resp.text)}",
                     self._api_key,
                 ),
                 retryable=_is_retryable_status(resp.status_code),
@@ -1802,7 +1802,7 @@ class OpenAIClient(LLMClient):
                         raise LLMError(
                             _safe_error_message(
                                 f"OpenAI streaming 接口返回 {resp.status_code}: "
-                                f"{error_body[:200]}{_hint_for_status(resp.status_code)}",
+                                f"{error_body[:200]}{_diagnostic_hint(resp.status_code, error_body)}",
                                 self._api_key,
                             ),
                             retryable=_is_retryable_status(resp.status_code),
@@ -1956,7 +1956,7 @@ class OpenAIClient(LLMClient):
         if resp.status_code >= 400:
             raise LLMError(
                 _safe_error_message(
-                    f"OpenAI 接口返回 {resp.status_code}: {resp.text[:200]}{_hint_for_status(resp.status_code)}",
+                    f"OpenAI 接口返回 {resp.status_code}: {resp.text[:200]}{_diagnostic_hint(resp.status_code, resp.text)}",
                     self._api_key,
                 ),
                 retryable=_is_retryable_status(resp.status_code),
@@ -2072,7 +2072,7 @@ class OpenAIClient(LLMClient):
                         raise LLMError(
                             _safe_error_message(
                                 f"OpenAI streaming 接口返回 {resp.status_code}: "
-                                f"{error_body[:200]}{_hint_for_status(resp.status_code)}",
+                                f"{error_body[:200]}{_diagnostic_hint(resp.status_code, error_body)}",
                                 self._api_key,
                             ),
                             retryable=_is_retryable_status(resp.status_code),
@@ -2224,7 +2224,7 @@ class OpenAIClient(LLMClient):
         if resp.status_code >= 400:
             raise LLMError(
                 _safe_error_message(
-                    f"STT 接口返回 {resp.status_code}: {resp.text[:200]}{_hint_for_status(resp.status_code)}",
+                    f"STT 接口返回 {resp.status_code}: {resp.text[:200]}{_diagnostic_hint(resp.status_code, resp.text)}",
                     self._api_key,
                 ),
                 retryable=_is_retryable_status(resp.status_code),
@@ -2298,7 +2298,7 @@ class OpenAIClient(LLMClient):
         if resp.status_code >= 400:
             raise LLMError(
                 _safe_error_message(
-                    f"Images 接口返回 {resp.status_code}: {resp.text[:200]}{_hint_for_status(resp.status_code)}",
+                    f"Images 接口返回 {resp.status_code}: {resp.text[:200]}{_diagnostic_hint(resp.status_code, resp.text)}",
                     self._api_key,
                 ),
                 retryable=_is_retryable_status(resp.status_code),
@@ -2489,7 +2489,7 @@ class AnthropicClient(LLMClient):
                                 break
                         raise LLMError(
                             _safe_error_message(
-                                f"Anthropic 接口返回 {resp.status_code}: {error_body[:200]}{_hint_for_status(resp.status_code)}",
+                                f"Anthropic 接口返回 {resp.status_code}: {error_body[:200]}{_diagnostic_hint(resp.status_code, error_body)}",
                                 self._api_key,
                             ),
                             retryable=_is_retryable_status(resp.status_code),
@@ -2668,7 +2668,7 @@ class AnthropicClient(LLMClient):
         if resp.status_code >= 400:
             raise LLMError(
                 _safe_error_message(
-                    f"Anthropic 接口返回 {resp.status_code}: {resp.text[:200]}{_hint_for_status(resp.status_code)}",
+                    f"Anthropic 接口返回 {resp.status_code}: {resp.text[:200]}{_diagnostic_hint(resp.status_code, resp.text)}",
                     self._api_key,
                 ),
                 retryable=_is_retryable_status(resp.status_code),
@@ -2790,7 +2790,7 @@ class AnthropicClient(LLMClient):
                         raise LLMError(
                             _safe_error_message(
                                 f"Anthropic streaming 接口返回 {resp.status_code}: "
-                                f"{error_body[:200]}{_hint_for_status(resp.status_code)}",
+                                f"{error_body[:200]}{_diagnostic_hint(resp.status_code, error_body)}",
                                 self._api_key,
                             ),
                             retryable=_is_retryable_status(resp.status_code),
@@ -3028,7 +3028,7 @@ class AnthropicClient(LLMClient):
                                 break
                         raise LLMError(
                             _safe_error_message(
-                                f"Anthropic streaming 接口返回 {resp.status_code}: {error_body[:200]}{_hint_for_status(resp.status_code)}",
+                                f"Anthropic streaming 接口返回 {resp.status_code}: {error_body[:200]}{_diagnostic_hint(resp.status_code, error_body)}",
                                 self._api_key,
                             ),
                             retryable=_is_retryable_status(resp.status_code),
@@ -3289,7 +3289,7 @@ class ResponsesClient(LLMClient):
         if resp.status_code >= 400:
             raise LLMError(
                 _safe_error_message(
-                    f"Responses 接口返回 {resp.status_code}: {_response_text(resp)[:200]}{_hint_for_status(resp.status_code)}",
+                    f"Responses 接口返回 {resp.status_code}: {_response_text(resp)[:200]}{_diagnostic_hint(resp.status_code, _response_text(resp))}",
                     self._api_key,
                 ),
                 retryable=_is_retryable_status(resp.status_code),
@@ -3388,7 +3388,7 @@ class ResponsesClient(LLMClient):
         if resp.status_code >= 400:
             raise LLMError(
                 _safe_error_message(
-                    f"Responses 接口返回 {resp.status_code}: {_response_text(resp)[:200]}{_hint_for_status(resp.status_code)}",
+                    f"Responses 接口返回 {resp.status_code}: {_response_text(resp)[:200]}{_diagnostic_hint(resp.status_code, _response_text(resp))}",
                     self._api_key,
                 ),
                 retryable=_is_retryable_status(resp.status_code),
@@ -3592,7 +3592,7 @@ class ResponsesClient(LLMClient):
                         raise LLMError(
                             _safe_error_message(
                                 f"Responses streaming 接口返回 {resp.status_code}: "
-                                f"{error_body[:200]}{_hint_for_status(resp.status_code)}",
+                                f"{error_body[:200]}{_diagnostic_hint(resp.status_code, error_body)}",
                                 self._api_key,
                             ),
                             retryable=_is_retryable_status(resp.status_code),
@@ -3867,7 +3867,7 @@ class ResponsesClient(LLMClient):
                                 break
                         raise LLMError(
                             _safe_error_message(
-                                f"Responses streaming 接口返回 {resp.status_code}: {error_body[:200]}{_hint_for_status(resp.status_code)}",
+                                f"Responses streaming 接口返回 {resp.status_code}: {error_body[:200]}{_diagnostic_hint(resp.status_code, error_body)}",
                                 self._api_key,
                             ),
                             retryable=_is_retryable_status(resp.status_code),
@@ -4089,7 +4089,7 @@ class ResponsesClient(LLMClient):
         if resp.status_code >= 400:
             raise LLMError(
                 _safe_error_message(
-                    f"Responses 生图接口返回 {resp.status_code}: {_response_text(resp)[:200]}{_hint_for_status(resp.status_code)}",
+                    f"Responses 生图接口返回 {resp.status_code}: {_response_text(resp)[:200]}{_diagnostic_hint(resp.status_code, _response_text(resp))}",
                     self._api_key,
                 ),
                 retryable=_is_retryable_status(resp.status_code),
@@ -4161,11 +4161,16 @@ class LLMError(Exception):
             if status_code is not None
             else None
         )
-        self.category = category or (fact.category if fact else llm_diag.DIAG_INVALID_RESPONSE)
-        self.retryable = retryable or (fact.retryable if fact else False)
+        inferred_category = (
+            fact.category
+            if fact is not None
+            else llm_diag.classify_message(message, retryable=retryable)
+        )
+        self.category = category or inferred_category
+        self.retryable = fact.retryable if fact is not None else retryable
         self.scope = LLMErrorScope(
-            scope
-            or (fact.scope if fact else None)
+            (fact.scope if fact else None)
+            or scope
             or (LLMErrorScope.TRANSIENT if self.retryable else LLMErrorScope.UNKNOWN)
         )
         self.status_code = status_code
@@ -4209,8 +4214,8 @@ class LLMCallFailed(Exception):
             else None
         )
         self.category = category or (fact.category if fact else error_type) or llm_diag.DIAG_INVALID_RESPONSE
-        self.retryable = retryable or (fact.retryable if fact else False)
-        self.scope = LLMErrorScope(scope or (fact.scope if fact else LLMErrorScope.UNKNOWN))
+        self.retryable = fact.retryable if fact is not None else retryable
+        self.scope = LLMErrorScope((fact.scope if fact else None) or scope or LLMErrorScope.UNKNOWN)
         self.upstream_error_code = upstream_error_code or (fact.upstream_error_code if fact else None)
         self.request_id = request_id or (fact.request_id if fact else None)
         self.gateway_stage = gateway_stage or (fact.gateway_stage if fact else None)
@@ -4298,31 +4303,12 @@ def _safe_error_message(
     return out
 
 
-# Cloudflare 5xx 错误码的人话翻译（用户最常碰到 520，且不是应用问题）
-_CF_5XX_HINTS: dict[int, str] = {
-    520: "上游返回异常（Cloudflare 520 = 反代连不上目标 / 上游崩了；不是本项目代码问题）",
-    521: "上游服务器拒绝连接（Cloudflare 521）",
-    522: "上游连接超时（Cloudflare 522）",
-    523: "上游不可达（Cloudflare 523）",
-    524: "上游处理超时（Cloudflare 524；常见于慢模型 + 反代严格超时）",
-    525: "SSL 握手失败（Cloudflare 525）",
-    526: "SSL 证书无效（Cloudflare 526）",
-}
+def _diagnostic_hint(status: int, body: str) -> str:
+    """只从统一诊断事实生成提示，禁止各 Client 自行解释状态码。"""
 
-
-def _hint_for_status(status: int) -> str:
-    """根据 HTTP 状态码给一句人话提示，便于用户区分"我配错了"还是"反代/上游挂了"。"""
-    if status in _CF_5XX_HINTS:
-        return f"  ↳ {_CF_5XX_HINTS[status]}"
-    if status == 401 or status == 403:
-        return "  ↳ api_key 无效 / 权限不够"
-    if status == 404:
-        return "  ↳ model 名不对 / 端点不存在；试试 Fetch 模型列表选一条已支持的"
-    if status == 429:
-        return "  ↳ 限流，等会儿再试 / 或换一条不那么紧的反代"
-    if 500 <= status < 600:
-        return "  ↳ 服务器侧错误（不是 api_key / model 问题）"
-    return ""
+    category = llm_diag.classify_status_code(status, body)
+    suggestion = llm_diag.suggestion_for(category)
+    return f"  ↳ [{category}] {suggestion}" if suggestion else f"  ↳ [{category}]"
 
 
 def _describe_http_error(exc: BaseException, base_url: str | None) -> str:

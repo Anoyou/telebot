@@ -75,6 +75,13 @@ def test_gateway_and_timeout_categories() -> None:
     assert diag.classify_status_code(504, "gateway timeout") == diag.DIAG_TIMEOUT
 
 
+def test_wrapped_upstream_400_is_provider_local_and_not_retryable() -> None:
+    fact = diag.diagnose_http_error(400, "Error from provider: upstream request failed")
+    assert fact.category == diag.DIAG_UPSTREAM_ERROR
+    assert fact.scope == "provider_local"
+    assert fact.retryable is False
+
+
 def test_classify_5xx_upstream() -> None:
     assert diag.classify_status_code(502, "bad gateway") == diag.DIAG_UPSTREAM_ERROR
 

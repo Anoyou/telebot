@@ -1083,7 +1083,7 @@ async def test_call_with_fallback_all_fail_raises(monkeypatch) -> None:
             await _rt.call_with_fallback(chain, "sys", "user", max_tokens=100)
 
     # 最后失败的 provider 应该是 primary（因为第一个尝试）
-    assert exc_info.value.error_type in ("auth", "unknown")
+    assert exc_info.value.error_type == "auth_failed"
 
 
 # ════════════════════════════════════════════════════════════
@@ -1271,8 +1271,8 @@ def test_upstream_failed_400_is_provider_local() -> None:
 def test_error_classifier_prefers_http_status_code() -> None:
     from app.services import llm_runtime as _rt
 
-    assert _rt._classify_error(LLMError("upstream unavailable", status_code=503)) == "server_error"
-    assert _rt._classify_error(LLMError("busy", status_code=429)) == "rate_limit"
+    assert _rt._classify_error(LLMError("upstream unavailable", status_code=503)) == "upstream_error"
+    assert _rt._classify_error(LLMError("busy", status_code=429)) == "rate_limited"
 
 
 def test_llm_error_carries_unified_diagnostic_fields() -> None:

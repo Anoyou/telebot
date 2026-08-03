@@ -275,31 +275,33 @@ def _is_retryable_error(exc: Exception) -> bool:
 
 
 def _classify_error(exc: Exception) -> str:
-    """分类错误类型（用于日志）。"""
+    """返回统一 category，供 usage、健康与 fallback 共用。"""
     from .llm_client import LLMCallFailed, LLMError
 
     if isinstance(exc, LLMCallFailed):
-        return exc.error_type or "unknown"
+        return exc.category or exc.error_type or "invalid_response"
     if isinstance(exc, LLMError):
+        if exc.category:
+            return exc.category
         status_code = getattr(exc, "status_code", None)
         if status_code == 429:
-            return "rate_limit"
+            return "rate_limited"
         if isinstance(status_code, int) and 500 <= status_code < 600:
-            return "server_error"
+            return "upstream_error"
         if status_code in {401, 403}:
-            return "auth"
+            return "auth_failed"
         msg = str(exc).lower()
         if "timeout" in msg:
             return "timeout"
         if "connect" in msg or "network" in msg or "proxy" in msg:
             return "network"
         if "429" in msg or "限流" in msg:
-            return "rate_limit"
+            return "rate_limited"
         if "401" in msg or "403" in msg or "auth" in msg or "unauthorized" in msg:
-            return "auth"
+            return "auth_failed"
         if "5" in msg[:3]:
-            return "server_error"
-        return "unknown"
+            return "upstream_error"
+        return "invalid_response"
     return type(exc).__name__.lower()
 
 
