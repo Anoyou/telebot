@@ -11,6 +11,10 @@ export type LivenessStatusKey =
   | "rate_limited"
   | "protocol_mismatch"
   | "capability_missing"
+  | "client_restricted"
+  | "quota_exhausted"
+  | "gateway_unavailable"
+  | "permission_denied"
   | "skipped"
   | "unknown"
   | "pending";
@@ -23,6 +27,10 @@ export const LIVENESS_STATUS_LABEL: Record<LivenessStatusKey, string> = {
   rate_limited: "限流",
   protocol_mismatch: "协议不匹配",
   capability_missing: "缺少能力",
+  client_restricted: "客户端受限",
+  quota_exhausted: "额度耗尽",
+  gateway_unavailable: "Gateway 不可用",
+  permission_denied: "权限不足",
   skipped: "跳过",
   unknown: "未知",
   pending: "请求中",
@@ -37,10 +45,14 @@ export function livenessStatusTone(key: LivenessStatusKey): StatusTone {
     case "degraded":
     case "rate_limited":
     case "timeout":
+    case "quota_exhausted":
+    case "gateway_unavailable":
       return "warn";
     case "failed":
     case "protocol_mismatch":
     case "capability_missing":
+    case "client_restricted":
+    case "permission_denied":
       return "danger";
     case "skipped":
     case "unknown":
@@ -73,6 +85,12 @@ export function extractHttpStatusCode(
 export function classifyErrorText(error?: string | null, errorCategory?: string | null): LivenessStatusKey {
   const cat = String(errorCategory || "").toLowerCase();
   const text = String(error || "").toLowerCase();
+  if (cat === "client_rejected" || cat === "official_account_required") {
+    return "client_restricted";
+  }
+  if (cat === "quota_exhausted") return "quota_exhausted";
+  if (cat === "gateway_unavailable" || cat === "gateway_overloaded") return "gateway_unavailable";
+  if (cat === "permission_denied" || cat === "account_policy") return "permission_denied";
   if (cat === "timeout" || text.includes("timeout") || text.includes("超时") || text.includes("timed out")) {
     return "timeout";
   }
@@ -81,6 +99,7 @@ export function classifyErrorText(error?: string | null, errorCategory?: string 
   }
   if (
     cat === "protocol_rejected" ||
+    cat === "endpoint_missing" ||
     text.includes("protocol") ||
     text.includes("api_format") ||
     text.includes("协议")
@@ -90,6 +109,7 @@ export function classifyErrorText(error?: string | null, errorCategory?: string 
   if (
     cat === "capability_mismatch" ||
     cat === "model_missing" ||
+    cat === "context_limit" ||
     text.includes("not support") ||
     text.includes("unsupported") ||
     text.includes("capability") ||
@@ -147,16 +167,30 @@ export function classifyFullLivenessStatus(
     case "timeout":
       return "timeout";
     case "protocol_rejected":
+    case "endpoint_missing":
       return "protocol_mismatch";
     case "model_missing":
-    case "client_rejected":
+    case "context_limit":
       return "capability_missing";
+    case "client_rejected":
+    case "official_account_required":
+      return "client_restricted";
+    case "quota_exhausted":
+      return "quota_exhausted";
+    case "gateway_unavailable":
+    case "gateway_overloaded":
+      return "gateway_unavailable";
+    case "permission_denied":
+    case "account_policy":
+      return "permission_denied";
     case "cancelled":
     case "skipped_disabled":
     case "skipped_provider_missing":
     case "no_enabled_models":
       return "skipped";
     case "auth_failed":
+    case "request_invalid":
+    case "invalid_response":
     case "upstream_error":
     case "config_error":
     case "network_error":

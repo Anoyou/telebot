@@ -10,7 +10,7 @@
 
 - [x] WP-A1 统一诊断事实 — done（本提交）
 - [x] WP-A2 全调用面接入 — done（本提交）
-- [ ] WP-A3 前端与用量展示 — pending
+- [x] WP-A3 前端与用量展示 — done（本提交）
 
 ### 阶段 B：独立 Gateway 模块
 

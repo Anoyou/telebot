@@ -153,7 +153,7 @@ const CLIENT_IDENTITY_OPTIONS: {
   {
     value: "auto",
     label: "自动（推荐）",
-    hint: "按协议档案解析：标准 Responses / DeepSeek 使用 OpenAI SDK，Codex 档案使用 Codex TUI，Anthropic 使用 Claude Code CLI。",
+    hint: "按协议档案解析：标准 Responses / DeepSeek 使用 OpenAI SDK，Codex 档案仅使用兼容请求头，Anthropic 使用 Claude Code CLI。",
   },
   {
     value: "minimal",
@@ -167,8 +167,8 @@ const CLIENT_IDENTITY_OPTIONS: {
   },
   {
     value: "codex_tui",
-    label: "Codex TUI",
-    hint: "Codex 终端交互身份（originator=codex-tui），用于 Responses。",
+    label: "Codex 兼容请求头（非官方运行时）",
+    hint: "仅附加可复核的 Codex 兼容请求头；不提供官方运行时、OAuth、账号或设备身份。",
   },
   {
     value: "codex_desktop",

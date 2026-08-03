@@ -31,6 +31,10 @@ test("全量测活 status 映射到九态词表", () => {
   assert.equal(classifyFullLivenessStatus("rate_limited"), "rate_limited");
   assert.equal(classifyFullLivenessStatus("protocol_rejected"), "protocol_mismatch");
   assert.equal(classifyFullLivenessStatus("model_missing"), "capability_missing");
+  assert.equal(classifyFullLivenessStatus("client_rejected"), "client_restricted");
+  assert.equal(classifyFullLivenessStatus("quota_exhausted"), "quota_exhausted");
+  assert.equal(classifyFullLivenessStatus("gateway_unavailable"), "gateway_unavailable");
+  assert.equal(classifyFullLivenessStatus("permission_denied"), "permission_denied");
   assert.equal(classifyFullLivenessStatus("cancelled", { skipped: true }), "skipped");
   assert.equal(livenessStatusLabel("normal"), "正常");
   assert.equal(livenessStatusLabel("degraded"), "降级");
@@ -46,6 +50,8 @@ test("extracts structured and legacy HTTP status codes", () => {
 test("错误文案分类", () => {
   assert.equal(classifyErrorText("tools are not supported"), "capability_missing");
   assert.equal(classifyErrorText(null, "timeout"), "timeout");
+  assert.equal(classifyErrorText("opaque", "official_account_required"), "client_restricted");
+  assert.equal(classifyErrorText("opaque", "quota_exhausted"), "quota_exhausted");
 });
 
 test("usage 转换含请求/实际模型", () => {
