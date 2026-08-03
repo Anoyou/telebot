@@ -16,7 +16,7 @@
 
 - [x] WP-B1 进程骨架与契约 — done（本提交）
 - [x] WP-B2 Provider 快照与精确路由 — done（本提交）
-- [ ] WP-B3 Codex Responses 数据面 — pending
+- [x] WP-B3 Codex Responses 数据面 — done（本提交）
 
 ### 阶段 C：TelePilot 全链路接入
 

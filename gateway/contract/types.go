@@ -14,11 +14,13 @@ type ErrorEnvelope struct {
 }
 
 type GatewayError struct {
-	Code         string `json:"code"`
-	Message      string `json:"message"`
-	Retryable    bool   `json:"retryable"`
-	RequestID    string `json:"request_id,omitempty"`
-	GatewayStage string `json:"gateway_stage,omitempty"`
+	Code              string `json:"code"`
+	Message           string `json:"message"`
+	Retryable         bool   `json:"retryable"`
+	StatusCode        int    `json:"status_code,omitempty"`
+	UpstreamErrorCode string `json:"upstream_error_code,omitempty"`
+	RequestID         string `json:"request_id,omitempty"`
+	GatewayStage      string `json:"gateway_stage,omitempty"`
 }
 
 type ConfigSnapshot struct {

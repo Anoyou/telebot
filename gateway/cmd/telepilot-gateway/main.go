@@ -4,11 +4,13 @@ import (
 	"context"
 	"flag"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
+	"github.com/anoyou/telepilot/gateway/internal/codex"
 	"github.com/anoyou/telepilot/gateway/internal/control"
 	"github.com/anoyou/telepilot/gateway/internal/security"
 	"github.com/anoyou/telepilot/gateway/internal/server"
@@ -21,7 +23,10 @@ func main() {
 
 	logger := log.New(os.Stderr, "telepilot-gateway ", log.LstdFlags|log.LUTC)
 	store := control.NewStore()
-	srv := server.New(*socket, *maxConcurrency, store.Ready, control.Handler(store))
+	routes := http.NewServeMux()
+	routes.Handle("/internal/v1/", control.Handler(store))
+	routes.Handle("/v1/", codex.NewHandler(store))
+	srv := server.New(*socket, *maxConcurrency, store.Ready, routes)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
