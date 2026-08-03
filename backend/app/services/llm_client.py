@@ -38,6 +38,7 @@ from ..db.models.command import (
     LLMProvider,
     default_api_format_for,
 )
+from . import llm_diagnostics as llm_diag
 from .llm_call_context import ClientRuntimeContext
 from .llm_codecs.anthropic import usage_from_anthropic
 from .llm_codecs.chat_completions import usage_from_chat
@@ -4143,11 +4144,35 @@ class LLMError(Exception):
         retryable: bool = False,
         scope: LLMErrorScope | str | None = None,
         status_code: int | None = None,
+        category: str | None = None,
+        upstream_error_code: str | None = None,
+        request_id: str | None = None,
+        gateway_stage: str | None = None,
+        upstream_summary: str | None = None,
     ):
         super().__init__(message)
-        self.retryable = retryable  # 是否可重试（timeout/429/5xx/网络错误）
-        self.scope = LLMErrorScope(scope or (LLMErrorScope.TRANSIENT if retryable else LLMErrorScope.UNKNOWN))
+        fact = (
+            llm_diag.diagnose_http_error(
+                status_code,
+                message,
+                request_id=request_id,
+                gateway_stage=gateway_stage,
+            )
+            if status_code is not None
+            else None
+        )
+        self.category = category or (fact.category if fact else llm_diag.DIAG_INVALID_RESPONSE)
+        self.retryable = retryable or (fact.retryable if fact else False)
+        self.scope = LLMErrorScope(
+            scope
+            or (fact.scope if fact else None)
+            or (LLMErrorScope.TRANSIENT if self.retryable else LLMErrorScope.UNKNOWN)
+        )
         self.status_code = status_code
+        self.upstream_error_code = upstream_error_code or (fact.upstream_error_code if fact else None)
+        self.request_id = request_id or (fact.request_id if fact else None)
+        self.gateway_stage = gateway_stage or (fact.gateway_stage if fact else None)
+        self.upstream_summary = upstream_summary or (fact.upstream_summary if fact else None)
 
 
 class LLMCallFailed(Exception):
@@ -4162,14 +4187,34 @@ class LLMCallFailed(Exception):
         status_code: int | None = None,
         retryable: bool = False,
         scope: LLMErrorScope | str | None = None,
+        category: str | None = None,
+        upstream_error_code: str | None = None,
+        request_id: str | None = None,
+        gateway_stage: str | None = None,
+        upstream_summary: str | None = None,
     ):
         super().__init__(message)
         self.provider_id = provider_id
         self.provider_name = provider_name
         self.error_type = error_type  # "timeout" / "network" / "rate_limit" / "auth" / "server_error"
         self.status_code = status_code
-        self.retryable = retryable
-        self.scope = LLMErrorScope(scope or LLMErrorScope.UNKNOWN)
+        fact = (
+            llm_diag.diagnose_http_error(
+                status_code,
+                message,
+                request_id=request_id,
+                gateway_stage=gateway_stage,
+            )
+            if status_code is not None
+            else None
+        )
+        self.category = category or (fact.category if fact else error_type) or llm_diag.DIAG_INVALID_RESPONSE
+        self.retryable = retryable or (fact.retryable if fact else False)
+        self.scope = LLMErrorScope(scope or (fact.scope if fact else LLMErrorScope.UNKNOWN))
+        self.upstream_error_code = upstream_error_code or (fact.upstream_error_code if fact else None)
+        self.request_id = request_id or (fact.request_id if fact else None)
+        self.gateway_stage = gateway_stage or (fact.gateway_stage if fact else None)
+        self.upstream_summary = upstream_summary or (fact.upstream_summary if fact else None)
 
 
 def _is_retryable_status(status_code: int) -> bool:

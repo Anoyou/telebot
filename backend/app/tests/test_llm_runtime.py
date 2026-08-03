@@ -1275,6 +1275,22 @@ def test_error_classifier_prefers_http_status_code() -> None:
     assert _rt._classify_error(LLMError("busy", status_code=429)) == "rate_limit"
 
 
+def test_llm_error_carries_unified_diagnostic_fields() -> None:
+    from app.services import llm_diagnostics as diag
+
+    error = LLMError(
+        '{"error":{"code":"client_rejected","message":"official client only"}}',
+        status_code=403,
+        request_id="req-safe",
+        gateway_stage="upstream",
+    )
+    assert error.category == diag.DIAG_CLIENT_REJECTED
+    assert error.status_code == 403
+    assert error.scope is LLMErrorScope.PROVIDER_LOCAL
+    assert error.request_id == "req-safe"
+    assert error.gateway_stage == "upstream"
+
+
 @pytest.mark.asyncio
 async def test_openai_client_classifies_policy_403_as_account_scope(monkeypatch) -> None:
     from app.services import llm_client

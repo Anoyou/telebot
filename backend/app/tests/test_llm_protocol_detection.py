@@ -34,8 +34,8 @@ def test_classify_403_client_rejected_when_identity_hint() -> None:
     )
 
 
-def test_classify_403_plain_permission_is_auth_failed() -> None:
-    assert diag.classify_status_code(403, "forbidden") == diag.DIAG_AUTH_FAILED
+def test_classify_403_plain_permission_is_permission_denied() -> None:
+    assert diag.classify_status_code(403, "forbidden") == diag.DIAG_PERMISSION_DENIED
 
 
 def test_classify_404_model_missing_vs_protocol() -> None:
@@ -43,11 +43,36 @@ def test_classify_404_model_missing_vs_protocol() -> None:
         diag.classify_status_code(404, "The model gpt-x does not exist")
         == diag.DIAG_MODEL_MISSING
     )
-    assert diag.classify_status_code(404, "Not Found") == diag.DIAG_PROTOCOL_REJECTED
+    assert diag.classify_status_code(404, "Not Found") == diag.DIAG_ENDPOINT_MISSING
 
 
 def test_classify_429_rate_limited() -> None:
     assert diag.classify_status_code(429, "rate limit exceeded") == diag.DIAG_RATE_LIMITED
+
+
+def test_structured_error_code_has_priority_over_http_status() -> None:
+    assert (
+        diag.classify_status_code(429, '{"error":{"code":"insufficient_quota","message":"limit"}}')
+        == diag.DIAG_QUOTA_EXHAUSTED
+    )
+
+
+def test_official_account_requirement_has_stable_fact() -> None:
+    fact = diag.diagnose_http_error(
+        403,
+        '{"error":{"code":"official_account_required","message":"ChatGPT account required"}}',
+        request_id="req-1",
+        gateway_stage="upstream",
+    )
+    assert fact.category == diag.DIAG_OFFICIAL_ACCOUNT_REQUIRED
+    assert fact.request_id == "req-1"
+    assert fact.gateway_stage == "upstream"
+    assert fact.retryable is False
+
+
+def test_gateway_and_timeout_categories() -> None:
+    assert diag.classify_status_code(503, '{"error":{"code":"gateway_overloaded"}}') == diag.DIAG_GATEWAY_OVERLOADED
+    assert diag.classify_status_code(504, "gateway timeout") == diag.DIAG_TIMEOUT
 
 
 def test_classify_5xx_upstream() -> None:

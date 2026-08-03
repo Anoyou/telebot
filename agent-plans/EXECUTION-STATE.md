@@ -1,8 +1,31 @@
 # EXECUTION-STATE（进度真相源）
 
-> 当前计划：`agent-plans/PLAN-agent-slots-bot-fixes.md` **v4**
+> 当前计划：`agent-plans/PLAN-embedded-codex-gateway.md` **v1**
 > 纪律：每 WP 完成即更新本文件；新会话恢复从本文件开始。
 > 状态：`pending` → `in_progress` → `done`（附 commit 哈希）/ `blocked` / `partial`（附缺口）
+
+## 当前计划：内置 Codex Gateway / 全链路 Agent 接入 / LLM 错误语义收口 v1
+
+### 阶段 A：错误语义收口
+
+- [x] WP-A1 统一诊断事实 — done（本提交）
+- [ ] WP-A2 全调用面接入 — pending
+- [ ] WP-A3 前端与用量展示 — pending
+
+### 阶段 B：独立 Gateway 模块
+
+- [ ] WP-B1 进程骨架与契约 — pending
+- [ ] WP-B2 Provider 快照与精确路由 — pending
+- [ ] WP-B3 Codex Responses 数据面 — pending
+
+### 阶段 C：TelePilot 全链路接入
+
+- [ ] WP-C1 运行时管理与配置同步 — pending
+- [ ] WP-C2 Provider schema 与 Client Builder — pending
+- [ ] WP-C3 Agent、插件、测活与 usage 验收 — pending
+- [ ] WP-C4 Provider UI、健康与文档 — pending
+
+---
 
 ## 当前计划：Bot 交互修复 / 插件工具插槽 / OpenWorker 三点 v4
 
