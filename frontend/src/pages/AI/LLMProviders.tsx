@@ -8,7 +8,7 @@ import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
-import { ArrowLeft, Plus, Trash2, KeyRound, Edit3, Download, Check, CheckCircle2, XCircle, Star, ChevronDown, ChevronRight, Eye, EyeOff, Filter, X, Package, Save, Activity, ArrowUpDown, GripVertical } from "lucide-react";
+import { ArrowLeft, Plus, Trash2, KeyRound, Edit3, Download, Check, CheckCircle2, XCircle, Star, ChevronDown, ChevronRight, Eye, EyeOff, Filter, X, Package, Save, Activity, ArrowUpDown, GripVertical, ServerCog, RefreshCw } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { CommandBadge } from "@/components/CommandBadge";
@@ -259,7 +259,6 @@ interface FormState {
   // 客户端身份档案；与 protocol_profile 相互独立
   client_identity_profile: LLMClientIdentityProfile;
   execution_backend: LLMExecutionBackend;
-  original_execution_backend?: LLMExecutionBackend;
   direct_api_format?: LLMApiFormat;
   direct_protocol_profile?: LLMProtocolProfile;
   direct_web_search_api_format?: LLMWebSearchApiFormat;
@@ -305,7 +304,6 @@ const EMPTY_FORM: FormState = {
   web_search_api_format: "auto",
   client_identity_profile: "auto",
   execution_backend: "direct",
-  original_execution_backend: "direct",
   clearKey: false,
   modality: "text",
   tags: ["chat"],
@@ -744,6 +742,7 @@ export function LLMProviders({
     openCreateOnMount ? { ...EMPTY_FORM } : null,
   );
   const [identityVersionsOpen, setIdentityVersionsOpen] = useState(false);
+  const [gatewayStatusOpen, setGatewayStatusOpen] = useState(false);
   const settingsQ = useQuery({
     queryKey: ["system", "settings"],
     queryFn: getSystemSettings,
@@ -945,7 +944,6 @@ export function LLMProviders({
       web_search_api_format: ((p.web_search_api_format as LLMWebSearchApiFormat) || "auto"),
       client_identity_profile: ((p.client_identity_profile as LLMClientIdentityProfile) || "auto"),
       execution_backend: ((p.execution_backend as LLMExecutionBackend) || "direct"),
-      original_execution_backend: ((p.execution_backend as LLMExecutionBackend) || "direct"),
       clearKey: false,
       modality: ((p.modality as LLMModality) || "text"),
       tags: ((p.tags as LLMTag[]) || []).filter((t) =>
@@ -1036,7 +1034,7 @@ export function LLMProviders({
                 />
               </div>
             </div>
-            <div className="grid grid-cols-2 items-center gap-2 rounded-md border border-primary/20 bg-primary/[0.04] p-2 shadow-sm sm:flex sm:flex-wrap">
+            <div className="grid grid-cols-3 items-center gap-2 rounded-md border border-primary/20 bg-primary/[0.04] p-2 shadow-sm sm:flex sm:flex-wrap">
               <Button
                 type="button"
                 size="sm"
@@ -1054,6 +1052,16 @@ export function LLMProviders({
                 onClick={() => setIdentityVersionsOpen(true)}
               >
                 <KeyRound className="mr-1 h-4 w-4" />请求配置
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="min-w-0 flex-1 px-2 shadow-sm sm:flex-none sm:px-3"
+                onClick={() => setGatewayStatusOpen(true)}
+              >
+                <ServerCog className="mr-1 h-4 w-4" />
+                <span className="truncate">Gateway 状态</span>
               </Button>
             </div>
           </div>
@@ -1314,6 +1322,7 @@ export function LLMProviders({
       </Card>
 
       <IdentityVersionsDialog open={identityVersionsOpen} onOpenChange={setIdentityVersionsOpen} />
+      <GatewayStatusDialog open={gatewayStatusOpen} onOpenChange={setGatewayStatusOpen} />
     </div>
   );
 }
@@ -1474,7 +1483,6 @@ function ProviderCreateWorkspace({
   const endpoint = form.base_url.trim() || defaultBaseUrl;
   const enabledModelCount = form.models.filter((model) => model.enabled).length;
   const gatewayMode = isGatewayBackend(form.execution_backend);
-  const gatewayBackendChanged = form.execution_backend !== form.original_execution_backend;
   const gatewayHealthQ = useQuery({
     queryKey: ["system", "health-overview"],
     queryFn: getHealthOverview,
@@ -1626,7 +1634,7 @@ function ProviderCreateWorkspace({
                   disabled={connectionLocked}
                   onChange={(event) => setExecutionBackend(event.target.value as LLMExecutionBackend)}
                 >
-                  <option value="direct">直接 API</option>
+                  <option value="direct">Provider 直连</option>
                   <option value="codex_gateway">内置 Codex Gateway</option>
                 </Select>
                 {gatewayMode ? (
@@ -1641,7 +1649,7 @@ function ProviderCreateWorkspace({
                     ) : gatewayHealthQ.isError ? (
                       "无法读取 Gateway 状态，暂不能保存 Gateway Provider。"
                     ) : gatewayHealth?.state === "degraded" ? (
-                      gatewayHealth.error || "内置 Gateway 当前不可用；direct Provider 不受影响。"
+                      gatewayHealth.error || "内置 Gateway 当前不可用；Provider 直连不受影响。"
                     ) : gatewayHealth?.state === "ready" ? (
                       `Gateway 已就绪${gatewayHealth.version ? ` · ${gatewayHealth.version}` : ""}。身份由 Gateway 管理。`
                     ) : (
@@ -1649,7 +1657,7 @@ function ProviderCreateWorkspace({
                     )}
                   </div>
                 ) : (
-                  <p className="text-xs text-muted-foreground">直接使用当前 Provider 的 API、身份档案与出口代理。</p>
+                  <p className="text-xs text-muted-foreground">由 TelePilot 直接调用当前 Provider API，并使用所选身份档案与出口代理。</p>
                 )}
               </div>
               <div className="space-y-1.5 sm:col-span-2">
@@ -1737,7 +1745,7 @@ function ProviderCreateWorkspace({
                 </Select>
                 <p className="text-xs leading-5 text-muted-foreground">
                   {gatewayMode
-                    ? "身份由 Gateway 管理；当前已保存的身份配置会保留，切回直接 API 后继续使用。"
+                    ? "身份由 Gateway 管理；当前已保存的身份配置会保留，切回 Provider 直连后继续使用。"
                     : CLIENT_IDENTITY_OPTIONS.find((option) => option.value === form.client_identity_profile)?.hint}
                 </p>
               </div>
@@ -1801,25 +1809,15 @@ function ProviderCreateWorkspace({
                   apiFormat={form.api_format}
                   protocolProfile={form.protocol_profile}
                   executionBackend={form.execution_backend}
-                  backendChanged={gatewayBackendChanged}
                   baseUrl={form.base_url}
                   apiKey={form.api_key}
                   proxyId={form.proxy_id}
                 />
               </section>
             ) : (
-            gatewayMode ? (
-              <section className="rounded-lg border border-primary/25 bg-primary/[0.04] p-4" aria-labelledby="gateway-create-verification-title">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <h2 id="gateway-create-verification-title" className="text-sm font-semibold">保存后经 Gateway 验证</h2>
-                  <MetaBadge tone={gatewayBlocked ? "warn" : "info"}>{gatewayBlocked ? "暂不可保存" : "等待保存"}</MetaBadge>
-                </div>
-                <p className="mt-2 text-xs leading-5 text-muted-foreground">
-                  未落库凭据不会临时注入 Gateway。请手动填写 Provider 名称和默认模型，保存后再在模型管理或模型测活页读取真实模型列表并发起 Gateway 测活。
-                </p>
-              </section>
-            ) : <ProviderCreateVerification
+            <ProviderCreateVerification
               providerKind={form.provider}
+              executionBackend={form.execution_backend}
               apiFormat={form.api_format}
               protocolProfile={form.protocol_profile}
               clientIdentityProfile={form.client_identity_profile}
@@ -1918,7 +1916,7 @@ function ProviderCreateWorkspace({
                     ))}
                   </Select>
                   {gatewayMode ? (
-                    <p className="text-xs leading-5 text-muted-foreground">Gateway 的联网请求固定使用 Responses；切回直接 API 后恢复原设置。</p>
+                    <p className="text-xs leading-5 text-muted-foreground">Gateway 的联网请求固定使用 Responses；切回 Provider 直连后恢复原设置。</p>
                   ) : null}
                 </div>
                 <div className="space-y-1.5">
@@ -2230,7 +2228,6 @@ function ProviderModelsSection({
   apiFormat,
   protocolProfile,
   executionBackend,
-  backendChanged,
   baseUrl,
   apiKey,
   proxyId,
@@ -2245,7 +2242,6 @@ function ProviderModelsSection({
   apiFormat: LLMApiFormat;
   protocolProfile: LLMProtocolProfile;
   executionBackend: LLMExecutionBackend;
-  backendChanged: boolean;
   baseUrl: string;
   apiKey: string;
   proxyId: string;
@@ -2343,6 +2339,7 @@ function ProviderModelsSection({
           system_prompt: "你正在执行模型可用性检查。请直接、简短地回复用户，不要调用工具。",
           max_tokens: 128,
           timeout_seconds: 90,
+          execution_backend_override: executionBackend,
         },
         { signal: controller.signal },
       );
@@ -2409,13 +2406,9 @@ function ProviderModelsSection({
 
   // Fetch 按钮可用性：新建模式使用表单内 Key；编辑模式可回落到 DB 已存 Key。
   const fetchDisabledHint =
-    backendChanged
-      ? "执行后端已变更，请先保存 Provider 再读取模型列表"
-      : executionBackend === "codex_gateway" && !persisted
-        ? "Gateway Provider 需先保存，再通过内置 Gateway 读取模型列表"
-        : !persisted && !apiKey.trim() && providerKind !== "ollama"
-        ? "新建模式下需先填 API Key 才能 Fetch；或先保存让后端用已存 key"
-        : null;
+    !persisted && !apiKey.trim() && providerKind !== "ollama"
+      ? "新建模式下需先填 API Key 才能 Fetch；或先保存让后端用已存 key"
+      : null;
 
   // 渲染单行模型；按用户要求保持**固定顺序**：
   //   [⭐(设默认) 或 默认徽章] / 测活 / 删除
@@ -2462,7 +2455,7 @@ function ProviderModelsSection({
             className="text-[10px] leading-4"
             title={isGatewayBackend(result.execution_backend)
               ? [result.gateway_version, result.gateway_stage, result.gateway_request_id].filter(Boolean).join(" · ")
-              : "实际通过直接 API 调用"}
+              : "实际通过 Provider 直连调用"}
           >
             {executionBackendLabel(result.execution_backend)}
           </MetaBadge>
@@ -2487,8 +2480,8 @@ function ProviderModelsSection({
           size="sm"
           variant="ghost"
           loading={testingId === m.id}
-          disabled={!persisted || backendChanged || (testingId !== null && testingId !== m.id)}
-          title={backendChanged ? "执行后端已变更，请先保存再测活" : persisted ? "后台发起一次真实单模型对话测活" : "先保存 Provider 再测活"}
+          disabled={!persisted || (testingId !== null && testingId !== m.id)}
+          title={persisted ? "使用当前表单所选执行后端发起真实单模型对话测活" : "先保存 Provider 再测活"}
           onClick={() => onTest(m.id)}
         >
           {testingId !== m.id ? <Activity className="h-3.5 w-3.5" /> : null}
@@ -2522,7 +2515,7 @@ function ProviderModelsSection({
         <div>
           <Label className="text-sm font-semibold">模型管理</Label>
           <p className="text-xs text-muted-foreground">
-            点 <code>Fetch</code> {executionBackend === "codex_gateway" ? "通过已保存的内置 Gateway" : "用当前编辑表单的字段（提供商 / Base URL / API 协议 / API Key / 代理）"}拉模型列表，
+            点 <code>Fetch</code> 使用当前表单所选执行后端和接入参数拉模型列表，无需先保存；
             手动启用要用的几个；也能手动添加。
             启用的模型会在「自定义指令 → AI 子表单」的下拉里展开成
             <code> 名称（提供商 · 模型ID）</code>
@@ -2617,6 +2610,106 @@ function ProviderModelsSection({
         </div>
       )}
     </div>
+  );
+}
+
+function GatewayStatusDialog({
+  open,
+  onOpenChange,
+}: {
+  open: boolean;
+  onOpenChange: (value: boolean) => void;
+}) {
+  const healthQ = useQuery({
+    queryKey: ["system", "health-overview"],
+    queryFn: getHealthOverview,
+    enabled: open,
+    staleTime: 5_000,
+    refetchOnWindowFocus: true,
+  });
+  const gateway = healthQ.data?.codex_gateway;
+  const stateLabel = gateway?.state === "ready"
+    ? "已就绪"
+    : gateway?.state === "degraded"
+      ? "异常"
+      : gateway?.state === "not_required"
+        ? "当前未启用"
+        : "读取中";
+  const stateTone = gateway?.state === "ready"
+    ? "success"
+    : gateway?.state === "degraded"
+      ? "danger"
+      : "outline";
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle>内置 Codex Gateway 状态</DialogTitle>
+          <DialogDescription>
+            Gateway 没有单独的用户配置表单。它会读取所有选择“内置 Codex Gateway”的 Provider，并在 Web 容器内按需启动。
+          </DialogDescription>
+        </DialogHeader>
+        {healthQ.isLoading ? (
+          <div className="flex min-h-32 items-center justify-center gap-2 text-sm text-muted-foreground">
+            <Spinner className="text-primary" />
+            正在读取 Gateway 状态…
+          </div>
+        ) : healthQ.isError ? (
+          <p className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+            {getErrMsg(healthQ.error)}
+          </p>
+        ) : (
+          <div className="space-y-4">
+            <div className="flex items-center justify-between rounded-md border bg-muted/20 px-3 py-2.5">
+              <span className="text-sm font-medium">运行状态</span>
+              <MetaBadge tone={stateTone}>{stateLabel}</MetaBadge>
+            </div>
+            <dl className="grid grid-cols-2 gap-3 text-sm">
+              <div className="rounded-md border p-3">
+                <dt className="text-xs text-muted-foreground">Gateway 版本</dt>
+                <dd className="mt-1 break-all font-mono text-xs">{gateway?.version || "暂无"}</dd>
+              </div>
+              <div className="rounded-md border p-3">
+                <dt className="text-xs text-muted-foreground">Provider 数量</dt>
+                <dd className="mt-1 font-semibold">{gateway?.provider_count ?? 0}</dd>
+              </div>
+              <div className="rounded-md border p-3">
+                <dt className="text-xs text-muted-foreground">配置修订</dt>
+                <dd className="mt-1 font-mono text-xs">{gateway?.revision ?? 0}</dd>
+              </div>
+              <div className="rounded-md border p-3">
+                <dt className="text-xs text-muted-foreground">是否需要运行</dt>
+                <dd className="mt-1 font-medium">{gateway?.required ? "是" : "否"}</dd>
+              </div>
+            </dl>
+            {gateway?.error ? (
+              <div className="rounded-md border border-destructive/30 bg-destructive/5 p-3">
+                <div className="text-xs font-medium text-destructive">最近错误</div>
+                <p className="mt-1 break-words text-xs leading-5 text-destructive">{gateway.error}</p>
+              </div>
+            ) : (
+              <p className="rounded-md border border-dashed px-3 py-2 text-xs leading-5 text-muted-foreground">
+                当前没有 Gateway 错误。新增、编辑或停用 Gateway Provider 后，配置会自动同步。
+              </p>
+            )}
+          </div>
+        )}
+        <DialogFooter>
+          <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
+            关闭
+          </Button>
+          <Button
+            type="button"
+            disabled={healthQ.isFetching}
+            onClick={() => void healthQ.refetch()}
+          >
+            <RefreshCw className={cn("mr-1 h-4 w-4", healthQ.isFetching && "animate-spin")} />
+            刷新状态
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 

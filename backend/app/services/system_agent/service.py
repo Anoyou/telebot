@@ -194,6 +194,12 @@ class SystemAgentService:
                             "provider_id": prov.id,
                             "provider_name": prov.name,
                             "model": mid,
+                            "execution_backend": getattr(prov, "execution_backend", "direct"),
+                            "client_identity_profile": getattr(
+                                prov,
+                                "client_identity_profile",
+                                "auto",
+                            ),
                             "enabled": bool(item.get("enabled", True)),
                             "declared_supports_tools": item.get("supports_tools"),
                             "declared_supports_images": item.get("supports_images"),

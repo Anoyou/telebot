@@ -493,7 +493,10 @@ async def test_fetch_models_preview_direct_disables_env_proxy_and_bounds_results
 
 @pytest.mark.asyncio
 async def test_fetch_models_preview_gateway_uses_saved_gateway_transport(monkeypatch) -> None:
-    from app.services import llm_client
+    from contextlib import asynccontextmanager
+
+    from app import crypto
+    from app.services import gateway_runtime, llm_client
 
     class FakeGatewayClient:
         async def list_models(self):
@@ -508,8 +511,20 @@ async def test_fetch_models_preview_gateway_uses_saved_gateway_transport(monkeyp
     monkeypatch.setattr(commands_api, "_require_ai_enabled", AsyncMock(return_value=None))
     monkeypatch.setattr(commands_api.command_service, "get_provider_row", AsyncMock(return_value=row))
     monkeypatch.setattr(commands_api.audit, "write", AsyncMock(return_value=None))
+    monkeypatch.setattr(crypto, "decrypt_str", lambda _token: "sk-saved")
     monkeypatch.setattr(llm_client, "GatewayResponsesClient", FakeGatewayClient)
     monkeypatch.setattr(llm_client, "build_client", lambda *_args, **_kwargs: FakeGatewayClient())
+
+    @asynccontextmanager
+    async def fake_temporary_gateway_provider(_db, provider):  # noqa: ANN001
+        assert provider.api_key_enc
+        yield provider
+
+    monkeypatch.setattr(
+        gateway_runtime,
+        "temporary_gateway_provider",
+        fake_temporary_gateway_provider,
+    )
     db = AsyncMock()
 
     response = await commands_api.fetch_models_preview(
@@ -525,6 +540,50 @@ async def test_fetch_models_preview_gateway_uses_saved_gateway_transport(monkeyp
     )
 
     assert response.ids == ["gpt-5.6-sol", "gpt-5.6-terra"]
+    db.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_fetch_models_preview_gateway_accepts_unsaved_form(monkeypatch) -> None:
+    from contextlib import asynccontextmanager
+
+    from app.services import gateway_runtime, llm_client
+
+    class FakeGatewayClient:
+        async def list_models(self):
+            return ["gpt-5.6-sol"]
+
+    captured = {}
+
+    @asynccontextmanager
+    async def fake_temporary_gateway_provider(_db, provider):  # noqa: ANN001
+        captured["provider"] = provider
+        yield provider
+
+    monkeypatch.setattr(commands_api, "_require_ai_enabled", AsyncMock(return_value=None))
+    monkeypatch.setattr(commands_api.audit, "write", AsyncMock(return_value=None))
+    monkeypatch.setattr(gateway_runtime, "temporary_gateway_provider", fake_temporary_gateway_provider)
+    monkeypatch.setattr(llm_client, "GatewayResponsesClient", FakeGatewayClient)
+    monkeypatch.setattr(llm_client, "build_client", lambda *_args, **_kwargs: FakeGatewayClient())
+    db = AsyncMock()
+
+    response = await commands_api.fetch_models_preview(
+        payload=FetchModelsPreviewRequest(
+            provider="openai",
+            api_format="responses",
+            protocol_profile="codex_responses",
+            execution_backend="codex_gateway",
+            base_url="https://api.example.test/v1",
+            api_key="sk-unsaved",
+        ),
+        db=db,
+        user=AsyncMock(id=1),
+    )
+
+    assert response.ids == ["gpt-5.6-sol"]
+    assert captured["provider"].id == 0
+    assert captured["provider"].execution_backend == "codex_gateway"
+    assert captured["provider"].base_url == "https://api.example.test/v1"
     db.commit.assert_awaited_once()
 
 
@@ -574,6 +633,49 @@ async def test_quick_verify_route_returns_ndjson_without_audit(monkeypatch) -> N
     assert captured["protocol_profile"] == "claude_code_proxy"
     assert captured["proxy_url"] == "socks5://proxy.example:1080"
     audit_write.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_gateway_quick_verify_setup_failure_returns_terminal_event(monkeypatch) -> None:
+    from contextlib import asynccontextmanager
+
+    from app.services import gateway_runtime
+
+    @asynccontextmanager
+    async def failing_temporary_gateway_provider(_db, _provider):
+        raise RuntimeError("gateway unavailable")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(commands_api, "_require_ai_enabled", AsyncMock(return_value=None))
+    monkeypatch.setattr(commands_api, "_resolve_proxy_url", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        gateway_runtime,
+        "temporary_gateway_provider",
+        failing_temporary_gateway_provider,
+    )
+
+    response = await commands_api.stream_quick_verify_provider(
+        payload=QuickVerifyProviderRequest(
+            base_url="https://api.example.test/v1",
+            api_key="sk-test",
+            api_format="responses",
+            protocol_profile="codex_responses",
+            execution_backend="codex_gateway",
+            model="gpt-5",
+        ),
+        db=AsyncMock(),
+        _user=AsyncMock(),
+    )
+    chunks = [
+        chunk.decode() if isinstance(chunk, bytes) else chunk
+        async for chunk in response.body_iterator
+    ]
+    body = "".join(chunks)
+    event = json.loads(body)
+
+    assert event["type"] == "error"
+    assert event["ok"] is False
+    assert "临时执行后端准备失败" in event["error"]
 
 
 @pytest.mark.asyncio

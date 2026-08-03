@@ -88,7 +88,9 @@ header、Agent Identity 与客户端签名不会发送给上游；测活和协�
 
 Provider 还可以选择 `direct` 或 `codex_gateway` 执行后端。Gateway 模式固定 Responses/Codex 档案，客户端身份由内置 Gateway 管理，但不会清空已保存的 direct 身份配置。Gateway 只替换传输层；System Agent 仍负责工具循环、预算、取消、同 Provider 模型 fallback 和跨 Provider 确认。失败后不会在同一 Provider 内偷跑 direct，RunTrace 与 usage 会记录实际 backend、Gateway 版本、request ID 和阶段。完整边界见 [内置 Codex Gateway](./CODEX-GATEWAY.md)。
 
-当前 System Agent 的 Provider 管理工具不开放 `execution_backend`，`providers.verify` 也不是 Gateway 专项测活；助手不能替用户切换 direct/Gateway、读取 Gateway 进程健康或宣称已完成真实 Gateway 验收。此类操作必须在「AI → 模型提供商」与「系统状态」页面完成。助手可通过 `usage.recent` 查看已经发生的调用所记录的实际 backend、Gateway 版本、request ID、阶段和错误类别；这些历史事实不按 Provider 当前配置反推。
+Web Agent 输入区可为当前会话选择“跟随 Provider”、指定直连客户端身份或“Codex Gateway”，选择后立即影响下一次请求并随会话保存在浏览器中。“Codex Gateway”只使用已经配置为 Gateway、且支持 Tools 的 Provider；没有可用 Gateway Provider 时不会伪装成可选。固定了不兼容模型时，界面会切回可用 Gateway 模型，服务端仍会校验调用组合，避免绕过 Provider 配置。
+
+System Agent 的 Provider 管理工具仍不开放 `execution_backend`，`providers.verify` 也不是 Gateway 专项测活；模型不能自行修改 Provider 的 direct/Gateway 配置、读取 Gateway 进程健康或宣称已完成真实 Gateway 验收。持久配置与状态检查必须在「AI → 模型提供商」完成。助手可通过 `usage.recent` 查看已经发生的调用所记录的实际 backend、Gateway 版本、request ID、阶段和错误类别；这些历史事实不按 Provider 当前配置反推。
 
 ### 上下文与记忆
 

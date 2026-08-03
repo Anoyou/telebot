@@ -5335,6 +5335,8 @@ export interface components {
             api_format_override?: ("chat_completions" | "responses" | "anthropic_messages") | null;
             /** Client Identity Profile Override */
             client_identity_profile_override?: ("auto" | "minimal" | "openai_sdk" | "codex_tui" | "codex_desktop" | "claude_code" | "claude_desktop" | "grok_cli") | null;
+            /** Execution Backend Override */
+            execution_backend_override?: ("direct" | "codex_gateway") | null;
             /** History */
             history?: components["schemas"]["ChatTestTurn"][];
             /** History By Model */
@@ -8770,6 +8772,12 @@ export interface components {
              */
             client_identity_profile: "auto" | "minimal" | "openai_sdk" | "codex_tui" | "codex_desktop" | "claude_code" | "claude_desktop" | "grok_cli";
             /**
+             * Execution Backend
+             * @default direct
+             * @enum {string}
+             */
+            execution_backend: "direct" | "codex_gateway";
+            /**
              * Max Tokens
              * @default 512
              */
@@ -9521,6 +9529,14 @@ export interface components {
          * @description 本轮模型选择：auto 用全局配置；pinned 固定 provider+model，失败不静默换模型。
          */
         SystemAgentModelSelection: {
+            /** Client Identity Profile */
+            client_identity_profile?: ("auto" | "minimal" | "openai_sdk" | "codex_tui" | "codex_desktop" | "claude_code" | "claude_desktop" | "grok_cli") | null;
+            /**
+             * Execution Backend
+             * @default provider
+             * @enum {string}
+             */
+            execution_backend: "provider" | "direct" | "codex_gateway";
             /**
              * Mode
              * @default auto

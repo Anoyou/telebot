@@ -26,6 +26,7 @@ import type {
   ChatTestTurn,
   LLMApiFormat,
   LLMClientIdentityProfile,
+  LLMExecutionBackend,
   LLMProviderOut,
   ProviderModel,
 } from "@/api/types";
@@ -234,12 +235,19 @@ const IDENTITY_OPTIONS: Array<{ value: LLMClientIdentityProfile; label: string }
   { value: "grok_cli", label: "Grok CLI" },
 ];
 
+function editableIdentity(value?: string | null): LLMClientIdentityProfile {
+  return IDENTITY_OPTIONS.some((option) => option.value === value)
+    ? value as LLMClientIdentityProfile
+    : "auto";
+}
+
 function ChatResponseBranch({
   result,
   onRetry,
 }: {
   result: ChatDisplayResult;
   onRetry: (
+    executionBackend: LLMExecutionBackend,
     apiFormat: LLMApiFormat,
     identity: LLMClientIdentityProfile,
   ) => Promise<void>;
@@ -250,11 +258,14 @@ function ChatResponseBranch({
   }, [result.response]);
   const [expanded, setExpanded] = useState(result.pending || result.ok);
   const [showOverrides, setShowOverrides] = useState(false);
+  const [executionBackend, setExecutionBackend] = useState<LLMExecutionBackend>(
+    isGatewayBackend(result.execution_backend) ? "codex_gateway" : "direct",
+  );
   const [apiFormat, setApiFormat] = useState<LLMApiFormat>(
     (result.effective_api_format as LLMApiFormat) || "chat_completions",
   );
   const [identity, setIdentity] = useState<LLMClientIdentityProfile>(
-    (result.client_identity_profile as LLMClientIdentityProfile) || "auto",
+    editableIdentity(result.client_identity_profile),
   );
   const gatewayResult = isGatewayBackend(result.execution_backend);
 
@@ -265,11 +276,12 @@ function ChatResponseBranch({
 
   useEffect(() => {
     if (result.pending) return;
+    setExecutionBackend(isGatewayBackend(result.execution_backend) ? "codex_gateway" : "direct");
     if (result.effective_api_format) {
       setApiFormat(result.effective_api_format as LLMApiFormat);
     }
     if (result.client_identity_profile) {
-      setIdentity(result.client_identity_profile as LLMClientIdentityProfile);
+      setIdentity(editableIdentity(result.client_identity_profile));
     }
   }, [result.pending, result.effective_api_format, result.client_identity_profile]);
 
@@ -383,7 +395,7 @@ function ChatResponseBranch({
             tone={isGatewayBackend(result.execution_backend) ? "info" : "neutral"}
             title={isGatewayBackend(result.execution_backend)
               ? [result.gateway_version, result.gateway_stage, result.gateway_request_id].filter(Boolean).join(" · ") || "实际通过内置 Gateway 调用"
-              : "实际通过直接 API 调用"}
+              : "实际通过 Provider 直连调用"}
           >
             实际后端 {executionBackendLabel(result.execution_backend)}
           </MetaBadge>
@@ -404,12 +416,39 @@ function ChatResponseBranch({
             正在等待上游返回首段内容
           </div>
         )
-      ) : expanded && result.ok && result.response ? (
-        <StreamingText
-          text={streamed.text}
-          fallback={Boolean(result.stream_fallback)}
-          className="mt-3 text-sm leading-7 text-foreground"
-        />
+      ) : expanded && result.ok ? (
+        <>
+          {result.response ? (
+            <StreamingText
+              text={streamed.text}
+              fallback={Boolean(result.stream_fallback)}
+              className="mt-3 text-sm leading-7 text-foreground"
+            />
+          ) : null}
+          <div className="mt-3 border-t pt-3">
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-8 px-2 text-xs"
+              onClick={() => setShowOverrides((value) => !value)}
+            >
+              <SlidersHorizontal className="mr-1 h-3.5 w-3.5" />
+              {showOverrides ? "收起临时配置" : "临时配置并再次测试"}
+            </Button>
+            {showOverrides ? (
+              <LivenessOverrideFields
+                executionBackend={executionBackend}
+                apiFormat={apiFormat}
+                identity={identity}
+                onExecutionBackendChange={setExecutionBackend}
+                onApiFormatChange={setApiFormat}
+                onIdentityChange={setIdentity}
+                onRetry={() => void onRetry(executionBackend, apiFormat, identity)}
+              />
+            ) : null}
+          </div>
+        </>
       ) : expanded && !result.ok ? (
         <>
           {result.response ? (
@@ -422,12 +461,6 @@ function ChatResponseBranch({
             <span className="min-w-0 break-words">{result.error || "没有拿到可展示文本。"}</span>
           </div>
           <div className="mt-3 border-t pt-3">
-            {gatewayResult ? (
-              <p className="text-xs leading-5 text-muted-foreground">
-                Gateway 固定使用 Responses，客户端身份由 Gateway 管理；请到 Provider 配置或系统状态中排查。
-              </p>
-            ) : (
-              <>
             <Button
               type="button"
               variant="ghost"
@@ -436,45 +469,87 @@ function ChatResponseBranch({
               onClick={() => setShowOverrides((value) => !value)}
             >
               <SlidersHorizontal className="mr-1 h-3.5 w-3.5" />
-              {showOverrides ? "收起临时配置" : "换协议或客户端重试"}
+              {showOverrides ? "收起临时配置" : "临时配置并重试"}
             </Button>
             {showOverrides ? (
-              <div className="mt-2 grid gap-2 rounded-md bg-muted/35 p-3 sm:grid-cols-2">
-                <div className="space-y-1.5">
-                  <Label className="text-xs">临时协议</Label>
-                  <Select value={apiFormat} onChange={(event) => setApiFormat(event.target.value as LLMApiFormat)}>
-                    {API_FORMAT_OPTIONS.map((option) => (
-                      <option key={option.value} value={option.value}>{option.label}</option>
-                    ))}
-                  </Select>
-                </div>
-                <div className="space-y-1.5">
-                  <Label className="text-xs">临时客户端</Label>
-                  <Select value={identity} onChange={(event) => setIdentity(event.target.value as LLMClientIdentityProfile)}>
-                    {IDENTITY_OPTIONS.map((option) => (
-                      <option key={option.value} value={option.value}>{option.label}</option>
-                    ))}
-                  </Select>
-                </div>
-                <Button
-                  type="button"
-                  size="sm"
-                  className="sm:col-span-2"
-                  onClick={() => void onRetry(apiFormat, identity)}
-                >
-                  使用临时配置重试此模型
-                </Button>
-                <p className="text-[11px] leading-5 text-muted-foreground sm:col-span-2">
-                  只影响这次重试，不会保存到 Provider 配置。
-                </p>
-              </div>
+              <LivenessOverrideFields
+                executionBackend={executionBackend}
+                apiFormat={apiFormat}
+                identity={identity}
+                onExecutionBackendChange={setExecutionBackend}
+                onApiFormatChange={setApiFormat}
+                onIdentityChange={setIdentity}
+                onRetry={() => void onRetry(executionBackend, apiFormat, identity)}
+              />
             ) : null}
-              </>
-            )}
           </div>
         </>
       ) : null}
     </article>
+  );
+}
+
+function LivenessOverrideFields({
+  executionBackend,
+  apiFormat,
+  identity,
+  onExecutionBackendChange,
+  onApiFormatChange,
+  onIdentityChange,
+  onRetry,
+}: {
+  executionBackend: LLMExecutionBackend;
+  apiFormat: LLMApiFormat;
+  identity: LLMClientIdentityProfile;
+  onExecutionBackendChange: (value: LLMExecutionBackend) => void;
+  onApiFormatChange: (value: LLMApiFormat) => void;
+  onIdentityChange: (value: LLMClientIdentityProfile) => void;
+  onRetry: () => void;
+}) {
+  const gateway = executionBackend === "codex_gateway";
+  return (
+    <div className="mt-2 grid gap-2 rounded-md bg-muted/35 p-3 sm:grid-cols-2">
+      <div className="space-y-1.5 sm:col-span-2">
+        <Label className="text-xs">临时调用客户端</Label>
+        <Select
+          value={executionBackend}
+          onChange={(event) => onExecutionBackendChange(event.target.value as LLMExecutionBackend)}
+        >
+          <option value="direct">Provider 直连</option>
+          <option value="codex_gateway">内置 Codex Gateway</option>
+        </Select>
+      </div>
+      <div className="space-y-1.5">
+        <Label className="text-xs">临时协议</Label>
+        <Select
+          value={gateway ? "responses" : apiFormat}
+          disabled={gateway}
+          onChange={(event) => onApiFormatChange(event.target.value as LLMApiFormat)}
+        >
+          {API_FORMAT_OPTIONS.map((option) => (
+            <option key={option.value} value={option.value}>{option.label}</option>
+          ))}
+        </Select>
+      </div>
+      <div className="space-y-1.5">
+        <Label className="text-xs">临时客户端身份</Label>
+        <Select
+          value={identity}
+          disabled={gateway}
+          onChange={(event) => onIdentityChange(event.target.value as LLMClientIdentityProfile)}
+        >
+          {IDENTITY_OPTIONS.map((option) => (
+            <option key={option.value} value={option.value}>{option.label}</option>
+          ))}
+        </Select>
+      </div>
+      <Button type="button" size="sm" className="sm:col-span-2" onClick={onRetry}>
+        使用临时配置重试此模型
+      </Button>
+      <p className="text-[11px] leading-5 text-muted-foreground sm:col-span-2">
+        只影响这次重试，不会保存到 Provider 配置。Gateway 固定使用 Responses，身份由 Gateway 管理。
+      </p>
+    </div>
   );
 }
 
@@ -880,6 +955,7 @@ export function LLMLivenessPage() {
   const retryModel = async (
     roundId: string,
     modelId: string,
+    executionBackend: LLMExecutionBackend,
     apiFormat: LLMApiFormat,
     identity: LLMClientIdentityProfile,
   ) => {
@@ -898,6 +974,7 @@ export function LLMLivenessPage() {
       pending: true,
       effective_api_format: apiFormat,
       client_identity_profile: identity,
+      execution_backend: executionBackend,
     });
     try {
       await streamChatTestProviderModels(
@@ -909,6 +986,7 @@ export function LLMLivenessPage() {
           system_prompt: round.systemPrompt,
           max_tokens: round.maxTokens,
           timeout_seconds: round.timeoutSeconds,
+          execution_backend_override: executionBackend,
           api_format_override: apiFormat,
           client_identity_profile_override: identity,
         },
@@ -967,6 +1045,7 @@ export function LLMLivenessPage() {
         error: getErrMsg(error),
         effective_api_format: apiFormat,
         client_identity_profile: identity,
+        execution_backend: executionBackend,
       } : current);
     } finally {
       if (abortRef.current === controller) abortRef.current = null;
@@ -1462,9 +1541,10 @@ export function LLMLivenessPage() {
                               <ChatResponseBranch
                                 key={`${round.id}:${result.requested_model}`}
                                 result={result}
-                                onRetry={(apiFormat, identity) => retryModel(
+                                onRetry={(executionBackend, apiFormat, identity) => retryModel(
                                   round.id,
                                   result.requested_model,
+                                  executionBackend,
                                   apiFormat,
                                   identity,
                                 )}

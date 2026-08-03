@@ -3031,6 +3031,21 @@
             ],
             "title": "Client Identity Profile Override"
           },
+          "execution_backend_override": {
+            "anyOf": [
+              {
+                "enum": [
+                  "direct",
+                  "codex_gateway"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Execution Backend Override"
+          },
           "history": {
             "items": {
               "$ref": "#/components/schemas/ChatTestTurn"
@@ -12501,6 +12516,15 @@
             "title": "Client Identity Profile",
             "type": "string"
           },
+          "execution_backend": {
+            "default": "direct",
+            "enum": [
+              "direct",
+              "codex_gateway"
+            ],
+            "title": "Execution Backend",
+            "type": "string"
+          },
           "max_tokens": {
             "default": 512,
             "maximum": 2000.0,
@@ -14474,6 +14498,37 @@
       "SystemAgentModelSelection": {
         "description": "本轮模型选择：auto 用全局配置；pinned 固定 provider+model，失败不静默换模型。",
         "properties": {
+          "client_identity_profile": {
+            "anyOf": [
+              {
+                "enum": [
+                  "auto",
+                  "minimal",
+                  "openai_sdk",
+                  "codex_tui",
+                  "codex_desktop",
+                  "claude_code",
+                  "claude_desktop",
+                  "grok_cli"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Client Identity Profile"
+          },
+          "execution_backend": {
+            "default": "provider",
+            "enum": [
+              "provider",
+              "direct",
+              "codex_gateway"
+            ],
+            "title": "Execution Backend",
+            "type": "string"
+          },
           "mode": {
             "default": "auto",
             "pattern": "^(auto|pinned)$",
@@ -17132,7 +17187,7 @@
   },
   "info": {
     "title": "TelePilot",
-    "version": "0.91.0-beta.4"
+    "version": "0.92.0-beta.1"
   },
   "openapi": "3.1.0",
   "paths": {

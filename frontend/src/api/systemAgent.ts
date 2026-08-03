@@ -412,8 +412,18 @@ export async function listSystemAgentMessages(
 
 /** 本轮模型选择：auto 走全局配置；pinned 固定 provider+model（不改全局） */
 export type SystemAgentModelSelection =
-  | { mode: "auto" }
-  | { mode: "pinned"; provider_id: number; model: string };
+  | {
+      mode: "auto";
+      execution_backend?: "provider" | "direct" | "codex_gateway";
+      client_identity_profile?: string | null;
+    }
+  | {
+      mode: "pinned";
+      provider_id: number;
+      model: string;
+      execution_backend?: "provider" | "direct" | "codex_gateway";
+      client_identity_profile?: string | null;
+    };
 
 export async function startSystemAgentRun(
   sessionId: string,

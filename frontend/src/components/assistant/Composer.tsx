@@ -6,6 +6,7 @@ import {
   type ModelPickerItem,
   type ModelPickerValue,
 } from "@/components/ai/ModelPicker";
+import { ClientPicker, type ClientPickerValue } from "./ClientPicker";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
@@ -43,6 +44,10 @@ export function Composer({
   modelItems = [],
   modelSelection,
   onModelSelectionChange,
+  clientSelection,
+  onClientSelectionChange,
+  clientDisabled,
+  gatewayAvailable,
   onSetDefaultModel,
   modelDisabled,
   expectedLabel,
@@ -65,6 +70,10 @@ export function Composer({
   modelItems?: ModelPickerItem[];
   modelSelection?: ModelPickerValue;
   onModelSelectionChange?: (next: ModelPickerValue) => void;
+  clientSelection?: ClientPickerValue;
+  onClientSelectionChange?: (next: ClientPickerValue) => void;
+  clientDisabled?: boolean;
+  gatewayAvailable?: boolean;
   onSetDefaultModel?: (providerId: number, model: string) => void;
   modelDisabled?: boolean;
   /** 本轮希望使用说明 */
@@ -233,7 +242,7 @@ export function Composer({
           rows={2}
           className="min-h-[4.5rem] resize-none border-0 bg-transparent px-1 py-1 shadow-none focus-visible:border-transparent focus-visible:ring-0"
         />
-        <div className="mt-1 flex min-w-0 flex-wrap items-end justify-end gap-1.5 border-t border-border/40 pt-2">
+        <div className="mt-1 flex min-w-0 flex-nowrap items-end justify-end gap-1 border-t border-border/40 pt-2 sm:gap-1.5">
           {onOpenSessions ? (
             <Button
               type="button"
@@ -247,13 +256,22 @@ export function Composer({
               aria-label="打开会话列表"
             >
               <Menu className="h-3.5 w-3.5" />
-              会话
+              <span className="hidden sm:inline">会话</span>
             </Button>
           ) : null}
           {expectedLabel ? (
             <span className={cn("hidden max-w-[32%] truncate self-center text-[10px] text-muted-foreground md:inline", onOpenSessions ? "md:mr-auto" : "mr-auto")}>
               本轮：{expectedLabel}
             </span>
+          ) : null}
+          {clientSelection && onClientSelectionChange ? (
+            <ClientPicker
+              value={clientSelection}
+              onChange={onClientSelectionChange}
+              disabled={clientDisabled}
+              gatewayAvailable={gatewayAvailable}
+              className="shrink-0"
+            />
           ) : null}
           {modelItems.length > 0 && modelSelection && onModelSelectionChange ? (
             <ModelPicker
@@ -264,7 +282,7 @@ export function Composer({
               showSetDefault={Boolean(onSetDefaultModel)}
               disabled={modelDisabled}
               compact
-              className="min-w-0 justify-end"
+              className="min-w-0 flex-1 justify-end"
             />
           ) : null}
           {streaming ? (
@@ -290,7 +308,7 @@ export function Composer({
                 type="button"
                 variant="outline"
                 size="icon"
-                className="h-9 w-9 shrink-0"
+                className="h-9 w-9 shrink-0 rounded-full"
                 onClick={onStop}
                 title="停止当前任务"
               >
@@ -303,7 +321,7 @@ export function Composer({
               type="submit"
               size="icon"
               disabled={disabled || sending || !value.trim()}
-              className="h-9 w-9 shrink-0"
+              className="h-9 w-9 shrink-0 rounded-full"
               title="发送消息"
             >
               <Send className="h-4 w-4" />

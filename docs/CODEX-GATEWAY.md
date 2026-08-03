@@ -1,16 +1,20 @@
 # 内置 Codex Gateway
 
-TelePilot 可以让单个 LLM Provider 选择「直接 API」或「内置 Codex Gateway」。Gateway 是 Web 进程按需管理的独立 Go 子进程，只负责 Responses 协议传输，不是第二个 Agent，也不改变 System Agent、插件 AI、预算、重试或 fallback 的决策归属。
+TelePilot 可以让单个 LLM Provider 选择「Provider 直连」或「内置 Codex Gateway」。Gateway 是 Web 进程按需管理的独立 Go 子进程，只负责 Responses 协议传输，不是第二个 Agent，也不改变 System Agent、插件 AI、预算、重试或 fallback 的决策归属。
 
 ## Provider 配置
 
 在「AI → 模型提供商」新建或编辑 Provider：
 
-1. 「直接 API」保持原有请求路径，继续使用 Provider 的协议档案、客户端身份、代理和兼容请求头。
+1. 「Provider 直连」保持原有请求路径，继续使用 Provider 的协议档案、客户端身份、代理和兼容请求头。
 2. 「内置 Codex Gateway」固定使用 Responses API 与 Codex Responses 档案，身份由 Gateway 管理。
 3. direct 与 Gateway 之间切换不会清空 API Key、代理、兼容请求头或已保存的客户端身份；切回 direct 后恢复原协议、联网协议和身份配置。LLM Provider 代理仅支持 HTTP/HTTPS/SOCKS5；被 Provider 引用的代理不能改成 MTProxy。
-4. Gateway Provider 必须配置 API Key；Base URL 留空时会物化当前服务类型的默认地址。未保存的凭据不会临时注入 Gateway，新建后再通过真实 Gateway 读取模型列表并测活。
+4. Gateway Provider 必须配置 API Key；Base URL 留空时会物化当前服务类型的默认地址。新建或编辑表单可把当前未保存参数临时注入 Gateway，用于读取模型列表和快速验证；临时快照会与已提交 Provider 串行同步，请求结束后立即恢复数据库中的已提交快照。
 5. Gateway 只支持文本、图片输入与工具调用的 Responses 路径。Chat Completions、Anthropic Messages、语音转写和 `/images/generations` 图片生成必须使用 direct Provider。
+
+模型测活的成功与失败结果都可展开“临时配置并再次测试”。临时选择 Gateway 时固定使用 Responses 且身份由 Gateway 管理；这些覆盖只作用于当次重试，不写回 Provider。
+
+模型提供商页的“Gateway 状态”展示进程状态、版本、Provider 数和最近错误。Gateway 当前没有独立的用户配置表单；二进制路径与 Unix Socket 属于部署配置，超时、并发和身份契约由 TelePilot 随版本统一维护。
 
 Gateway Provider 保存前会检查内置二进制和协议兼容性。Gateway 不可用时保存失败，不会在同一 Provider 内静默改走 direct。
 
@@ -107,3 +111,9 @@ System Agent、命令 AI、记忆压缩、能力探测和插件 `ctx.ai.complete
 - 工具循环、Action 确认、预算、usage、取消和 fallback 仍由 TelePilot 管理。
 - 成功 fallback 到其它 Provider 后，后续 Agent 工具轮次会保持该 Provider，避免每轮重新撞击已知故障 Gateway。
 - RunTrace 和近期调用会记录实际 backend 与 Gateway 元数据，但不会记录密钥、原始请求或原始响应。
+
+Web Agent 输入区还提供会话级“调用客户端”选择：
+
+- “跟随 Provider”使用每个 Provider 已保存的执行后端和身份。
+- 直连身份选项只覆盖当前会话后续请求，不修改 Provider；即使 Provider 默认走 Gateway，也可临时改用 Provider 直连。
+- “Codex Gateway”只展示并选择已经保存为 Gateway 执行后端、且可用于 Tools 的模型。没有可用 Gateway Provider 时选项会显示“未配置”；平台不会把任意 direct Provider 在 Agent 长任务中隐式改写为临时 Gateway Provider。

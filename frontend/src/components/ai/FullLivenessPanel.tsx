@@ -963,7 +963,7 @@ export function FullLivenessPanel({
                                               tone={isGatewayBackend(item.execution_backend) ? "info" : "neutral"}
                                               title={isGatewayBackend(item.execution_backend)
                                                 ? [item.gateway_version, item.gateway_stage, item.gateway_request_id].filter(Boolean).join(" · ") || "实际通过内置 Gateway 调用"
-                                                : "实际通过直接 API 调用"}
+                                                : "实际通过 Provider 直连调用"}
                                             >
                                               实际后端 {executionBackendLabel(item.execution_backend)}
                                             </MetaBadge>

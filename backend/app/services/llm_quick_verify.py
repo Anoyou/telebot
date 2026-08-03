@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from urllib.parse import urlsplit
 
 import httpx
@@ -259,6 +260,7 @@ async def quick_verify_events(
     max_tokens: int,
     timeout_seconds: int,
     request_headers: list[object] | None = None,
+    provider_override: LLMProviderDTO | None = None,
 ) -> AsyncIterator[dict[str, object]]:
     """生成单次快速验证 NDJSON 事件，不产生持久化副作用。"""
 
@@ -329,19 +331,27 @@ async def quick_verify_events(
     fallback_response_consumed = False
     stream_terminal_received = False
     max_response_chars = max(16_384, max_tokens * 16)
-    dto = LLMProviderDTO(
-        id=0,
-        name="quick-verify",
-        provider=suggested_provider(api_format, base_url, api_key),
-        api_format=api_format,
-        protocol_profile=protocol_profile,
-        client_identity_profile=client_identity_profile,
-        web_search_api_format="auto",
-        base_url=base_url,
-        default_model=selected_model,
-        api_key_enc=encrypt_str(api_key) if api_key else None,
-        request_headers_enc=encrypt_request_headers(request_headers),
-        proxy_url=proxy_url,
+    dto = (
+        replace(
+            provider_override,
+            default_model=selected_model,
+            models=[{"id": selected_model, "enabled": True}],
+        )
+        if provider_override is not None
+        else LLMProviderDTO(
+            id=0,
+            name="quick-verify",
+            provider=suggested_provider(api_format, base_url, api_key),
+            api_format=api_format,
+            protocol_profile=protocol_profile,
+            client_identity_profile=client_identity_profile,
+            web_search_api_format="auto",
+            base_url=base_url,
+            default_model=selected_model,
+            api_key_enc=encrypt_str(api_key) if api_key else None,
+            request_headers_enc=encrypt_request_headers(request_headers),
+            proxy_url=proxy_url,
+        )
     )
 
     try:

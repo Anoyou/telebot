@@ -390,7 +390,7 @@ function HealthGrid({ data }: { data: HealthOverview }) {
               {gateway.error || "Gateway 启动、协议握手或配置同步失败。"}
             </div>
             <div className="mt-1 text-xs text-muted-foreground">
-              direct Provider、Web 与 Worker 不受影响；请检查 Web 镜像是否包含 Gateway 二进制。
+              Provider 直连、Web 与 Worker 不受影响；请检查 Web 镜像是否包含 Gateway 二进制。
             </div>
           </>
         ) : (

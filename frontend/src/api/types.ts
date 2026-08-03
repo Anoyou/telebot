@@ -1628,6 +1628,7 @@ export interface FetchModelsPreviewResponse {
 
 export interface QuickVerifyProviderRequest {
   base_url: string;
+  execution_backend?: LLMExecutionBackend;
   api_key?: string | null;
   api_format: LLMApiFormat;
   protocol_profile?: LLMProtocolProfile;
@@ -1768,6 +1769,7 @@ export interface ChatTestModelsRequest {
   system_prompt?: string;
   max_tokens?: number;
   timeout_seconds?: number;
+  execution_backend_override?: LLMExecutionBackend | null;
   api_format_override?: LLMApiFormat | null;
   client_identity_profile_override?: LLMClientIdentityProfile | null;
 }

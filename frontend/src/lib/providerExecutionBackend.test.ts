@@ -28,7 +28,7 @@ test("切换到 Gateway 时锁定协议但保留身份和凭据配置", () => {
   assert.deepEqual(gateway.request_headers, direct.request_headers);
 });
 
-test("切回直接 API 时恢复原协议、联网覆盖和身份配置", () => {
+test("切回 Provider 直连时恢复原协议、联网覆盖和身份配置", () => {
   const gateway = applyExecutionBackend(direct, "codex_gateway");
   const restored = applyExecutionBackend(gateway, "direct");
 
@@ -59,7 +59,7 @@ test("已保存 Gateway 切回 direct 时按休眠身份选择兼容协议", () 
 });
 
 test("执行后端标签使用面向用户的稳定文案", () => {
-  assert.equal(executionBackendLabel("direct"), "直接 API");
+  assert.equal(executionBackendLabel("direct"), "Provider 直连");
   assert.equal(executionBackendLabel("codex_gateway"), "Codex Gateway");
   assert.equal(executionBackendLabel(null, "未记录"), "未记录");
 });

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -116,6 +116,17 @@ class SystemAgentModelSelection(BaseModel):
     mode: str = Field(default="auto", pattern="^(auto|pinned)$")
     provider_id: int | None = Field(default=None, ge=1)
     model: str | None = Field(default=None, max_length=128)
+    execution_backend: Literal["provider", "direct", "codex_gateway"] = "provider"
+    client_identity_profile: Literal[
+        "auto",
+        "minimal",
+        "openai_sdk",
+        "codex_tui",
+        "codex_desktop",
+        "claude_code",
+        "claude_desktop",
+        "grok_cli",
+    ] | None = None
 
     @model_validator(mode="after")
     def _pinned_requires_target(self) -> SystemAgentModelSelection:

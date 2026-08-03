@@ -527,3 +527,72 @@ async def test_run_quick_verify_forwards_compatibility_headers(monkeypatch) -> N
     assert captured["message"] == QUICK_VERIFY_MESSAGE
     assert captured["max_tokens"] == QUICK_VERIFY_MAX_TOKENS
     assert captured["timeout_seconds"] == QUICK_VERIFY_TIMEOUT_SECONDS
+
+
+def test_agent_client_selection_can_temporarily_force_direct_identity() -> None:
+    from app.services.llm_dto import LLMProviderDTO
+    from app.services.system_agent.config import ResolvedAgentProviders
+    from app.services.system_agent.runtime import _apply_client_selection
+
+    provider = LLMProviderDTO(
+        id=7,
+        name="Gateway provider",
+        provider="openai",
+        execution_backend="codex_gateway",
+        api_format="responses",
+        protocol_profile="codex_responses",
+        client_identity_profile="auto",
+        base_url="https://api.example.test/v1",
+        api_key_enc="encrypted",
+        default_model="gpt-5",
+        models=[{"id": "gpt-5", "enabled": True, "supports_tools": True}],
+    )
+    resolved = ResolvedAgentProviders(
+        primary=provider,
+        model="gpt-5",
+        providers={provider.id: provider},
+    )
+
+    selected = _apply_client_selection(
+        resolved,
+        {
+            "mode": "pinned",
+            "execution_backend": "direct",
+            "client_identity_profile": "grok_cli",
+        },
+    )
+
+    assert not isinstance(selected, str)
+    assert selected.primary.execution_backend == "direct"
+    assert selected.primary.client_identity_profile == "grok_cli"
+    assert provider.execution_backend == "codex_gateway"
+
+
+def test_agent_gateway_client_rejects_direct_pinned_provider() -> None:
+    from app.services.llm_dto import LLMProviderDTO
+    from app.services.system_agent.config import ResolvedAgentProviders
+    from app.services.system_agent.runtime import _apply_client_selection
+
+    provider = LLMProviderDTO(
+        id=8,
+        name="Direct provider",
+        provider="openai",
+        execution_backend="direct",
+        api_format="responses",
+        base_url="https://api.example.test/v1",
+        api_key_enc="encrypted",
+        default_model="gpt-5",
+        models=[{"id": "gpt-5", "enabled": True, "supports_tools": True}],
+    )
+    resolved = ResolvedAgentProviders(
+        primary=provider,
+        model="gpt-5",
+        providers={provider.id: provider},
+    )
+
+    selected = _apply_client_selection(
+        resolved,
+        {"mode": "pinned", "execution_backend": "codex_gateway"},
+    )
+
+    assert selected == "该 Provider 未配置为内置 Codex Gateway，不能在 Agent 中临时转入 Gateway"

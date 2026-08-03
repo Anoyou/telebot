@@ -338,19 +338,18 @@ class ProviderModel(BaseModel):
     max_output_tokens: int | None = Field(default=None, ge=1)
     input_modalities: list[Literal["text", "image", "audio", "video"]] | None = None
     output_modalities: list[Literal["text", "image", "audio"]] | None = None
-    supported_api_formats: list[
-        Literal["chat_completions", "responses", "anthropic_messages"]
-    ] | None = None
-    reasoning_transport: Literal[
-        "none",
-        "reasoning_content",
-        "responses_item",
-        "encrypted_reasoning_item",
-        "anthropic_thinking",
-    ] | None = None
-    reasoning_efforts: list[
-        Literal["minimal", "low", "medium", "high", "xhigh", "max"]
-    ] | None = None
+    supported_api_formats: list[Literal["chat_completions", "responses", "anthropic_messages"]] | None = None
+    reasoning_transport: (
+        Literal[
+            "none",
+            "reasoning_content",
+            "responses_item",
+            "encrypted_reasoning_item",
+            "anthropic_thinking",
+        ]
+        | None
+    ) = None
+    reasoning_efforts: list[Literal["minimal", "low", "medium", "high", "xhigh", "max"]] | None = None
 
     @field_validator("id")
     @classmethod
@@ -417,9 +416,7 @@ class LLMProviderCreate(BaseModel):
     """模型传输后端；Gateway 仅支持 Responses，且不改变已保存身份档案。"""
 
     # ── 路由元数据（全可选；不填走默认）───────────────────────
-    modality: Literal["text", "vision", "audio", "multimodal"] = Field(
-        default=LLM_MODALITY_TEXT
-    )
+    modality: Literal["text", "vision", "audio", "multimodal"] = Field(default=LLM_MODALITY_TEXT)
     """能力模态。决定该 provider 是否会被视觉路由命中。"""
 
     tags: list[str] = Field(default_factory=list, max_length=20)
@@ -475,9 +472,7 @@ class LLMProviderCreate(BaseModel):
             if not tag:
                 continue
             if tag not in ALL_LLM_TAGS:
-                raise ValueError(
-                    f"未知 tag：{tag}（合法：{sorted(ALL_LLM_TAGS)}）"
-                )
+                raise ValueError(f"未知 tag：{tag}（合法：{sorted(ALL_LLM_TAGS)}）")
             if tag in seen:
                 continue
             seen.add(tag)
@@ -509,7 +504,9 @@ class LLMProviderUpdate(BaseModel):
         | None
     ) = None
     execution_backend: Literal["direct", "codex_gateway"] | None = None
-    web_search_api_format: Literal["auto", "chat_completions", "responses", "anthropic_messages"] | None = None
+    web_search_api_format: Literal["auto", "chat_completions", "responses", "anthropic_messages"] | None = (
+        None
+    )
 
     # 路由元数据（全可选；None / 缺省 = 不动）
     modality: Literal["text", "vision", "audio", "multimodal"] | None = None
@@ -594,9 +591,9 @@ class FetchModelsPreviewRequest(BaseModel):
     """
 
     provider: Literal["openai", "anthropic", "ollama"]
-    api_format: Literal[
-        "chat_completions", "responses", "anthropic_messages"
-    ] = LLM_API_FORMAT_CHAT_COMPLETIONS
+    api_format: Literal["chat_completions", "responses", "anthropic_messages"] = (
+        LLM_API_FORMAT_CHAT_COMPLETIONS
+    )
     protocol_profile: LLMProtocolProfile = LLM_PROTOCOL_PROFILE_STANDARD
     execution_backend: Literal["direct", "codex_gateway"] = LLM_EXECUTION_BACKEND_DIRECT
     base_url: str | None = Field(default=None, max_length=255)
@@ -627,6 +624,7 @@ class QuickVerifyProviderRequest(BaseModel):
     """用未落库凭据发起一次真实流式对话验证。"""
 
     base_url: str
+    execution_backend: Literal["direct", "codex_gateway"] = LLM_EXECUTION_BACKEND_DIRECT
     # 不在 Pydantic Field 上做长度拒绝，避免默认 422 把敏感 input 原样带回；
     # 路由会在进入流式响应前用不含输入值的结构化错误拒绝超长 Key。
     api_key: str | None = None
@@ -645,9 +643,7 @@ class QuickVerifyProviderRequest(BaseModel):
         "grok_cli",
     ] = LLM_CLIENT_IDENTITY_AUTO
     model: str | None = Field(default=None, max_length=128)
-    reasoning_effort: Literal[
-        "minimal", "low", "medium", "high", "xhigh", "max"
-    ] | None = None
+    reasoning_effort: Literal["minimal", "low", "medium", "high", "xhigh", "max"] | None = None
     proxy_id: int | None = Field(default=None, ge=1)
     request_headers: list[LLMRequestHeaderInput] = Field(default_factory=list)
     system_prompt: str = Field(
@@ -679,6 +675,15 @@ class QuickVerifyProviderRequest(BaseModel):
     @classmethod
     def _strip_quick_verify_optional_text(cls, value: str | None) -> str | None:
         return (value.strip() or None) if value is not None else None
+
+    @model_validator(mode="after")
+    def _validate_quick_verify_execution_backend(self) -> QuickVerifyProviderRequest:
+        if self.execution_backend == "codex_gateway":
+            if self.api_format != "responses":
+                raise ValueError("内置 Codex Gateway 仅支持 Responses API Format")
+            if not self.model:
+                raise ValueError("使用内置 Codex Gateway 验证时必须指定模型 ID")
+        return self
 
 
 class DetectProviderProtocolsRequest(BaseModel):
@@ -796,20 +801,23 @@ class ChatTestModelsRequest(BaseModel):
     """测试用 system prompt。"""
     max_tokens: int = Field(default=1200, ge=64, le=8000)
     timeout_seconds: int = Field(default=90, ge=10, le=600)
-    api_format_override: Literal[
-        "chat_completions", "responses", "anthropic_messages"
-    ] | None = None
+    execution_backend_override: Literal["direct", "codex_gateway"] | None = None
+    """仅本次测活使用的临时执行后端，不写回 Provider。"""
+    api_format_override: Literal["chat_completions", "responses", "anthropic_messages"] | None = None
     """仅本次测活使用的临时协议，不写回 Provider。"""
-    client_identity_profile_override: Literal[
-        "auto",
-        "minimal",
-        "openai_sdk",
-        "codex_tui",
-        "codex_desktop",
-        "claude_code",
-        "claude_desktop",
-        "grok_cli",
-    ] | None = None
+    client_identity_profile_override: (
+        Literal[
+            "auto",
+            "minimal",
+            "openai_sdk",
+            "codex_tui",
+            "codex_desktop",
+            "claude_code",
+            "claude_desktop",
+            "grok_cli",
+        ]
+        | None
+    ) = None
     """仅本次测活使用的临时客户端身份，不写回 Provider。"""
 
     @field_validator("models")
@@ -984,6 +992,7 @@ class FullLivenessRunRequest(BaseModel):
         value: dict[int, list[str]] | None,
     ) -> dict[int, list[str]] | None:
         return _normalize_liveness_model_scope(value)
+
 
 class LivenessResultItem(BaseModel):
     """单个测活任务结果（已脱敏）。"""

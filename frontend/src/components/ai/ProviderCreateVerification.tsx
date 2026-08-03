@@ -8,6 +8,7 @@ import {
 import type {
   LLMApiFormat,
   LLMClientIdentityProfile,
+  LLMExecutionBackend,
   LLMProtocolProfile,
   LLMProviderKind,
   LLMRequestHeaderInput,
@@ -49,6 +50,7 @@ export type ProviderCreateStage =
 
 export function ProviderCreateVerification({
   providerKind,
+  executionBackend,
   apiFormat,
   protocolProfile,
   clientIdentityProfile,
@@ -64,6 +66,7 @@ export function ProviderCreateVerification({
   onStageChange,
 }: {
   providerKind: LLMProviderKind;
+  executionBackend: LLMExecutionBackend;
   apiFormat: LLMApiFormat;
   protocolProfile: LLMProtocolProfile;
   clientIdentityProfile: LLMClientIdentityProfile;
@@ -92,6 +95,7 @@ export function ProviderCreateVerification({
   const abortRef = useRef<AbortController | null>(null);
   const fingerprint = [
     providerKind,
+    executionBackend,
     apiFormat,
     protocolProfile,
     clientIdentityProfile,
@@ -173,6 +177,7 @@ export function ProviderCreateVerification({
     try {
       const response = await fetchProviderModelsPreview({
         provider: providerKind,
+        execution_backend: executionBackend,
         api_format: apiFormat,
         base_url: baseUrl.trim() || DEFAULT_BASE_URLS[providerKind],
         api_key: apiKey.trim() || null,
@@ -265,6 +270,7 @@ export function ProviderCreateVerification({
       await streamQuickVerifyProvider(
         {
           base_url: baseUrl.trim() || DEFAULT_BASE_URLS[providerKind],
+          execution_backend: executionBackend,
           api_key: apiKey.trim() || null,
           api_format: apiFormat,
           protocol_profile: protocolProfile,

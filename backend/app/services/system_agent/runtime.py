@@ -188,6 +188,16 @@ class SystemAgentRuntime:
             )
             yield next_event("done", ok=False)
             return
+        resolved = _apply_client_selection(resolved, selection)
+        if isinstance(resolved, str):
+            yield next_event(
+                "error",
+                code="CLIENT_SELECTION_INVALID",
+                message=resolved,
+                hint="请选择与当前 Provider 兼容的调用客户端，或改回跟随 Provider。",
+            )
+            yield next_event("done", ok=False)
+            return
 
         yield next_event(
             "model_capability_check",
@@ -1299,16 +1309,76 @@ def _normalize_model_selection(raw: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(raw, dict):
         return {"mode": "auto"}
     mode = str(raw.get("mode") or "auto").strip().lower()
+    execution_backend = str(raw.get("execution_backend") or "provider").strip().lower()
+    if execution_backend not in {"provider", "direct", "codex_gateway"}:
+        execution_backend = "provider"
+    identity = str(raw.get("client_identity_profile") or "").strip().lower() or None
+    if identity not in {
+        None,
+        "auto",
+        "minimal",
+        "openai_sdk",
+        "codex_tui",
+        "codex_desktop",
+        "claude_code",
+        "claude_desktop",
+        "grok_cli",
+    }:
+        identity = None
+    common: dict[str, Any] = {}
+    if execution_backend != "provider":
+        common["execution_backend"] = execution_backend
+    if identity is not None:
+        common["client_identity_profile"] = identity
     if mode != "pinned":
-        return {"mode": "auto"}
+        return {"mode": "auto", **common}
     try:
         provider_id = int(raw.get("provider_id"))
     except (TypeError, ValueError):
-        return {"mode": "auto"}
+        return {"mode": "auto", **common}
     model = str(raw.get("model") or "").strip()
     if not model:
-        return {"mode": "auto"}
-    return {"mode": "pinned", "provider_id": provider_id, "model": model}
+        return {"mode": "auto", **common}
+    return {"mode": "pinned", "provider_id": provider_id, "model": model, **common}
+
+
+def _apply_client_selection(resolved: Any, selection: dict[str, Any]) -> Any | str:
+    """把会话级调用客户端覆盖应用到本轮 Provider 链，不修改持久化配置。"""
+
+    from dataclasses import replace
+
+    from .config import ResolvedAgentProviders, tools_model_for_dto
+
+    execution_backend = str(selection.get("execution_backend") or "provider")
+    identity = selection.get("client_identity_profile")
+    if execution_backend == "provider":
+        return resolved
+
+    providers = {}
+    for provider_id, dto in dict(getattr(resolved, "providers", {}) or {}).items():
+        if execution_backend == "codex_gateway":
+            if dto.execution_backend != "codex_gateway":
+                continue
+            providers[provider_id] = dto
+        else:
+            providers[provider_id] = replace(
+                dto,
+                execution_backend="direct",
+                client_identity_profile=str(identity or "auto"),
+            )
+
+    primary = providers.get(resolved.primary.id)
+    model = resolved.model
+    if primary is None:
+        if selection.get("mode") == "pinned":
+            return "该 Provider 未配置为内置 Codex Gateway，不能在 Agent 中临时转入 Gateway"
+        if not providers:
+            return "当前 Agent 路由中没有已配置内置 Codex Gateway 的 Provider"
+        primary = next(iter(providers.values()))
+        model = tools_model_for_dto(primary) or primary.default_model
+        if not model:
+            return f"Provider「{primary.name}」没有可供 Agent 使用的 Tools 模型"
+    return ResolvedAgentProviders(primary=primary, model=model, providers=providers)
 
 
 async def _apply_pinned_selection(

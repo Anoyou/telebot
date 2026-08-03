@@ -83,6 +83,7 @@ import { systemAgentToolLabel } from "@/lib/systemAgentLabels";
 import { removeSessionAndChooseNext } from "./sessionState";
 import {
   loadSessionModelSelection,
+  DEFAULT_SESSION_MODEL_SELECTION,
   saveSessionModelSelection,
   toApiModelSelection,
   type SessionModelSelection,
@@ -249,7 +250,9 @@ export function AssistantIndex() {
     "Notification" in window ? Notification.permission : "unsupported"
   );
   /** 本轮模型选择：仅会话本地，默认自动路由 */
-  const [sessionModel, setSessionModel] = useState<SessionModelSelection>({ mode: "auto" });
+  const [sessionModel, setSessionModel] = useState<SessionModelSelection>(
+    DEFAULT_SESSION_MODEL_SELECTION,
+  );
   const abortRef = useRef<AbortController | null>(null);
   const streamingBubbleCreatedRef = useRef(false);
   const liveAssistantMessageIdRef = useRef<number | null>(null);
@@ -607,6 +610,15 @@ export function AssistantIndex() {
     () => matrixToPickerItems(capsQ.data?.model_matrix || [], { requireTools: true }),
     [capsQ.data?.model_matrix],
   );
+  const gatewayModelPickerItems = useMemo(
+    () => modelPickerItems.filter(
+      (item) => item.executionBackend === "codex_gateway" && item.agentEligible !== false,
+    ),
+    [modelPickerItems],
+  );
+  const visibleModelPickerItems = sessionModel.executionBackend === "codex_gateway"
+    ? gatewayModelPickerItems
+    : modelPickerItems;
 
   const pickerValue: ModelPickerValue =
     sessionModel.mode === "pinned"
@@ -636,8 +648,41 @@ export function AssistantIndex() {
   const onSessionModelChange = (next: ModelPickerValue) => {
     const selection: SessionModelSelection =
       next.mode === "pinned"
-        ? { mode: "pinned", providerId: next.providerId, model: next.model }
-        : { mode: "auto" };
+        ? {
+            mode: "pinned",
+            providerId: next.providerId,
+            model: next.model,
+            executionBackend: sessionModel.executionBackend,
+            clientIdentityProfile: sessionModel.clientIdentityProfile,
+          }
+        : {
+            mode: "auto",
+            executionBackend: sessionModel.executionBackend,
+            clientIdentityProfile: sessionModel.clientIdentityProfile,
+          };
+    setSessionModel(selection);
+    if (activeId) saveSessionModelSelection(activeId, selection);
+  };
+
+  const onSessionClientChange = (next: {
+    executionBackend: SessionModelSelection["executionBackend"];
+    clientIdentityProfile?: SessionModelSelection["clientIdentityProfile"];
+  }) => {
+    const pinnedGatewayCompatible = sessionModel.mode === "pinned"
+      && gatewayModelPickerItems.some(
+        (item) => item.providerId === sessionModel.providerId && item.model === sessionModel.model,
+      );
+    const firstGatewayModel = gatewayModelPickerItems[0];
+    const selection = next.executionBackend === "codex_gateway" && !pinnedGatewayCompatible
+      && firstGatewayModel
+      ? {
+          mode: "pinned" as const,
+          providerId: firstGatewayModel.providerId,
+          model: firstGatewayModel.model,
+          executionBackend: next.executionBackend,
+          clientIdentityProfile: next.clientIdentityProfile,
+        }
+      : { ...sessionModel, ...next } as SessionModelSelection;
     setSessionModel(selection);
     if (activeId) saveSessionModelSelection(activeId, selection);
   };
@@ -2164,11 +2209,15 @@ export function AssistantIndex() {
                 queueCount={currentQueue.length}
                 runStatus={currentRun?.status}
                 placeholder={viewingBotSession ? "Telegram 会话仅供查看" : undefined}
-                modelItems={modelPickerItems}
+                modelItems={visibleModelPickerItems}
                 modelSelection={pickerValue}
                 onModelSelectionChange={onSessionModelChange}
+                clientSelection={sessionModel}
+                onClientSelectionChange={onSessionClientChange}
+                clientDisabled={selectorDisabled}
+                gatewayAvailable={gatewayModelPickerItems.length > 0}
                 onSetDefaultModel={onSetDefaultModel}
-                modelDisabled={selectorDisabled || modelPickerItems.length === 0}
+                modelDisabled={selectorDisabled || visibleModelPickerItems.length === 0}
                 expectedLabel={expectedSelectionLabel}
                 onOpenSessions={() => {
                   if (window.matchMedia("(min-width: 768px)").matches) {

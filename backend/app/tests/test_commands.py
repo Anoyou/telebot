@@ -2278,6 +2278,83 @@ async def test_chat_test_models_endpoint_success(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_chat_test_models_can_temporarily_use_gateway(monkeypatch) -> None:
+    """已保存的 direct Provider 可在单次测活中临时改走 Gateway。"""
+    from contextlib import asynccontextmanager
+    from dataclasses import replace
+
+    from app.api import commands as cmds_api
+    from app.services import gateway_runtime, llm_client
+    from app.services.gateway_runtime import TEMPORARY_GATEWAY_PROVIDER_ID
+    from app.services.llm_client import LLMResult
+
+    row = LLMProvider(
+        id=1,
+        name="Direct provider",
+        provider="openai",
+        api_key_enc=encrypt_str("sk-test"),
+        base_url="https://api.example.com/v1",
+        default_model="gpt-5",
+        api_format="chat_completions",
+        execution_backend="direct",
+        created_at=datetime.now(UTC),
+    )
+    captured = {}
+
+    @asynccontextmanager
+    async def fake_temporary_gateway_provider(_db, provider):  # noqa: ANN001
+        temporary = replace(provider, id=TEMPORARY_GATEWAY_PROVIDER_ID)
+        captured["temporary"] = temporary
+        yield temporary
+
+    class _FakeClient:
+        async def complete(self, *_args, **_kwargs):
+            return LLMResult(
+                text="Gateway 正常",
+                model="gpt-5",
+                input_tokens=3,
+                output_tokens=2,
+                execution_backend="codex_gateway",
+                gateway_version="test",
+            )
+
+    def fake_build_client(provider, **kwargs):  # noqa: ANN001
+        captured["provider"] = provider
+        captured["kwargs"] = kwargs
+        return _FakeClient()
+
+    monkeypatch.setattr(cmds_api.command_service, "get_provider_row", AsyncMock(return_value=row))
+    monkeypatch.setattr(cmds_api, "_resolve_proxy_url", AsyncMock(return_value=None))
+    monkeypatch.setattr(gateway_runtime, "temporary_gateway_provider", fake_temporary_gateway_provider)
+    monkeypatch.setattr(llm_client, "build_client", fake_build_client)
+    emitted = _capture_llm_usage(monkeypatch)
+
+    out = await cmds_api.chat_test_models(
+        pid=1,
+        payload=ChatTestModelsRequest(
+            models=["gpt-5"],
+            message="测一下",
+            execution_backend_override="codex_gateway",
+            api_format_override="chat_completions",
+            client_identity_profile_override="grok_cli",
+        ),
+        db=AsyncMock(),
+        _user=AsyncMock(),
+    )
+
+    result = out.results[0]
+    assert result.ok is True
+    assert result.execution_backend == "codex_gateway"
+    assert result.effective_api_format == "responses"
+    assert result.client_identity_profile == "gateway_managed"
+    assert captured["temporary"].id != 1
+    assert captured["temporary"].execution_backend == "codex_gateway"
+    assert captured["kwargs"]["api_format_override"] == "responses"
+    assert captured["kwargs"]["identity_override"] is None
+    assert emitted[0].provider_id == 1
+
+
+@pytest.mark.asyncio
 async def test_chat_test_models_endpoint_empty_response(monkeypatch) -> None:
     """上游完成但空文本时，前端需要拿到明确的空返回状态。"""
     from app.api import commands as cmds_api
@@ -2799,6 +2876,50 @@ async def test_stream_chat_disconnect_records_single_cancelled_usage(monkeypatch
     assert emitted[0].success is False
     assert emitted[0].error_type == "cancelled"
     assert emitted[0].response_preview == "partial"
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_gateway_setup_failure_returns_one_error_per_model(monkeypatch) -> None:
+    from contextlib import asynccontextmanager
+
+    from app.api import commands as cmds_api
+
+    row = LLMProvider(
+        id=1,
+        name="Gateway failure",
+        provider="openai",
+        api_key_enc=encrypt_str("sk-test"),
+        base_url="https://api.example.com/v1",
+        default_model="gpt-5",
+        api_format="responses",
+        execution_backend="codex_gateway",
+        created_at=datetime.now(UTC),
+    )
+
+    @asynccontextmanager
+    async def failing_context(_db, _row, _payload):
+        raise RuntimeError("gateway unavailable")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(cmds_api.command_service, "get_provider_row", AsyncMock(return_value=row))
+    monkeypatch.setattr(cmds_api, "_liveness_provider_context", failing_context)
+
+    response = await cmds_api.stream_chat_test_models(
+        pid=1,
+        payload=ChatTestModelsRequest(models=["gpt-5", "gpt-5-mini"], message="测一下"),
+        db=AsyncMock(),
+        _user=AsyncMock(),
+    )
+    chunks = [
+        chunk.decode() if isinstance(chunk, bytes) else chunk
+        async for chunk in response.body_iterator
+    ]
+    body = "".join(chunks)
+    events = [json.loads(line) for line in body.splitlines() if line]
+
+    assert [event["requested_model"] for event in events] == ["gpt-5", "gpt-5-mini"]
+    assert all(event["type"] == "error" for event in events)
+    assert all("临时执行后端准备失败" in event["result"]["error"] for event in events)
 
 
 # ════════════════════════════════════════════════════════════

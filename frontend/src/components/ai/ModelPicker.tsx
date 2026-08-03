@@ -14,6 +14,7 @@ export type ModelPickerItem = {
   providerId: number;
   providerName: string;
   model: string;
+  executionBackend?: "direct" | "codex_gateway" | null;
   /** 声明支持 tools（metadata） */
   declaredTools?: boolean | null;
   declaredVision?: boolean | null;
@@ -143,7 +144,7 @@ export function ModelPicker({
               "hover:bg-muted/30 focus-visible:ring-[3px] focus-visible:ring-ring/40",
               "disabled:cursor-not-allowed disabled:opacity-50",
               compact
-                ? "w-[min(9.5rem,38vw)] flex-none px-1.5 sm:w-[11rem] sm:px-2"
+                ? "w-[6.5rem] flex-none px-1.5 sm:w-[11rem] sm:px-2"
                 : "w-full flex-1 px-2 sm:w-[min(18rem,72vw)] sm:flex-none",
             )}
           >
@@ -233,23 +234,20 @@ export function ModelPicker({
               </div>
             );
           })}
+          {showSetDefault && value.mode === "pinned" && onSetDefault ? (
+            <>
+              <DropdownMenuSeparator className="my-1.5" />
+              <DropdownMenuItem
+                className="gap-2 py-2"
+                onSelect={() => onSetDefault(value.providerId, value.model)}
+              >
+                <Check className="h-3.5 w-3.5 text-primary" />
+                将当前模型设为全局默认
+              </DropdownMenuItem>
+            </>
+          ) : null}
         </DropdownMenuContent>
       </DropdownMenu>
-
-      {showSetDefault && value.mode === "pinned" && onSetDefault ? (
-        <button
-          type="button"
-          disabled={disabled}
-          className={cn(
-            "h-8 shrink-0 rounded-md border border-border/60 text-muted-foreground hover:bg-muted/40 disabled:opacity-50",
-            compact ? "px-1.5 text-[10px] leading-none" : "px-2 text-[11px]",
-          )}
-          onClick={() => onSetDefault(value.providerId, value.model)}
-          title="将当前选择写入全局默认配置"
-        >
-          设为默认
-        </button>
-      ) : null}
     </div>
   );
 }

@@ -7,8 +7,9 @@ import hashlib
 import json
 import logging
 import os
+import sys
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -196,7 +197,9 @@ class GatewayRuntimeManager:
             if str(version.get("gateway_protocol_version") or "") != GATEWAY_PROTOCOL_VERSION:
                 raise RuntimeError("Gateway 协议版本不兼容")
             self._version = str(version.get("version") or "") or None
-            self._watch_task = asyncio.create_task(self._watch_process(self._process), name="gateway-process-watch")
+            self._watch_task = asyncio.create_task(
+                self._watch_process(self._process), name="gateway-process-watch"
+            )
             return True
         except Exception as exc:  # noqa: BLE001
             self._state = "degraded"
@@ -227,7 +230,9 @@ class GatewayRuntimeManager:
                 raise ValueError(f"Provider {provider.id} 的 Gateway 仅支持 Responses")
             if not provider.base_url or not provider.api_key_enc:
                 raise ValueError(f"Provider {provider.id} 缺少 Base URL 或 API Key")
-            models = provider.enabled_model_ids() or ([provider.default_model] if provider.default_model else [])
+            models = provider.enabled_model_ids() or (
+                [provider.default_model] if provider.default_model else []
+            )
             items.append(
                 {
                     "id": provider.id,
@@ -336,9 +341,7 @@ class GatewayRuntimeManager:
             except Exception as exc:  # noqa: BLE001
                 async with self._lock:
                     self._state = "degraded"
-                    self._error = redact_text(
-                        f"Gateway 配置读取失败：{type(exc).__name__}: {exc}"
-                    )[:300]
+                    self._error = redact_text(f"Gateway 配置读取失败：{type(exc).__name__}: {exc}")[:300]
             delay = min(delay * 2, 30.0)
 
     async def _consume_logs(self, process: asyncio.subprocess.Process) -> None:
@@ -375,6 +378,7 @@ class GatewayRuntimeManager:
 
 gateway_runtime_manager = GatewayRuntimeManager()
 gateway_provider_transaction_lock = asyncio.Lock()
+TEMPORARY_GATEWAY_PROVIDER_ID = 9_000_000_000_000_000_001
 
 
 async def acquire_gateway_configuration_db_lock(db: Any) -> None:
@@ -408,6 +412,43 @@ async def gateway_configuration_transaction(db: Any, *, enabled: bool = True):
         gateway_provider_transaction_lock.release()
 
 
+@asynccontextmanager
+async def temporary_gateway_provider(db: Any, provider: LLMProviderDTO):
+    """临时覆盖或注入 Provider，并在请求结束后恢复已提交 Gateway 快照。"""
+
+    await gateway_provider_transaction_lock.acquire()
+    try:
+        await acquire_gateway_configuration_db_lock(db)
+        rows = list((await db.execute(select(LLMProvider).order_by(LLMProvider.id))).scalars().all())
+        committed = await gateway_runtime_manager._provider_dtos(db, rows)
+        # 临时路由必须使用专用 ID，避免同一时间的正常业务请求误命中
+        # 未保存的 Base URL、Key、请求头或模型候选。
+        temporary = replace(provider, id=TEMPORARY_GATEWAY_PROVIDER_ID)
+        try:
+            status = await gateway_runtime_manager.reconcile(
+                [*committed, temporary],
+                recover_on_failure=False,
+            )
+            if status.state != "ready":
+                raise RuntimeError(status.error or "内置 Gateway 临时配置未就绪")
+            yield temporary
+        finally:
+            active_error = sys.exception()
+            try:
+                restored = await gateway_runtime_manager.reconcile(
+                    committed,
+                    recover_on_failure=True,
+                )
+                if restored.state not in {"ready", "not_required"}:
+                    raise RuntimeError(restored.error or "恢复 Gateway 已提交配置失败")
+            except BaseException:
+                if active_error is None:
+                    raise
+                log.exception("临时 Gateway 请求结束后恢复已提交配置失败")
+    finally:
+        gateway_provider_transaction_lock.release()
+
+
 async def gateway_provider_uses_proxy(db: Any, proxy_id: int) -> bool:
     row = await db.execute(
         select(LLMProvider.id)
@@ -421,9 +462,7 @@ async def gateway_provider_uses_proxy(db: Any, proxy_id: int) -> bool:
 
 
 async def llm_provider_uses_proxy(db: Any, proxy_id: int) -> bool:
-    row = await db.execute(
-        select(LLMProvider.id).where(LLMProvider.proxy_id == proxy_id).limit(1)
-    )
+    row = await db.execute(select(LLMProvider.id).where(LLMProvider.proxy_id == proxy_id).limit(1))
     return row.scalar_one_or_none() is not None
 
 

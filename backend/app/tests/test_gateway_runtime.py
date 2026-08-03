@@ -6,9 +6,12 @@ from unittest.mock import ANY, AsyncMock
 import pytest
 
 from app.services.gateway_runtime import (
+    TEMPORARY_GATEWAY_PROVIDER_ID,
     GatewayRuntimeManager,
+    GatewayRuntimeStatus,
     acquire_gateway_configuration_db_lock,
     restore_committed_gateway_snapshot,
+    temporary_gateway_provider,
 )
 from app.services.llm_dto import LLMProviderDTO
 from app.services.llm_proxy_service import resolve_proxy_url
@@ -191,3 +194,73 @@ async def test_compensation_reacquires_db_lock_before_reading_committed_snapshot
 
     assert status.state == "ready"
     assert events == ["lock", "reconcile", "commit"]
+
+
+@pytest.mark.asyncio
+async def test_temporary_gateway_provider_restores_committed_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import gateway_runtime
+
+    committed = _provider()
+    draft = _provider()
+    rows_result = SimpleNamespace(
+        scalars=lambda: SimpleNamespace(all=lambda: [SimpleNamespace(id=7)]),
+    )
+    db = SimpleNamespace(
+        execute=AsyncMock(return_value=rows_result),
+        get_bind=lambda: SimpleNamespace(dialect=SimpleNamespace(name="sqlite")),
+    )
+    monkeypatch.setattr(
+        gateway_runtime.gateway_runtime_manager,
+        "_provider_dtos",
+        AsyncMock(return_value=[committed]),
+    )
+    reconcile = AsyncMock(
+        side_effect=[
+            GatewayRuntimeStatus("ready", True, 2, 2, version="test"),
+            GatewayRuntimeStatus("ready", True, 3, 1, version="test"),
+        ],
+    )
+    monkeypatch.setattr(gateway_runtime.gateway_runtime_manager, "reconcile", reconcile)
+
+    async with temporary_gateway_provider(db, draft) as temporary:
+        assert temporary.id == TEMPORARY_GATEWAY_PROVIDER_ID
+        assert temporary.execution_backend == "codex_gateway"
+
+    assert reconcile.await_count == 2
+    first_snapshot = reconcile.await_args_list[0].args[0]
+    assert [provider.id for provider in first_snapshot] == [7, TEMPORARY_GATEWAY_PROVIDER_ID]
+    assert reconcile.await_args_list[1].args[0] == [committed]
+
+
+@pytest.mark.asyncio
+async def test_unsaved_temporary_gateway_provider_uses_reserved_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import gateway_runtime
+
+    draft = _provider()
+    draft.id = 0
+    rows_result = SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: []))
+    db = SimpleNamespace(
+        execute=AsyncMock(return_value=rows_result),
+        get_bind=lambda: SimpleNamespace(dialect=SimpleNamespace(name="sqlite")),
+    )
+    monkeypatch.setattr(
+        gateway_runtime.gateway_runtime_manager,
+        "_provider_dtos",
+        AsyncMock(return_value=[]),
+    )
+    reconcile = AsyncMock(
+        side_effect=[
+            GatewayRuntimeStatus("ready", True, 1, 1, version="test"),
+            GatewayRuntimeStatus("not_required", False, 1, 0, version="test"),
+        ],
+    )
+    monkeypatch.setattr(gateway_runtime.gateway_runtime_manager, "reconcile", reconcile)
+
+    async with temporary_gateway_provider(db, draft) as temporary:
+        assert temporary.id == TEMPORARY_GATEWAY_PROVIDER_ID
+
+    assert reconcile.await_args_list[0].args[0][0].id == TEMPORARY_GATEWAY_PROVIDER_ID
