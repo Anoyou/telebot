@@ -25,6 +25,18 @@
 
 ## [Unreleased]
 
+## [0.91.0-beta.3] - 2026-08-04 · minor（次版本预发布） · Gateway 保存与 Trace 写入修复
+
+### 修复
+
+- 新增数据库迁移扩展 LLM Provider 协议档案约束，允许 OpenAI、DeepSeek 与 Codex Responses 档案正常落库，修复切换「内置 Codex Gateway」保存时返回服务器内部错误的问题。
+- 修复 UserBot 事件跨进程处理时，子 Span 可能抢在父 Trace 的批量事务提交前写库、持续触发 PostgreSQL 外键错误的问题；子记录现在会等待父记录可见，永久缺失时记录可诊断错误且不执行无效写入。
+- 修正生产环境生成脚本未按 Compose 内可信前端反代设置 `TRUST_FORWARDED_FOR=true` 的问题，避免新部署忽略真实客户端 IP 并持续输出安全告警；开发环境默认值保持关闭。
+
+### 测试
+
+- 新增协议约束升级与安全降级、跨进程 Trace 可见性竞争、父 Trace 永久缺失及生产环境生成脚本回归；并在真实 PostgreSQL 中验证完整迁移、降级再升级与并发写入结果。
+
 ## [0.91.0-beta.2] - 2026-08-03 · minor（次版本预发布） · Codex Gateway 请求身份与发布收口
 
 ### 修复

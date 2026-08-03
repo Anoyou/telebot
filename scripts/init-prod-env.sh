@@ -40,6 +40,7 @@ while [[ $# -gt 0 ]]; do
   - POSTGRES_PASSWORD
   - WEB_PORT_PUBLISH
   - COOKIE_SECURE
+  - TRUST_FORWARDED_FOR
 
 默认不覆盖已有 .env；需要重建时传 --force。
 EOF
@@ -95,6 +96,7 @@ replacements = {
     "DATABASE_URL": "postgresql+asyncpg://telepilot:{password}@postgres:5432/telepilot".format(password=sys.argv[5]),
     "WEB_PORT_PUBLISH": sys.argv[6],
     "COOKIE_SECURE": sys.argv[7].lower(),
+    "TRUST_FORWARDED_FOR": "true",
 }
 
 seen: set[str] = set()
