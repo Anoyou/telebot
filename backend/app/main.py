@@ -241,8 +241,11 @@ async def lifespan(app: FastAPI):
         from .services.gateway_runtime import reconcile_gateway_runtime
 
         await reconcile_gateway_runtime()
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         logging.exception("内置 Gateway 启动或配置同步失败；direct Provider 继续可用")
+        from .services.gateway_runtime import gateway_runtime_manager
+
+        await gateway_runtime_manager.mark_control_plane_degraded(exc)
 
     try:
         interrupted_jobs = await plugin_config_action_jobs.startup_plugin_config_action_jobs()

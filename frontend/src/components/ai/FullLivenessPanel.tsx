@@ -41,6 +41,7 @@ import {
   livenessStatusTone as sharedStatusTone,
 } from "@/lib/livenessStatus";
 import { cn } from "@/lib/utils";
+import { executionBackendLabel, isGatewayBackend } from "@/lib/providerExecutionBackend";
 
 const DEFAULT_CHAT_TEST_SYSTEM_PROMPT =
   "你是一个自然、简洁的中文聊天助手。请像真实聊天一样直接回复用户，不要只返回 ping/pong。";
@@ -955,6 +956,17 @@ export function FullLivenessPanel({
                                           ) : null}
                                           {item.client_identity_profile ? (
                                             <MetaBadge tone="info">客户端 {livenessIdentityLabel(item.client_identity_profile)}</MetaBadge>
+                                          ) : null}
+                                          {item.execution_backend ? (
+                                            <MetaBadge
+                                              mono
+                                              tone={isGatewayBackend(item.execution_backend) ? "info" : "neutral"}
+                                              title={isGatewayBackend(item.execution_backend)
+                                                ? [item.gateway_version, item.gateway_stage, item.gateway_request_id].filter(Boolean).join(" · ") || "实际通过内置 Gateway 调用"
+                                                : "实际通过直接 API 调用"}
+                                            >
+                                              实际后端 {executionBackendLabel(item.execution_backend)}
+                                            </MetaBadge>
                                           ) : null}
                                           {item.skipped && !item.effective_api_format && !item.client_identity_profile ? (
                                             <MetaBadge>未发起请求</MetaBadge>

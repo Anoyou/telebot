@@ -18,7 +18,7 @@ import {
   getSystemSettings,
 } from "@/api/system";
 import { getNetworkInfo, refreshNetworkInfo } from "@/api/network";
-import type { HealthOverview, NetworkInfo } from "@/api/types";
+import type { CodexGatewayHealthStatus, HealthOverview, NetworkInfo } from "@/api/types";
 
 // 后端 account.status 枚举的中文标签
 const ACCOUNT_STATUS_LABEL: Record<string, string> = {
@@ -65,7 +65,8 @@ export function SystemHealthCard({ defaultOpen = false }: { defaultOpen?: boolea
         !data.alembic.ok ||
         ((data.workers.runtime_desired_running ?? 0) >
           (data.workers.runtime_desired_running_alive ?? 0)) ||
-        (data.workers.runtime_failing ?? 0) > 0;
+        (data.workers.runtime_failing ?? 0) > 0 ||
+        data.codex_gateway?.state === "degraded";
       return unhealthy ? 8_000 : 60_000;
     },
     refetchIntervalInBackground: false,
@@ -157,6 +158,12 @@ function HealthGrid({ data }: { data: HealthOverview }) {
     data.workers.total === 0 || workerDead || workerReauth || runtimeFailing || runtimeMissing
       ? "warn"
       : "ok";
+  const gateway: CodexGatewayHealthStatus = data.codex_gateway ?? {
+    state: "not_required",
+    required: false,
+    provider_count: 0,
+    revision: 0,
+  };
 
   return (
     <div className="grid grid-cols-1 gap-3 md:grid-cols-2 2xl:grid-cols-3">
@@ -350,6 +357,48 @@ function HealthGrid({ data }: { data: HealthOverview }) {
                 ))}
               </TechDetails>
             )}
+          </>
+        )}
+      </HealthBlock>
+
+      <HealthBlock
+        title="内置 Codex Gateway"
+        subtitle="仅为选择 Gateway 的 Responses Provider 按需启动"
+        tone={gateway.state === "degraded" ? "err" : "ok"}
+        techName="telepilot-gateway / Unix Socket"
+        right={
+          <Badge
+            variant={gateway.state === "ready" ? "success" : gateway.state === "degraded" ? "destructive" : "secondary"}
+            className="font-mono text-[10px]"
+          >
+            {gateway.state}
+          </Badge>
+        }
+      >
+        {gateway.state === "ready" ? (
+          <>
+            <ToneText tone="ok" text={`✓ Gateway 已就绪，承载 ${gateway.provider_count} 个 Provider`} />
+            <div className="mt-1 text-xs text-muted-foreground">
+              配置 revision {gateway.revision}
+              {gateway.version ? ` · 版本 ${gateway.version}` : ""}
+            </div>
+          </>
+        ) : gateway.state === "degraded" ? (
+          <>
+            <ToneText tone="err" text="✗ Gateway 当前不可用" />
+            <div className="mt-1 break-words text-xs text-destructive">
+              {gateway.error || "Gateway 启动、协议握手或配置同步失败。"}
+            </div>
+            <div className="mt-1 text-xs text-muted-foreground">
+              direct Provider、Web 与 Worker 不受影响；请检查 Web 镜像是否包含 Gateway 二进制。
+            </div>
+          </>
+        ) : (
+          <>
+            <ToneText tone="ok" text="✓ 当前无需启动 Gateway" />
+            <div className="mt-1 text-xs text-muted-foreground">
+              没有 Provider 选择 Gateway；direct 调用保持原路径。
+            </div>
           </>
         )}
       </HealthBlock>

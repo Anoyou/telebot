@@ -15,6 +15,8 @@
 
 当前推荐的正式部署路径是：TelePilot 服务由 Docker Compose 启动，公网 HTTPS 由 Caddy 或 Nginx 负责。
 
+Web 镜像已内置 `telepilot-gateway` 静态二进制。它由 Web 按需启动并通过容器内 Unix Socket 工作，不新增 Compose service、端口、volume 或服务器安装步骤；升级和回滚跟随 Web 镜像原子完成。Provider 配置与故障排查见 [内置 Codex Gateway](./CODEX-GATEWAY.md)。
+
 仓库里部分默认卷名、数据库名和环境标记仍保留 `telebot` 兼容命名，不影响对外产品名 `TelePilot`。
 
 ## 1. 最省心：一条命令安装

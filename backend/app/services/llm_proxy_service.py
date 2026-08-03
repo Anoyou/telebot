@@ -14,7 +14,9 @@ from ..util.proxy import parse_proxy_url
 async def resolve_proxy_url(db: AsyncSession, proxy_id: int | None) -> str | None:
     if proxy_id is None:
         return None
-    proxy = await db.get(Proxy, int(proxy_id))
+    # Gateway 候选快照可能复用先前读过 Proxy 的 Session；强制覆盖 identity map，
+    # 保证拿到当前事务可见版本，避免把并发轮换前的代理凭据重新同步回 Gateway。
+    proxy = await db.get(Proxy, int(proxy_id), populate_existing=True)
     if proxy is None:
         return None
     if "://" in proxy.host:

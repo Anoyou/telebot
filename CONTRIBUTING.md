@@ -22,6 +22,7 @@ git status --short --branch -uall
 | Python | 3.12 或 3.13 |
 | Node.js | 22，与 CI 一致 |
 | pnpm | 10.23，版本声明在 `frontend/package.json` |
+| Go | 1.23 或更高；仅开发内置 Codex Gateway 时需要 |
 | Docker | Docker Desktop、OrbStack 或 Docker Engine |
 | Compose | Docker Compose v2 |
 | 系统 | macOS 或 Linux；Windows 尚未作为正式开发环境验证 |
@@ -76,6 +77,9 @@ make dev-up      # 只启动 PostgreSQL 和 Redis
 make migrate
 make backend     # 前台运行 Uvicorn，带 --reload
 make frontend    # 前台运行 Vite
+make gateway-build
+make gateway-test
+make gateway-run # 前台监听 .run/gateway.sock
 ```
 
 `make backend` 适合只改控制面 API。涉及 Worker 的改动仍要完整重启。
@@ -85,6 +89,8 @@ make frontend    # 前台运行 Vite
 FastAPI 进程同时承载 Web API、System Agent、Worker Supervisor、Account Bot manager 和 Interaction Bot manager。生产环境固定使用一个 Uvicorn worker，避免同一账号被多个 Supervisor 重复拉起。
 
 每个运行中的 Telegram 账号对应一个独立 Worker 子进程。Worker 内运行 Telethon、命令、插件、调度器和账号级任务，通过 Redis 与控制面通信。PostgreSQL 保存持久数据和加密字段，Redis 还负责租约、去重、限流和短期状态。
+
+选择 `codex_gateway` 的 Responses Provider 由 FastAPI 按需拉起 `telepilot-gateway` Go 子进程，通过权限收紧的 Unix Socket 同步内存路由和发起请求。Gateway 不纳入全局 `/readyz`，故障不能阻断 direct Provider、Web 或 Worker。完整开发与安全边界见 [内置 Codex Gateway](docs/CODEX-GATEWAY.md)。
 
 几个边界不能混用：
 
@@ -107,6 +113,7 @@ FastAPI 进程同时承载 Web API、System Agent、Worker Supervisor、Account 
 | `backend/app/db/` | SQLAlchemy base、session 和模型 |
 | `backend/app/schemas/` | Pydantic 请求与响应结构 |
 | `backend/app/tests/` | 后端回归、安全、迁移和运行时测试 |
+| `gateway/` | 内置 Codex Gateway Go module、协议契约与单元测试 |
 | `backend/alembic/versions/` | 线性 Alembic 迁移历史 |
 | `frontend/src/pages/` | 一级工作台与详情页面 |
 | `frontend/src/components/` | 布局、系统助手、插件和通用 UI |

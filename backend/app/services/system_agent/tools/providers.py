@@ -64,6 +64,10 @@ def _mark_reload_ai_commands(ctx: ToolContext) -> None:
     ctx.action.arguments = stored
 
 
+def _mark_gateway_candidate_sync(ctx: ToolContext) -> None:
+    ctx.gateway_candidate_sync = True
+
+
 def _reject_request_headers(args: dict[str, Any]) -> None:
     if "request_headers" in args:
         raise ValueError(
@@ -196,6 +200,14 @@ async def save_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]
     provider_id = args.get("id") or args.get("provider_id")
     try:
         if provider_id not in (None, ""):
+            current = await ctx.db.get(LLMProvider, int(provider_id))
+            if current is None:
+                raise ValueError(f"Provider #{provider_id} 不存在")
+            if (
+                str(getattr(current, "execution_backend", "direct") or "direct")
+                == "codex_gateway"
+            ):
+                _mark_gateway_candidate_sync(ctx)
             data: dict[str, Any] = {}
             for key in (
                 "name",
@@ -351,6 +363,11 @@ async def delete_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[str, An
 
 async def delete_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     provider_id = int(args.get("id") or args.get("provider_id"))
+    current = await ctx.db.get(LLMProvider, provider_id)
+    if current is None:
+        raise ValueError(f"Provider #{provider_id} 不存在")
+    if str(getattr(current, "execution_backend", "direct") or "direct") == "codex_gateway":
+        _mark_gateway_candidate_sync(ctx)
     await command_service.delete_provider(ctx.db, provider_id)
     _mark_reload_ai_commands(ctx)
     return {"id": provider_id, "deleted": True, "business_changed": True}

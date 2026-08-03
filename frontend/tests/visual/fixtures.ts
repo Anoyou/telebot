@@ -192,6 +192,7 @@ function jsonResponse(pathname: string): unknown | undefined {
     db: { ok: true }, redis: { ok: true }, alembic: { ok: true, pending: [] },
     providers: { total: 0, with_api_key: 0 }, proxies: { total: 0 },
     workers: { total: 0, by_status: {}, runtime_failing: 0, runtime_desired_running: 0, runtime_desired_running_alive: 0 },
+    codex_gateway: { state: "not_required", required: false, provider_count: 0, revision: 0 },
   };
   if (pathname === "/api/accounts/1") return { ...accountFixture, notes: null, template_id: null, proxy_id: null, device_profile_id: null };
   if (pathname === "/api/accounts/1/features") return [];

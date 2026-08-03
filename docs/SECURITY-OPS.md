@@ -104,6 +104,8 @@ python -m app.scripts.rekey --old "$OLD_MASTER_KEY" --new "$NEW_MASTER_KEY"
 从 `0.86.0-beta.9` 起，聊天中的自定义请求头配置会整段替换为安全提示，值只能在
 「AI → Provider 设置」中填写；上游错误回显也会按当前调用的全部 header value 脱敏。
 
+选择内置 Codex Gateway 的 Provider 仍只使用 TelePilot 保存的 Provider API Key。Gateway 不读取 Codex OAuth、账号身份、设备证明或 `~/.codex/auth.json`；凭据只经 `0600` Unix Socket 控制面进入子进程内存，不写配置文件。Gateway 不跟随上游重定向，不记录 Base URL、请求/响应正文或凭据；详细边界与排障见 [内置 Codex Gateway](./CODEX-GATEWAY.md)。
+
 曾使用上述 beta 且在聊天里粘贴过请求头值时，升级前后必须在上游服务重新生成并轮换
 这些值，并删除对应 System Agent 会话。旧数据库与备份应继续按敏感材料保存；轮换后其中
 残留的旧值已经失效，但不应公开或交给不受信任的第三方。

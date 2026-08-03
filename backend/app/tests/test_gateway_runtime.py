@@ -1,11 +1,17 @@
 from __future__ import annotations
 
-from unittest.mock import AsyncMock
+from types import SimpleNamespace
+from unittest.mock import ANY, AsyncMock
 
 import pytest
 
-from app.services.gateway_runtime import GatewayRuntimeManager
+from app.services.gateway_runtime import (
+    GatewayRuntimeManager,
+    acquire_gateway_configuration_db_lock,
+    restore_committed_gateway_snapshot,
+)
 from app.services.llm_dto import LLMProviderDTO
+from app.services.llm_proxy_service import resolve_proxy_url
 
 
 def _provider(*, backend: str = "codex_gateway", api_format: str = "responses") -> LLMProviderDTO:
@@ -38,6 +44,8 @@ async def test_missing_binary_is_degraded_not_global_failure() -> None:
     assert status.state == "degraded"
     assert status.required is True
     assert "不存在" in (status.error or "")
+    assert manager._db_recovery_task is not None  # noqa: SLF001
+    await manager.shutdown()
 
 
 @pytest.mark.asyncio
@@ -66,7 +74,120 @@ async def test_snapshot_sync_is_revisioned_and_deduplicated(monkeypatch: pytest.
 @pytest.mark.asyncio
 async def test_non_responses_provider_is_rejected_during_sync(monkeypatch: pytest.MonkeyPatch) -> None:
     manager = GatewayRuntimeManager(binary="/fake")
-    manager._process = type("Process", (), {"returncode": None})()  # type: ignore[assignment]
+    process = SimpleNamespace(
+        returncode=None,
+        terminate=lambda: setattr(process, "returncode", 0),
+        wait=AsyncMock(return_value=0),
+    )
+    manager._process = process  # type: ignore[assignment]
     status = await manager.reconcile([_provider(api_format="chat_completions")])
     assert status.state == "degraded"
     assert "仅支持 Responses" in (status.error or "")
+    assert manager._process is None  # noqa: SLF001
+    assert manager._db_recovery_task is not None  # noqa: SLF001
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_preflight_does_not_keep_previous_config_error_sticky() -> None:
+    manager = GatewayRuntimeManager(binary="/fake")
+    manager._process = type("Process", (), {"returncode": None})()  # type: ignore[assignment]
+    manager._version = "test"
+    manager._state = "degraded"
+    manager._error = "previous snapshot rejected"
+
+    status = await manager.preflight()
+
+    assert status.state == "ready"
+    assert status.error is None
+
+
+@pytest.mark.asyncio
+async def test_provider_dtos_include_resolved_provider_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.db.models.command import LLMProvider
+    from app.services import llm_proxy_service
+
+    resolve = AsyncMock(return_value="socks5://user:pass@proxy.example:1080")
+    monkeypatch.setattr(llm_proxy_service, "resolve_proxy_url", resolve)
+    row = LLMProvider(
+        id=12,
+        name="proxied",
+        provider="openai",
+        api_key_enc="encrypted",
+        base_url="https://api.example/v1",
+        default_model="gpt-x",
+        api_format="responses",
+        execution_backend="codex_gateway",
+        proxy_id=8,
+    )
+
+    providers = await GatewayRuntimeManager()._provider_dtos(object(), [row])
+
+    assert providers[0].proxy_url == "socks5://user:pass@proxy.example:1080"
+    resolve.assert_awaited_once_with(ANY, 8)
+
+
+@pytest.mark.asyncio
+async def test_postgres_configuration_lock_uses_transaction_advisory_lock() -> None:
+    db = SimpleNamespace(
+        get_bind=lambda: SimpleNamespace(dialect=SimpleNamespace(name="postgresql")),
+        execute=AsyncMock(),
+    )
+
+    await acquire_gateway_configuration_db_lock(db)
+
+    statement, parameters = db.execute.await_args.args
+    assert "pg_advisory_xact_lock" in str(statement)
+    assert isinstance(parameters["lock_key"], int)
+
+
+@pytest.mark.asyncio
+async def test_proxy_resolution_refreshes_session_identity_map() -> None:
+    proxy = SimpleNamespace(
+        type="http",
+        host="proxy.example",
+        port=8080,
+        username=None,
+        password_enc=None,
+    )
+    db = SimpleNamespace(get=AsyncMock(return_value=proxy))
+
+    assert await resolve_proxy_url(db, 8) == "http://proxy.example:8080"
+    db.get.assert_awaited_once_with(ANY, 8, populate_existing=True)
+
+
+@pytest.mark.asyncio
+async def test_compensation_reacquires_db_lock_before_reading_committed_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import gateway_runtime
+    from app.services.gateway_runtime import GatewayRuntimeStatus, gateway_runtime_manager
+
+    events: list[str] = []
+    restore_db = SimpleNamespace(
+        commit=AsyncMock(side_effect=lambda: events.append("commit")),
+        rollback=AsyncMock(),
+    )
+
+    class _SessionContext:
+        async def __aenter__(self):
+            return restore_db
+
+        async def __aexit__(self, *_args):
+            return False
+
+    async def acquire(_db) -> None:  # noqa: ANN001
+        events.append("lock")
+
+    async def reconcile(_db, **_kwargs):  # noqa: ANN001
+        events.append("reconcile")
+        return GatewayRuntimeStatus("ready", True, 3, 1, version="test")
+
+    monkeypatch.setattr(gateway_runtime, "AsyncSessionLocal", lambda: _SessionContext())
+    monkeypatch.setattr(gateway_runtime, "acquire_gateway_configuration_db_lock", acquire)
+    monkeypatch.setattr(gateway_runtime_manager, "reconcile_from_session", reconcile)
+
+    status = await restore_committed_gateway_snapshot()
+
+    assert status.state == "ready"
+    assert events == ["lock", "reconcile", "commit"]

@@ -172,6 +172,9 @@ def resolve_usage_client_identity_profile(
 ) -> str:
     """解析某次调用实际发送的客户端身份档案。"""
 
+    if provider.execution_backend == "codex_gateway":
+        return "gateway_managed"
+
     api_format = (
         effective_api_format
         or provider.api_format

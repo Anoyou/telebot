@@ -66,6 +66,25 @@ func TestAggregateSSEHandlesChunkBoundariesAndTerminal(t *testing.T) {
 	}
 }
 
+func TestAggregateSSEPreservesStructuredResponseFailedFact(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"insufficient_quota\",\"message\":\"quota exhausted\"}}}\n\n")
+	}))
+	defer upstream.Close()
+
+	handler := configuredHandler(t, upstream.URL, "key", "model", "model")
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"model","stream":false}`))
+	request.Header.Set("X-TelePilot-Provider-ID", "1")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+
+	body := recorder.Body.String()
+	if recorder.Code != http.StatusBadGateway || !strings.Contains(body, `"code":"quota_exhausted"`) || !strings.Contains(body, `"upstream_error_code":"insufficient_quota"`) {
+		t.Fatalf("structured failure was lost: status=%d body=%s", recorder.Code, body)
+	}
+}
+
 func TestUpstreamErrorPreservesStableFactWithoutSecret(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
@@ -170,6 +189,50 @@ func TestUpstreamDeadlineReturnsTimeoutFact(t *testing.T) {
 
 	if recorder.Code != http.StatusGatewayTimeout || !strings.Contains(recorder.Body.String(), `"code":"timeout"`) {
 		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestUpstreamNetworkErrorDoesNotExposeProviderURL(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	recorder := httptest.NewRecorder()
+	privateURL := "https://tenant.example/private/path?account=secret"
+
+	writeUpstreamRequestError(
+		recorder,
+		request,
+		fmt.Errorf("dial tcp: request to %s failed", privateURL),
+		routing.Route{BaseURL: privateURL, APIKey: "opaque-key"},
+	)
+
+	body := recorder.Body.String()
+	if recorder.Code != http.StatusBadGateway || !strings.Contains(body, `"code":"network_error"`) {
+		t.Fatalf("status=%d body=%s", recorder.Code, body)
+	}
+	for _, privateValue := range []string{"tenant.example", "/private/path", "account=secret", "opaque-key"} {
+		if strings.Contains(body, privateValue) {
+			t.Fatalf("private upstream detail leaked: %s", body)
+		}
+	}
+}
+
+func TestHTTPClientIgnoresEnvironmentProxyUnlessRouteOptsIn(t *testing.T) {
+	t.Setenv("HTTP_PROXY", "http://environment-proxy.example:8080")
+	t.Setenv("HTTPS_PROXY", "http://environment-proxy.example:8080")
+
+	directTransport := httpClient(routing.Route{}).Transport.(*http.Transport)
+	request, err := http.NewRequest(http.MethodGet, "https://upstream.example/v1/responses", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if directTransport.Proxy != nil {
+		proxy, proxyErr := directTransport.Proxy(request)
+		t.Fatalf("environment proxy was inherited: proxy=%v err=%v", proxy, proxyErr)
+	}
+
+	routeTransport := httpClient(routing.Route{ProxyURL: "http://selected-proxy.example:9000"}).Transport.(*http.Transport)
+	proxy, err := routeTransport.Proxy(request)
+	if err != nil || proxy == nil || proxy.Host != "selected-proxy.example:9000" {
+		t.Fatalf("selected provider proxy missing: proxy=%v err=%v", proxy, err)
 	}
 }
 

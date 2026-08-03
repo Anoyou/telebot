@@ -1152,6 +1152,15 @@ export interface WorkersHealthStatus {
   runtime_failing: number;
 }
 
+export interface CodexGatewayHealthStatus {
+  state: "not_required" | "ready" | "degraded";
+  required: boolean;
+  provider_count: number;
+  revision: number;
+  version?: string | null;
+  error?: string | null;
+}
+
 export interface HealthOverview {
   db: DbStatus;
   alembic: AlembicStatus;
@@ -1159,6 +1168,7 @@ export interface HealthOverview {
   providers: ProvidersHealthStatus;
   proxies: ProxiesHealthStatus;
   workers: WorkersHealthStatus;
+  codex_gateway?: CodexGatewayHealthStatus;
 }
 
 export type HostResourceStatus = ApiComponents["schemas"]["HostResource"];
@@ -1374,6 +1384,7 @@ export type Sprint4Wave1TypesMarker = "command-aliases";
 
 // ── LLM Provider ──
 export type LLMProviderKind = "openai" | "anthropic" | "ollama";
+export type LLMExecutionBackend = "direct" | "codex_gateway";
 
 /**
  * API 协议（与 provider 厂商解耦；同一个反代 base_url 可能只支持其中某种）：
@@ -1500,6 +1511,8 @@ export interface LLMProviderOut {
   web_search_api_format?: LLMWebSearchApiFormat | string;
   /** 客户端身份档案；auto 按本次实际协议解析。与 protocol_profile 相互独立 */
   client_identity_profile?: LLMClientIdentityProfile | string;
+  /** 实际传输后端；direct 直连上游，codex_gateway 走内置 Unix Socket Gateway。 */
+  execution_backend?: LLMExecutionBackend | string;
   /** 模态；老数据可能缺，前端按 "text" 兜底 */
   modality?: LLMModality | string;
   /** 路由标签；老数据可能为空数组 */
@@ -1534,6 +1547,7 @@ export interface LLMProviderCreate {
   web_search_api_format?: LLMWebSearchApiFormat;
   /** 客户端身份档案；auto 按本次实际协议解析。与 protocol_profile 相互独立 */
   client_identity_profile?: LLMClientIdentityProfile;
+  execution_backend?: LLMExecutionBackend;
   modality?: LLMModality;
   tags?: string[];
   cost_tier?: number;
@@ -1570,6 +1584,7 @@ export interface LLMProviderUpdate {
   web_search_api_format?: LLMWebSearchApiFormat;
   /** 客户端身份档案；auto 按本次实际协议解析。与 protocol_profile 相互独立 */
   client_identity_profile?: LLMClientIdentityProfile;
+  execution_backend?: LLMExecutionBackend;
   modality?: LLMModality;
   tags?: string[];
   cost_tier?: number;
@@ -1595,6 +1610,7 @@ export interface FetchModelsPreviewRequest {
   provider: LLMProviderKind;
   api_format?: LLMApiFormat;
   protocol_profile?: LLMProtocolProfile;
+  execution_backend?: LLMExecutionBackend;
   base_url?: string | null;
   /** 可空——若 pid 给了且 api_key 留空，后端会回落到 DB 里已存的 */
   api_key?: string | null;
@@ -1770,6 +1786,10 @@ export interface ChatTestModelResult {
   status_code?: number | null;
   client_identity_profile?: string | null;
   effective_api_format?: string | null;
+  execution_backend?: string | null;
+  gateway_version?: string | null;
+  gateway_request_id?: string | null;
+  gateway_stage?: string | null;
   streaming?: boolean;
   stream_fallback?: boolean;
 }
@@ -1836,6 +1856,10 @@ export interface LivenessResultItem {
   suggestion?: string | null;
   client_identity_profile?: string | null;
   effective_api_format?: string | null;
+  execution_backend?: string | null;
+  gateway_version?: string | null;
+  gateway_request_id?: string | null;
+  gateway_stage?: string | null;
   skipped: boolean;
 }
 

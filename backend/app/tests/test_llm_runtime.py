@@ -1895,6 +1895,22 @@ def test_usage_identity_resolves_auto_from_effective_protocol() -> None:
     provider.api_format = "responses"
     provider.protocol_profile = "codex_responses"
     assert _rt.resolve_usage_client_identity_profile(provider) == "codex_tui"
+    provider.execution_backend = "codex_gateway"
+    assert _rt.resolve_usage_client_identity_profile(provider) == "gateway_managed"
+
+
+def test_gateway_web_search_ignores_dormant_direct_protocol_override() -> None:
+    provider = LLMProviderDTO(
+        id=2,
+        name="gateway",
+        provider="anthropic",
+        default_model="claude-proxy",
+        api_format="responses",
+        web_search_api_format="anthropic_messages",
+        execution_backend="codex_gateway",
+    )
+
+    assert _api_format_for_call(provider, web_search=True) == "responses"
 
 
 @pytest.mark.asyncio

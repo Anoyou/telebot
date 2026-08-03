@@ -11,13 +11,17 @@
 
 .PHONY: help up down restart logs status nuke bootstrap init-prod-env auth-recovery \
         dev-up dev-down dev-logs install migrate makemigration backend frontend \
-        test lint codegen build prod-build prod-up prod-update prod-down backup clean
+        test lint codegen build prod-build prod-up prod-update prod-down backup clean \
+        gateway-build gateway-test gateway-run
 
 PYTHON := python3.12
 VENV := backend/.venv
 ACTIVATE := . $(VENV)/bin/activate
 PROD_UPDATE_ARGS ?=
 PROD_UP_ARGS ?=
+GATEWAY_BIN ?= $(CURDIR)/.run/telepilot-gateway
+GATEWAY_SOCKET ?= $(CURDIR)/.run/gateway.sock
+GATEWAY_BUILD_COMMIT ?= $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo dev)
 
 help:
 	@echo "════════════ 一键命令（推荐） ════════════"
@@ -47,6 +51,9 @@ help:
 	@echo "  make test          后端 pytest"
 	@echo "  make lint          ruff check"
 	@echo "  make codegen       OpenAPI → 前端类型"
+	@echo "  make gateway-build 构建内置 Codex Gateway"
+	@echo "  make gateway-test  运行 Gateway Go 单元测试"
+	@echo "  make gateway-run   前台运行 Gateway（开发 Socket）"
 	@echo "  make backup        备份脚本（pg_dump + sessions 卷）"
 	@echo "  make clean         清 caches / .venv / node_modules（不删数据卷）"
 
@@ -120,10 +127,23 @@ makemigration:
 	cd backend && $(ACTIVATE) && alembic revision --autogenerate -m "$(m)"
 
 backend:
-	cd backend && $(ACTIVATE) && uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+	cd backend && . .venv/bin/activate && TELEPILOT_GATEWAY_BIN="$(GATEWAY_BIN)" TELEPILOT_GATEWAY_SOCKET="$(GATEWAY_SOCKET)" uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
 frontend:
 	cd frontend && pnpm dev
+
+gateway-build:
+	@command -v go >/dev/null 2>&1 || { echo "缺少 Go 1.23+；direct 开发不受影响，Gateway 专项构建需要安装 Go。" >&2; exit 1; }
+	@mkdir -p $(dir $(GATEWAY_BIN))
+	cd gateway && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X github.com/anoyou/telepilot/gateway/internal/version.BuildCommit=$(GATEWAY_BUILD_COMMIT)" -o $(GATEWAY_BIN) ./cmd/telepilot-gateway
+
+gateway-test:
+	@command -v go >/dev/null 2>&1 || { echo "缺少 Go 1.23+；无法运行 Gateway 专项测试。" >&2; exit 1; }
+	cd gateway && go test ./... && go vet ./...
+
+gateway-run: gateway-build
+	@mkdir -p $(dir $(GATEWAY_SOCKET))
+	@$(GATEWAY_BIN) -socket $(GATEWAY_SOCKET)
 
 test:
 	cd backend && $(ACTIVATE) && pytest -v

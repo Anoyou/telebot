@@ -21,6 +21,7 @@ import pytest
 from app.api import system_health as sh
 from app.api.system_health import (
     AlembicStatus,
+    CodexGatewayStatus,
     DbStatus,
     ProvidersStatus,
     ProxiesStatus,
@@ -32,6 +33,7 @@ from app.api.system_health import (
     _probe_proxies,
     _probe_redis,
     _probe_workers,
+    _snapshot_codex_gateway,
 )
 
 # ════════════════════════════════════════════════════════════
@@ -44,6 +46,27 @@ def test_auto_migrate_default_false() -> None:
     from app.settings import settings
 
     assert settings.auto_migrate_on_startup is False
+
+
+def test_snapshot_codex_gateway_exposes_only_public_runtime_facts() -> None:
+    status = SimpleNamespace(
+        state="ready",
+        required=True,
+        revision=4,
+        provider_count=2,
+        version="0.1.0-beta.1",
+        error=None,
+    )
+    with patch("app.services.gateway_runtime.gateway_runtime_manager.status", return_value=status):
+        out = _snapshot_codex_gateway()
+
+    assert out == CodexGatewayStatus(
+        state="ready",
+        required=True,
+        revision=4,
+        provider_count=2,
+        version="0.1.0-beta.1",
+    )
 
 
 def test_runtime_revision_prefers_explicit_environment(monkeypatch) -> None:
@@ -979,3 +1002,4 @@ async def test_get_health_overview_resilient_to_one_probe_hanging() -> None:
     assert out.redis.ok is True
     assert out.providers.total == 0
     assert out.alembic.ok is True
+    assert out.codex_gateway.state in {"not_required", "ready", "degraded"}

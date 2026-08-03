@@ -598,11 +598,18 @@ class FetchModelsPreviewRequest(BaseModel):
         "chat_completions", "responses", "anthropic_messages"
     ] = LLM_API_FORMAT_CHAT_COMPLETIONS
     protocol_profile: LLMProtocolProfile = LLM_PROTOCOL_PROFILE_STANDARD
+    execution_backend: Literal["direct", "codex_gateway"] = LLM_EXECUTION_BACKEND_DIRECT
     base_url: str | None = Field(default=None, max_length=255)
     api_key: str | None = Field(default=None, max_length=512)
     proxy_id: int | None = Field(default=None, ge=1)
     pid: int | None = Field(default=None, ge=1)
     request_headers: list[LLMRequestHeaderInput] | None = None
+
+    @model_validator(mode="after")
+    def _validate_execution_backend(self) -> FetchModelsPreviewRequest:
+        if self.execution_backend == "codex_gateway" and self.api_format != "responses":
+            raise ValueError("内置 Codex Gateway 仅支持 Responses API Format")
+        return self
 
 
 class FetchModelsPreviewResponse(BaseModel):

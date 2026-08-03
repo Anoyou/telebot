@@ -1253,7 +1253,7 @@ def _usage_payload(
         "provider_name": provider.name,
         "model": model,
         "api_format": str(getattr(provider, "api_format", None) or "chat_completions"),
-        "execution_backend": execution_backend or provider.execution_backend,
+        "execution_backend": execution_backend or getattr(provider, "execution_backend", "direct"),
         "gateway_version": gateway_version,
         "gateway_request_id": gateway_request_id,
         "gateway_stage": gateway_stage,

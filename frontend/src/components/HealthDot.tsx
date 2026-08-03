@@ -33,6 +33,7 @@ function aggregateTone(h: HealthOverview): Tone {
   if (!h.db.ok || !h.redis.ok) return "err";
   // 黄：有任何"应该处理但还能凑合用"的告警
   if (!h.alembic.ok) return "warn";
+  if (h.codex_gateway?.state === "degraded") return "warn";
   if (h.providers.total > 0 && h.providers.with_api_key < h.providers.total)
     return "warn";
   if ((h.workers.runtime_failing ?? 0) > 0) return "warn";
@@ -51,6 +52,7 @@ function summarize(h: HealthOverview): string[] {
   if (!h.redis.ok) out.push("✗ 实时通信不通");
   if (!h.alembic.ok && !h.alembic.error)
     out.push(`⚠ 数据库结构落后（${h.alembic.pending.length} 条迁移待跑）`);
+  if (h.codex_gateway?.state === "degraded") out.push("⚠ 内置 Codex Gateway 不可用");
   const noKey = h.providers.total - h.providers.with_api_key;
   if (h.providers.total > 0 && noKey > 0)
     out.push(`⚠ ${noKey} 个 AI 模型缺 api_key`);

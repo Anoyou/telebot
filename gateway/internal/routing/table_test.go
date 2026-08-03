@@ -1,6 +1,7 @@
 package routing
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/anoyou/telepilot/gateway/contract"
@@ -34,5 +35,27 @@ func TestInvalidProviderRejectsWholeTable(t *testing.T) {
 	}})
 	if err == nil {
 		t.Fatal("invalid provider was accepted")
+	}
+}
+
+func TestNamespacedModelUsesOpaqueInternalRoute(t *testing.T) {
+	table, err := NewTable(contract.ConfigSnapshot{
+		SchemaVersion:   1,
+		ProtocolVersion: contract.ProtocolVersion,
+		Revision:        1,
+		Providers: []contract.ProviderConfig{{
+			ID:              9,
+			BaseURL:         "https://upstream.example/v1",
+			APIKey:          "key",
+			Models:          []string{"openai/gpt-x"},
+			ModelsEndpoints: []string{"https://upstream.example/v1/models"},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	route, ok := table.Resolve(9, "openai/gpt-x")
+	if !ok || route.UpstreamModel != "openai/gpt-x" || strings.Contains(route.InternalModel, "openai/gpt-x") {
+		t.Fatalf("unexpected namespaced route: %#v ok=%v", route, ok)
 	}
 }

@@ -204,6 +204,32 @@ class WorkersStatus(BaseModel):
     db_capacity_warning: str | None = None
 
 
+class CodexGatewayStatus(BaseModel):
+    state: Literal["not_required", "ready", "degraded"] = "not_required"
+    required: bool = False
+    provider_count: int = 0
+    revision: int = 0
+    version: str | None = None
+    error: str | None = None
+
+
+def _snapshot_codex_gateway() -> CodexGatewayStatus:
+    """返回进程内 Gateway 摘要，不主动启动或访问上游。"""
+
+    from ..services.gateway_runtime import gateway_runtime_manager
+
+    status = gateway_runtime_manager.status()
+    state = status.state if status.state in {"not_required", "ready", "degraded"} else "degraded"
+    return CodexGatewayStatus(
+        state=state,
+        required=status.required,
+        provider_count=status.provider_count,
+        revision=status.revision,
+        version=status.version,
+        error=status.error,
+    )
+
+
 class HealthOverview(BaseModel):
     """前端 Dashboard 用的一次性聚合状态。"""
 
@@ -213,6 +239,7 @@ class HealthOverview(BaseModel):
     providers: ProvidersStatus
     proxies: ProxiesStatus
     workers: WorkersStatus
+    codex_gateway: CodexGatewayStatus
 
 
 class HostResource(BaseModel):
@@ -1353,6 +1380,7 @@ async def get_health_overview(_user: CurrentUser) -> HealthOverview:
         providers=providers,
         proxies=proxies,
         workers=workers,
+        codex_gateway=_snapshot_codex_gateway(),
     )
 
 

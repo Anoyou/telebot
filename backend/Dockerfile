@@ -1,8 +1,20 @@
 # syntax=docker/dockerfile:1.7
 # 后端镜像：多阶段构建
+#   - gateway-builder 阶段：构建内置 telepilot-gateway 静态二进制
 #   - builder 阶段：安装编译依赖 + 通过 pyproject.toml 安装 Python 依赖
 #   - runtime 阶段：仅保留必要运行库 + 已装好的 site-packages，体积更小
 # 暴露端口 8000；健康检查命中 /healthz；启动命令含 alembic 迁移由 docker-compose 注入
+
+FROM golang:1.23-bookworm AS gateway-builder
+
+ARG BUILD_COMMIT=dev
+WORKDIR /src/gateway
+COPY gateway/go.mod ./go.mod
+COPY gateway/ ./
+RUN CGO_ENABLED=0 go build -trimpath \
+    -ldflags="-s -w -X github.com/anoyou/telepilot/gateway/internal/version.BuildCommit=${BUILD_COMMIT}" \
+    -o /out/telepilot-gateway ./cmd/telepilot-gateway
+
 
 FROM python:3.12-slim AS builder
 
@@ -38,6 +50,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # 从 builder 拷贝已安装的 Python 包与可执行入口（uvicorn/alembic 等都在这里）
 COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
+COPY --from=gateway-builder /out/telepilot-gateway /usr/local/bin/telepilot-gateway
+COPY gateway/LICENSE gateway/THIRD_PARTY_NOTICES.md /usr/share/licenses/telepilot-gateway/
 
 # 拷贝完整后端源码（含 alembic 迁移脚本、app/ 等）及 Agent 读取的发布日志。
 COPY backend/ /app

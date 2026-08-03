@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from app.services import command_service
 from app.services.system_agent import provider_verify
 from app.services.system_agent.context import ToolContext
 from app.services.system_agent.registry import ActionKeepPendingError, PreparedAction, ToolRegistry
@@ -168,6 +169,26 @@ async def test_probe_and_add_failure_does_not_prepare_confirmation(monkeypatch) 
 
     assert "name" not in args
     assert "default_model" not in args
+
+
+@pytest.mark.asyncio
+async def test_gateway_provider_update_marks_precommit_candidate_sync(monkeypatch) -> None:
+    row = SimpleNamespace(id=7, execution_backend="codex_gateway")
+    action = SimpleNamespace(arguments={})
+    db = AsyncMock()
+    db.get = AsyncMock(return_value=row)
+    update = AsyncMock(
+        return_value=SimpleNamespace(model_dump=lambda: {"id": 7, "name": "gateway"})
+    )
+    monkeypatch.setattr(command_service, "update_provider", update)
+
+    ctx = ToolContext(db=db, channel="web", role="admin", action=action)
+    await save_execute(
+        ctx,
+        {"id": 7, "notes": "updated"},
+    )
+
+    assert ctx.gateway_candidate_sync is True
 
 
 @pytest.mark.asyncio

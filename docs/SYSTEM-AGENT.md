@@ -86,6 +86,8 @@ Provider/档案分别伪名化；同一会话保持稳定，每次 HTTP attempt 
 保持唯一。原始 TelePilot session/account/Telegram ID、OAuth、设备证明、billing
 header、Agent Identity 与客户端签名不会发送给上游；测活和协议探测使用临时上下文。
 
+Provider 还可以选择 `direct` 或 `codex_gateway` 执行后端。Gateway 模式固定 Responses/Codex 档案，客户端身份由内置 Gateway 管理，但不会清空已保存的 direct 身份配置。Gateway 只替换传输层；System Agent 仍负责工具循环、预算、取消、同 Provider 模型 fallback 和跨 Provider 确认。失败后不会在同一 Provider 内偷跑 direct，RunTrace 与 usage 会记录实际 backend、Gateway 版本、request ID 和阶段。完整边界见 [内置 Codex Gateway](./CODEX-GATEWAY.md)。
+
 ### 上下文与记忆
 
 System Agent 使用四层上下文，避免每轮回放全部原始消息：

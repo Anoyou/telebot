@@ -5587,6 +5587,34 @@ export interface components {
                 [key: string]: string;
             };
         };
+        /** CodexGatewayStatus */
+        CodexGatewayStatus: {
+            /** Error */
+            error?: string | null;
+            /**
+             * Provider Count
+             * @default 0
+             */
+            provider_count: number;
+            /**
+             * Required
+             * @default false
+             */
+            required: boolean;
+            /**
+             * Revision
+             * @default 0
+             */
+            revision: number;
+            /**
+             * State
+             * @default not_required
+             * @enum {string}
+             */
+            state: "not_required" | "ready" | "degraded";
+            /** Version */
+            version?: string | null;
+        };
         /**
          * CommandAliasCreate
          * @description 创建命令别名请求。
@@ -6401,6 +6429,12 @@ export interface components {
             api_key?: string | null;
             /** Base Url */
             base_url?: string | null;
+            /**
+             * Execution Backend
+             * @default direct
+             * @enum {string}
+             */
+            execution_backend: "direct" | "codex_gateway";
             /** Pid */
             pid?: number | null;
             /**
@@ -6612,6 +6646,7 @@ export interface components {
          */
         HealthOverview: {
             alembic: components["schemas"]["AlembicStatus"];
+            codex_gateway: components["schemas"]["CodexGatewayStatus"];
             db: components["schemas"]["DbStatus"];
             providers: components["schemas"]["ProvidersStatus"];
             proxies: components["schemas"]["ProxiesStatus"];

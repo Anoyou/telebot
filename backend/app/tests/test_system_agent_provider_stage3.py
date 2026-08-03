@@ -238,6 +238,138 @@ async def test_precheck_success_then_execute(action_db, monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_provider_action_syncs_gateway_candidate_before_commit(
+    action_db, monkeypatch
+) -> None:
+    import asyncio
+
+    from app.services import gateway_runtime
+    from app.services.gateway_runtime import GatewayRuntimeStatus
+
+    async def execute(ctx, _args):  # noqa: ANN001
+        ctx.gateway_candidate_sync = True
+        return {"saved": True, "business_changed": True}
+
+    reg = ToolRegistry()
+    reg.register(
+        ToolSpec(
+            name="providers.save",
+            description="save",
+            input_schema={"type": "object"},
+            read_only=False,
+            min_role="admin",
+            preview_handler=AsyncMock(return_value={"summary": "save"}),
+            execute_handler=execute,
+        )
+    )
+    sync = AsyncMock(
+        return_value=GatewayRuntimeStatus("ready", True, 1, 1, version="test")
+    )
+    monkeypatch.setattr("app.services.system_agent.executor.get_registry", lambda: reg)
+    monkeypatch.setattr("app.services.system_agent.executor.AsyncSessionLocal", action_db)
+    monkeypatch.setattr("app.services.system_agent.executor.audit.write", AsyncMock())
+    monkeypatch.setattr(gateway_runtime, "gateway_provider_transaction_lock", asyncio.Lock())
+    monkeypatch.setattr(gateway_runtime, "reconcile_gateway_runtime_from_session", sync)
+
+    async with action_db() as db:
+        db.add(
+            SystemAgentAction(
+                id="act-gateway-sync",
+                channel=CHANNEL_WEB,
+                tool_name="providers.save",
+                arguments={"name": "gateway"},
+                summary="save",
+                preview={},
+                status=ACTION_STATUS_PENDING,
+                actor_user_id=1,
+                expires_at=datetime.now(UTC) + timedelta(minutes=5),
+            )
+        )
+        await db.commit()
+
+    result = await ActionExecutor().confirm(
+        action_id="act-gateway-sync", role="admin", web_user_id=1
+    )
+
+    assert result["ok"] is True
+    sync.assert_awaited_once()
+    assert gateway_runtime.gateway_provider_transaction_lock.locked() is False
+
+
+@pytest.mark.asyncio
+async def test_provider_action_commit_failure_restores_gateway_snapshot(
+    action_db, monkeypatch
+) -> None:
+    import asyncio
+
+    from app.services import gateway_runtime
+    from app.services.gateway_runtime import GatewayRuntimeStatus
+
+    async def execute(ctx, _args):  # noqa: ANN001
+        ctx.gateway_candidate_sync = True
+
+        async def fail_commit() -> None:
+            raise RuntimeError("commit failed")
+
+        ctx.db.commit = fail_commit
+        return {"saved": True, "business_changed": True}
+
+    reg = ToolRegistry()
+    reg.register(
+        ToolSpec(
+            name="providers.save",
+            description="save",
+            input_schema={"type": "object"},
+            read_only=False,
+            min_role="admin",
+            preview_handler=AsyncMock(return_value={"summary": "save"}),
+            execute_handler=execute,
+        )
+    )
+    sync = AsyncMock(
+        return_value=GatewayRuntimeStatus("ready", True, 1, 1, version="test")
+    )
+
+    async def restore(db):  # noqa: ANN001
+        await db.rollback()
+        return True
+
+    restore_mock = AsyncMock(side_effect=restore)
+    monkeypatch.setattr("app.services.system_agent.executor.get_registry", lambda: reg)
+    monkeypatch.setattr("app.services.system_agent.executor.AsyncSessionLocal", action_db)
+    monkeypatch.setattr("app.services.system_agent.executor.audit.write", AsyncMock())
+    monkeypatch.setattr(gateway_runtime, "gateway_provider_transaction_lock", asyncio.Lock())
+    monkeypatch.setattr(gateway_runtime, "reconcile_gateway_runtime_from_session", sync)
+    monkeypatch.setattr(gateway_runtime, "rollback_and_restore_gateway", restore_mock)
+
+    async with action_db() as db:
+        db.add(
+            SystemAgentAction(
+                id="act-gateway-commit-fail",
+                channel=CHANNEL_WEB,
+                tool_name="providers.save",
+                arguments={"name": "gateway"},
+                summary="save",
+                preview={},
+                status=ACTION_STATUS_PENDING,
+                actor_user_id=1,
+                expires_at=datetime.now(UTC) + timedelta(minutes=5),
+            )
+        )
+        await db.commit()
+
+    result = await ActionExecutor().confirm(
+        action_id="act-gateway-commit-fail", role="admin", web_user_id=1
+    )
+
+    assert result["ok"] is False
+    assert result["error_code"] == "COMMIT_FAILED"
+    sync.assert_awaited_once()
+    restore_mock.assert_awaited_once()
+    assert gateway_runtime.gateway_provider_transaction_lock.locked() is False
+
+
+@pytest.mark.asyncio
 async def test_probe_action_pipeline_replaces_mask_and_encrypts_chat_secret(action_db) -> None:
     async def preview(_ctx, args):  # noqa: ANN001
         assert args["api_key"] == "sk-real-secret-value-from-chat"

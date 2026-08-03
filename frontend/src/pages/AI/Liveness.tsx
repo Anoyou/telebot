@@ -55,6 +55,7 @@ import {
   livenessStatusTone,
 } from "@/lib/livenessStatus";
 import { cn } from "@/lib/utils";
+import { executionBackendLabel, isGatewayBackend } from "@/lib/providerExecutionBackend";
 
 const DEFAULT_MESSAGE = "你怎么又不行啦？";
 const DEFAULT_SYSTEM_PROMPT =
@@ -163,6 +164,7 @@ const IDENTITY_LABELS: Record<string, string> = {
   claude_code: "Claude Code CLI",
   claude_desktop: "Claude Code CLI（旧 Desktop 配置）",
   grok_cli: "Grok CLI",
+  gateway_managed: "由 Gateway 管理",
 };
 
 function identityLabel(value?: string | null): string {
@@ -254,6 +256,7 @@ function ChatResponseBranch({
   const [identity, setIdentity] = useState<LLMClientIdentityProfile>(
     (result.client_identity_profile as LLMClientIdentityProfile) || "auto",
   );
+  const gatewayResult = isGatewayBackend(result.execution_backend);
 
   useEffect(() => {
     if (result.pending || result.ok) setExpanded(true);
@@ -345,7 +348,7 @@ function ChatResponseBranch({
           <MetaBadge tone="outline">已回退完整响应</MetaBadge>
         ) : null}
         {result.effective_api_format ? (
-          result.ok || result.pending ? (
+          result.ok || result.pending || gatewayResult ? (
             <MetaBadge tone="outline">协议 {protocolLabel(result.effective_api_format)}</MetaBadge>
           ) : (
             <button
@@ -358,7 +361,9 @@ function ChatResponseBranch({
             </button>
           )
         ) : null}
-        {result.client_identity_profile ? (
+        {gatewayResult ? (
+          <MetaBadge tone="info">客户端 由 Gateway 管理</MetaBadge>
+        ) : result.client_identity_profile ? (
           result.ok || result.pending ? (
             <MetaBadge tone="info">客户端 {identityLabel(result.client_identity_profile)}</MetaBadge>
           ) : (
@@ -371,6 +376,17 @@ function ChatResponseBranch({
               <MetaBadge tone="info">客户端 {identityLabel(result.client_identity_profile)}</MetaBadge>
             </button>
           )
+        ) : null}
+        {result.execution_backend ? (
+          <MetaBadge
+            mono
+            tone={isGatewayBackend(result.execution_backend) ? "info" : "neutral"}
+            title={isGatewayBackend(result.execution_backend)
+              ? [result.gateway_version, result.gateway_stage, result.gateway_request_id].filter(Boolean).join(" · ") || "实际通过内置 Gateway 调用"
+              : "实际通过直接 API 调用"}
+          >
+            实际后端 {executionBackendLabel(result.execution_backend)}
+          </MetaBadge>
         ) : null}
       </div>
 
@@ -406,6 +422,12 @@ function ChatResponseBranch({
             <span className="min-w-0 break-words">{result.error || "没有拿到可展示文本。"}</span>
           </div>
           <div className="mt-3 border-t pt-3">
+            {gatewayResult ? (
+              <p className="text-xs leading-5 text-muted-foreground">
+                Gateway 固定使用 Responses，客户端身份由 Gateway 管理；请到 Provider 配置或系统状态中排查。
+              </p>
+            ) : (
+              <>
             <Button
               type="button"
               variant="ghost"
@@ -447,6 +469,8 @@ function ChatResponseBranch({
                 </p>
               </div>
             ) : null}
+              </>
+            )}
           </div>
         </>
       ) : null}
@@ -794,6 +818,10 @@ export function LLMLivenessPage() {
               streaming: true,
               effective_api_format: event.effective_api_format,
               client_identity_profile: event.client_identity_profile,
+              execution_backend: event.execution_backend,
+              gateway_version: event.gateway_version,
+              gateway_request_id: event.gateway_request_id,
+              gateway_stage: event.gateway_stage,
             }));
             return;
           }
@@ -893,6 +921,10 @@ export function LLMLivenessPage() {
               streaming: true,
               effective_api_format: event.effective_api_format,
               client_identity_profile: event.client_identity_profile,
+              execution_backend: event.execution_backend,
+              gateway_version: event.gateway_version,
+              gateway_request_id: event.gateway_request_id,
+              gateway_stage: event.gateway_stage,
             }));
             return;
           }

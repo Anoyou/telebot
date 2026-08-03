@@ -193,10 +193,14 @@ def _looks_like_client_rejection(body_lower: str) -> bool:
 
 
 def _looks_like_model_missing(body_lower: str) -> bool:
-    return (
+    english_hint = (
         "model" in body_lower
         and ("not found" in body_lower or "does not exist" in body_lower or "no such model" in body_lower)
     )
+    chinese_hint = "模型" in body_lower and any(
+        hint in body_lower for hint in ("不存在", "未找到", "无此模型", "不支持所选模型")
+    )
+    return english_hint or chinese_hint
 
 
 def classify_status_code(status_code: int, body: str | Mapping[str, Any]) -> str:

@@ -41,6 +41,10 @@ def _device_view(row: DeviceProfile) -> dict[str, Any]:
     return DeviceProfileOut.model_validate(row).model_dump(mode="json")
 
 
+def _mark_gateway_candidate_sync(ctx: ToolContext) -> None:
+    ctx.gateway_candidate_sync = True
+
+
 def _parse_proxy_args(args: dict[str, Any]) -> dict[str, Any]:
     data = dict(args)
     raw_host = str(data.get("host") or data.get("url") or "").strip()
@@ -243,15 +247,22 @@ async def save_proxy_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[str
             .scalars()
             .all()
         )
-        provider_ids = list(
+        provider_rows = list(
             (
                 await ctx.db.execute(
-                    select(LLMProvider.id).where(LLMProvider.proxy_id == int(proxy_id))
+                    select(LLMProvider.id, LLMProvider.execution_backend).where(
+                        LLMProvider.proxy_id == int(proxy_id)
+                    )
                 )
-            )
-            .scalars()
-            .all()
+            ).all()
         )
+        provider_ids = [int(item[0]) for item in provider_rows]
+        if provider_ids and row.type == "mtproxy":
+            raise ValueError(
+                "被 LLM Provider 引用的代理不能改为 MTProxy；请先解除引用或使用 HTTP/SOCKS5"
+            )
+        if any(str(item[1] or "direct") == "codex_gateway" for item in provider_rows):
+            _mark_gateway_candidate_sync(ctx)
         if ctx.action is not None:
             stored = dict(ctx.action.arguments or {})
             stored["reload_account_ids"] = [int(value) for value in account_ids]

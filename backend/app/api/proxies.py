@@ -172,67 +172,108 @@ async def get_proxy(pid: int, db: DBSession, _user: CurrentUser) -> ProxyOut:
 
 @router.patch("/{pid}", response_model=ProxyOut)
 async def patch_proxy(pid: int, payload: ProxyUpdate, db: DBSession, user: CurrentUser) -> ProxyOut:
-    p = await db.get(Proxy, pid)
-    if not p:
-        raise _err("NOT_FOUND", "代理不存在", 404)
-    parsed = _parse_proxy_url(payload.host) if payload.host is not None else None
-    if parsed is not None:
-        p.type = str(parsed.get("type", p.type))
-        p.host = str(parsed["host"])
-        if "port" in parsed:
-            p.port = int(parsed["port"])
-        if "username" in parsed and "username" not in payload.model_fields_set:
-            p.username = str(parsed["username"]) or None
-        if "password" in parsed and "password" not in payload.model_fields_set:
-            p.password_enc = encrypt_str(str(parsed["password"]))
-    if payload.type is not None and parsed is None:
-        _validate_type(payload.type)
-        p.type = payload.type
-    if payload.host is not None and parsed is None:
-        p.host = payload.host
-    if payload.port is not None and not (parsed is not None and "port" in parsed):
-        if payload.port <= 0 or payload.port > 65535:
-            raise _err("INVALID_PORT", "端口范围必须是 1-65535")
-        p.port = payload.port
-    if payload.username is not None:
-        p.username = payload.username or None
-    if payload.clear_password:
-        p.password_enc = None
-    elif payload.password is not None and payload.password != "":
-        p.password_enc = encrypt_str(payload.password)
-    await db.commit()
-    await audit.write(db, user.id, "update_proxy", target=str(pid))
-    await db.commit()
+    from ..services.gateway_runtime import (
+        gateway_configuration_transaction,
+        gateway_provider_uses_proxy,
+        llm_provider_uses_proxy,
+        reconcile_gateway_runtime_from_session,
+        rollback_and_restore_gateway,
+    )
+
+    gateway_changed = False
+    async with gateway_configuration_transaction(db):
+        try:
+            p = await db.get(Proxy, pid)
+            if not p:
+                raise _err("NOT_FOUND", "代理不存在", 404)
+            await db.refresh(p)
+            gateway_changed = await gateway_provider_uses_proxy(db, pid)
+            llm_referenced = await llm_provider_uses_proxy(db, pid)
+            parsed = _parse_proxy_url(payload.host) if payload.host is not None else None
+            if parsed is not None:
+                p.type = str(parsed.get("type", p.type))
+                p.host = str(parsed["host"])
+                if "port" in parsed:
+                    p.port = int(parsed["port"])
+                if "username" in parsed and "username" not in payload.model_fields_set:
+                    p.username = str(parsed["username"]) or None
+                if "password" in parsed and "password" not in payload.model_fields_set:
+                    p.password_enc = encrypt_str(str(parsed["password"]))
+            if payload.type is not None and parsed is None:
+                _validate_type(payload.type)
+                p.type = payload.type
+            if payload.host is not None and parsed is None:
+                p.host = payload.host
+            if payload.port is not None and not (parsed is not None and "port" in parsed):
+                if payload.port <= 0 or payload.port > 65535:
+                    raise _err("INVALID_PORT", "端口范围必须是 1-65535")
+                p.port = payload.port
+            if payload.username is not None:
+                p.username = payload.username or None
+            if payload.clear_password:
+                p.password_enc = None
+            elif payload.password is not None and payload.password != "":
+                p.password_enc = encrypt_str(payload.password)
+            if llm_referenced and p.type == "mtproxy":
+                raise _err(
+                    "LLM_PROXY_TYPE_INVALID",
+                    "被 LLM Provider 引用的代理不能改为 MTProxy；请先解除引用或使用 HTTP/SOCKS5",
+                    409,
+                )
+            await db.flush()
+            await audit.write(db, user.id, "update_proxy", target=str(pid))
+            if gateway_changed:
+                status_out = await reconcile_gateway_runtime_from_session(db)
+                if status_out.state == "degraded":
+                    raise _err(
+                        "LLM_GATEWAY_UNAVAILABLE",
+                        status_out.error or "内置 Gateway 配置同步失败",
+                        422,
+                    )
+            await db.commit()
+        except BaseException:
+            if gateway_changed:
+                await rollback_and_restore_gateway(db)
+            else:
+                await db.rollback()
+            raise
     return _to_out(p)
 
 
 @router.delete("/{pid}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_proxy(pid: int, db: DBSession, user: CurrentUser) -> None:
-    p = await db.get(Proxy, pid)
-    if not p:
-        raise _err("NOT_FOUND", "代理不存在", 404)
-    # 被账号引用就拒删；也告诉用户被哪些 LLM 引用，方便他先去解绑
-    used_acc = (await db.execute(
-        select(Account.id).where(Account.proxy_id == pid).limit(3)
-    )).scalars().all()
-    used_llm = (await db.execute(
-        select(LLMProvider.id).where(LLMProvider.proxy_id == pid).limit(3)
-    )).scalars().all()
-    if used_acc or used_llm:
-        parts = []
-        if used_acc:
-            parts.append(f"账号 #{','.join(str(i) for i in used_acc)}")
-        if used_llm:
-            parts.append(f"LLM provider #{','.join(str(i) for i in used_llm)}")
-        raise _err(
-            "PROXY_IN_USE",
-            f"代理被 {' / '.join(parts)} 使用中，无法删除（先去那里改换代理）",
-            409,
-        )
-    await db.delete(p)
-    await db.commit()
-    await audit.write(db, user.id, "delete_proxy", target=str(pid))
-    await db.commit()
+    from ..services.gateway_runtime import gateway_configuration_transaction
+
+    async with gateway_configuration_transaction(db):
+        try:
+            p = await db.get(Proxy, pid)
+            if not p:
+                raise _err("NOT_FOUND", "代理不存在", 404)
+            await db.refresh(p)
+            # 被账号引用就拒删；也告诉用户被哪些 LLM 引用，方便他先去解绑
+            used_acc = (await db.execute(
+                select(Account.id).where(Account.proxy_id == pid).limit(3)
+            )).scalars().all()
+            used_llm = (await db.execute(
+                select(LLMProvider.id).where(LLMProvider.proxy_id == pid).limit(3)
+            )).scalars().all()
+            if used_acc or used_llm:
+                parts = []
+                if used_acc:
+                    parts.append(f"账号 #{','.join(str(i) for i in used_acc)}")
+                if used_llm:
+                    parts.append(f"LLM provider #{','.join(str(i) for i in used_llm)}")
+                raise _err(
+                    "PROXY_IN_USE",
+                    f"代理被 {' / '.join(parts)} 使用中，无法删除（先去那里改换代理）",
+                    409,
+                )
+            await db.delete(p)
+            await audit.write(db, user.id, "delete_proxy", target=str(pid))
+            await db.commit()
+        except BaseException:
+            await db.rollback()
+            raise
     # 清掉探测缓存，避免下次同 id 的代理（理论不会复用 id 但保险起见）拿到旧数据
     await proxy_probe_cache.clear_probe(pid)
 

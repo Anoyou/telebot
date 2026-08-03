@@ -139,6 +139,11 @@ func (h *Handler) responses(w http.ResponseWriter, r *http.Request) {
 		}
 		final, err := aggregateSSE(response.Body, route.UpstreamModel, model)
 		if err != nil {
+			var failed *upstreamEventFailure
+			if errors.As(err, &failed) {
+				writeError(w, http.StatusBadGateway, diagnostics.FromUpstream(http.StatusBadGateway, failed.body, requestID(r), routeSecretValues(route)...))
+				return
+			}
 			writeError(w, http.StatusBadGateway, contract.GatewayError{Code: "invalid_response", Message: err.Error(), RequestID: requestID(r), GatewayStage: "response"})
 			return
 		}
@@ -271,8 +276,9 @@ func compatibilityHeadersForRequest(route routing.Route, r *http.Request) (map[s
 }
 
 func routeSecretValues(route routing.Route) []string {
-	values := make([]string, 0, len(route.CompatibilityHeaders)+2)
-	values = append(values, route.APIKey, route.ProxyURL)
+	values := make([]string, 0, len(route.CompatibilityHeaders)+len(route.ModelsEndpoints)+3)
+	values = append(values, route.APIKey, route.ProxyURL, route.BaseURL)
+	values = append(values, route.ModelsEndpoints...)
 	for _, value := range route.CompatibilityHeaders {
 		values = append(values, value)
 	}
@@ -287,7 +293,9 @@ func writeUpstreamRequestError(w http.ResponseWriter, r *http.Request, err error
 		writeError(w, http.StatusGatewayTimeout, contract.GatewayError{Code: "timeout", Message: "Upstream request timed out", Retryable: true, RequestID: requestID(r), GatewayStage: "upstream"})
 		return
 	}
-	writeError(w, http.StatusBadGateway, contract.GatewayError{Code: "network_error", Message: security.RedactKnown(err.Error(), routeSecretValues(route)...), Retryable: true, RequestID: requestID(r), GatewayStage: "upstream"})
+	// net/http 的错误字符串通常带完整目标 URL。该 URL 可能包含租户路径或
+	// query，不能进入 API、usage 或 UI；具体异常只留在不含请求目标的稳定码中。
+	writeError(w, http.StatusBadGateway, contract.GatewayError{Code: "network_error", Message: "Upstream network request failed", Retryable: true, RequestID: requestID(r), GatewayStage: "upstream"})
 }
 
 func normalizedUpstreamStatus(status int) int {
@@ -312,6 +320,9 @@ func doUpstreamRequest(client *http.Client, request *http.Request, downstream co
 func httpClient(route routing.Route) *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.DialContext = (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext
+	// 未显式选择 Provider 代理时必须直连，不能继承 Web/Gateway 进程的
+	// HTTP_PROXY/HTTPS_PROXY 环境，否则凭据和请求体可能被送往非预期代理。
+	transport.Proxy = nil
 	if route.ProxyURL != "" {
 		if parsed, err := url.Parse(route.ProxyURL); err == nil {
 			transport.Proxy = http.ProxyURL(parsed)
@@ -369,7 +380,12 @@ func aggregateSSE(reader io.Reader, upstreamModel, publicModel string) (json.Raw
 		}
 		typeName, _ := event["type"].(string)
 		if typeName == "response.failed" {
-			return nil, errors.New("upstream stream ended with response.failed")
+			failure := any(event)
+			if response, ok := event["response"]; ok {
+				failure = response
+			}
+			body, _ := json.Marshal(failure)
+			return nil, &upstreamEventFailure{body: body}
 		}
 		if typeName == "response.completed" || typeName == "response.incomplete" {
 			response, ok := event["response"]
@@ -386,6 +402,14 @@ func aggregateSSE(reader io.Reader, upstreamModel, publicModel string) (json.Raw
 		return nil, errors.New("upstream SSE ended without a terminal response")
 	}
 	return restoreModel(terminal, upstreamModel, publicModel), nil
+}
+
+type upstreamEventFailure struct {
+	body []byte
+}
+
+func (failure *upstreamEventFailure) Error() string {
+	return "upstream stream ended with response.failed"
 }
 
 func restoreModel(body []byte, upstreamModel, publicModel string) []byte {

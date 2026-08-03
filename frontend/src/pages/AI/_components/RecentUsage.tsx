@@ -9,6 +9,7 @@ import type { LLMUsageRecord } from "@/api/llmUsage";
 import { listLLMProviders } from "@/api/commands";
 import { getErrMsg } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { executionBackendLabel, isGatewayBackend } from "@/lib/providerExecutionBackend";
 import { Spinner } from "@/components/ui/misc";
 import { Button } from "@/components/ui/button";
 import { MetaBadge } from "@/components/ui/meta-badge";
@@ -213,7 +214,7 @@ export function RecentUsageContent() {
         ) : (
           <>
           <div className="hidden overflow-x-auto md:block">
-            <Table className="min-w-[1040px]">
+            <Table className="min-w-[1140px]">
               <TableHeader>
                 <TableRow>
                   <TableHead>时间</TableHead>
@@ -221,6 +222,7 @@ export function RecentUsageContent() {
                   <TableHead>模型提供商</TableHead>
                   <TableHead>模型</TableHead>
                   <TableHead>客户端</TableHead>
+                  <TableHead>实际后端</TableHead>
                   <TableHead>Token</TableHead>
                   <TableHead>耗时</TableHead>
                   <TableHead>结果</TableHead>
@@ -245,7 +247,12 @@ export function RecentUsageContent() {
                         </TableCell>
                         <TableCell>{r.provider_name || (r.provider_id ? `#${r.provider_id}` : "-")}</TableCell>
                         <TableCell className="font-mono text-xs">{r.model || "-"}</TableCell>
-                        <TableCell>{clientIdentityLabel(r.client_identity_profile)}</TableCell>
+                        <TableCell>{isGatewayBackend(r.execution_backend) ? "由 Gateway 管理" : clientIdentityLabel(r.client_identity_profile)}</TableCell>
+                        <TableCell>
+                          <MetaBadge mono tone={isGatewayBackend(r.execution_backend) ? "info" : "neutral"}>
+                            {executionBackendLabel(r.execution_backend, "未记录")}
+                          </MetaBadge>
+                        </TableCell>
                         <TableCell>{tokens}</TableCell>
                         <TableCell>{r.latency_ms != null ? `${r.latency_ms}ms` : "-"}</TableCell>
                         <TableCell>
@@ -273,7 +280,7 @@ export function RecentUsageContent() {
                       </TableRow>
                       {expanded ? (
                         <TableRow>
-                          <TableCell colSpan={11} className="bg-muted/25 p-0">
+                          <TableCell colSpan={12} className="bg-muted/25 p-0">
                             <UsageDetailPanel record={r} />
                           </TableCell>
                         </TableRow>
@@ -335,7 +342,10 @@ function UsageRecordCard({
         </div>
         <div className="mt-3 flex items-center justify-between gap-2">
           <div className="flex flex-wrap gap-1.5">
-            <MetaBadge tone="info">客户端 {clientIdentityLabel(record.client_identity_profile)}</MetaBadge>
+            <MetaBadge tone="info">客户端 {isGatewayBackend(record.execution_backend) ? "由 Gateway 管理" : clientIdentityLabel(record.client_identity_profile)}</MetaBadge>
+            <MetaBadge mono tone={isGatewayBackend(record.execution_backend) ? "info" : "neutral"}>
+              实际后端 {executionBackendLabel(record.execution_backend, "未记录")}
+            </MetaBadge>
             {record.used_fallback ? <MetaBadge tone="outline">已 Fallback</MetaBadge> : null}
             {record.error_type ? <MetaBadge tone="warn">{usageErrorLabel(record.error_type)}</MetaBadge> : null}
           </div>
@@ -361,9 +371,17 @@ function UsageDetailPanel({ record }: { record: LLMUsageRecord }) {
         <InfoCell label="调用来源" value={usageSourceLabel(record.source)} />
         <InfoCell label="账号" value={record.account_id == null ? "-" : `#${record.account_id}`} />
         <InfoCell label="模型提供商" value={record.provider_name || (record.provider_id ? `#${record.provider_id}` : "-")} />
-        <InfoCell label="客户端" value={clientIdentityLabel(record.client_identity_profile)} />
+        <InfoCell label="客户端" value={isGatewayBackend(record.execution_backend) ? "由 Gateway 管理" : clientIdentityLabel(record.client_identity_profile)} />
+        <InfoCell label="实际后端" value={executionBackendLabel(record.execution_backend, "未记录")} />
         <InfoCell label="Token" value={`${record.input_tokens || 0} 输入 / ${record.output_tokens || 0} 输出`} />
       </div>
+      {isGatewayBackend(record.execution_backend) ? (
+        <div className="grid gap-2 text-xs sm:grid-cols-3">
+          <InfoCell label="Gateway 版本" value={record.gateway_version || "未记录"} />
+          <InfoCell label="Gateway 阶段" value={record.gateway_stage || "未记录"} />
+          <InfoCell label="Gateway Request ID" value={record.gateway_request_id || "未记录"} />
+        </div>
+      ) : null}
       <div className="grid gap-3 lg:grid-cols-2">
         <PreviewBlock title="请求预览" text={record.request_preview} empty="这条历史调用没有保存请求预览；更新后产生的新调用会显示截断脱敏内容。" />
         <PreviewBlock

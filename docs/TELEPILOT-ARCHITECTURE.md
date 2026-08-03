@@ -12,6 +12,7 @@
 - `Account Worker`：每个账号一个独立执行单元，处理 Telegram 消息、插件分发、定时任务。
 - `Plugin Runtime / Plugin API`：插件执行容器，按 manifest/config_schema 和运行时上下文执行插件逻辑；代码层 API 仍叫 `Plugin`。
 - `LLM Providers`：由插件或 AI 指令模板调用的外部大模型服务。
+- `Embedded Codex Gateway`：Web 按需管理的独立 Go 传输子进程，通过 Unix Socket 承载选择 Gateway 的 Responses Provider；不拥有 Agent、重试、预算或 fallback 决策。
 - `System Agent Runtime`：全局悬浮助手与管理 Bot 共用的受限 Agent 循环；通过 Durable Run 持久化运行事件并调用现有业务 service。
 - `Account Bot Manager`：管理每账号可选的控制 Bot polling runtime，用于授权用户的远程运维入口。
 - `Interaction Bot Manager`：管理群消息、关键词、按钮、付款确认和交互会话使用的 Bot polling runtime。

@@ -7,12 +7,13 @@ import hashlib
 import json
 import logging
 import os
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from ..crypto import decrypt_str
 from ..db.base import AsyncSessionLocal
@@ -32,6 +33,7 @@ log = logging.getLogger(__name__)
 GATEWAY_PROTOCOL_VERSION = "2"
 DEFAULT_GATEWAY_BINARY = "/usr/local/bin/telepilot-gateway"
 DEFAULT_GATEWAY_SOCKET = "/run/telepilot/gateway.sock"
+GATEWAY_CONFIGURATION_ADVISORY_LOCK_KEY = 730140131
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +56,7 @@ class GatewayRuntimeManager:
         self._process: asyncio.subprocess.Process | None = None
         self._watch_task: asyncio.Task[None] | None = None
         self._log_task: asyncio.Task[None] | None = None
+        self._db_recovery_task: asyncio.Task[None] | None = None
         self._desired: list[LLMProviderDTO] = []
         self._revision = 0
         self._snapshot_fingerprint = ""
@@ -62,17 +65,25 @@ class GatewayRuntimeManager:
         self._error: str | None = None
         self._closing = False
 
-    async def reconcile(self, providers: list[LLMProviderDTO]) -> GatewayRuntimeStatus:
+    async def reconcile(
+        self,
+        providers: list[LLMProviderDTO],
+        *,
+        recover_on_failure: bool = True,
+    ) -> GatewayRuntimeStatus:
         desired = [provider for provider in providers if provider.execution_backend == "codex_gateway"]
         async with self._lock:
             self._desired = desired
             if not desired:
+                self._cancel_db_recovery_locked()
                 await self._stop_locked()
                 self._state = "not_required"
                 self._error = None
                 return self.status()
             if self._process is None or self._process.returncode is not None:
                 if not await self._start_locked():
+                    if recover_on_failure:
+                        self._schedule_db_recovery_locked()
                     return self.status()
             try:
                 await self._sync_locked(desired)
@@ -80,12 +91,38 @@ class GatewayRuntimeManager:
                 self._state = "degraded"
                 self._error = redact_text(f"{type(exc).__name__}: {exc}")[:300]
                 log.warning("Gateway 配置同步失败：%s", self._error)
+                # 配置 PUT 的结果未知时必须 fail closed，避免继续使用候选或旧快照。
+                await self._stop_locked()
+                if recover_on_failure:
+                    self._schedule_db_recovery_locked()
+            else:
+                self._cancel_db_recovery_locked()
             return self.status()
 
-    async def reconcile_from_db(self) -> GatewayRuntimeStatus:
-        async with AsyncSessionLocal() as db:
-            rows = list((await db.execute(select(LLMProvider).order_by(LLMProvider.id))).scalars().all())
-        return await self.reconcile([LLMProviderDTO.from_orm_row(row) for row in rows])
+    async def reconcile_from_session(
+        self,
+        db: Any,
+        *,
+        recover_on_failure: bool = False,
+    ) -> GatewayRuntimeStatus:
+        """使用当前事务可见的 Provider 集合，在 commit 前同步候选快照。"""
+
+        rows = list((await db.execute(select(LLMProvider).order_by(LLMProvider.id))).scalars().all())
+        return await self.reconcile(
+            await self._provider_dtos(db, rows),
+            recover_on_failure=recover_on_failure,
+        )
+
+    async def _provider_dtos(self, db: Any, rows: list[LLMProvider]) -> list[LLMProviderDTO]:
+        from .llm_proxy_service import resolve_proxy_url
+
+        providers: list[LLMProviderDTO] = []
+        for row in rows:
+            provider = LLMProviderDTO.from_orm_row(row)
+            if provider.execution_backend == "codex_gateway":
+                provider.proxy_url = await resolve_proxy_url(db, getattr(row, "proxy_id", None))
+            providers.append(provider)
+        return providers
 
     async def preflight(self) -> GatewayRuntimeStatus:
         """保存 Gateway Provider 前验证二进制与协议版本，不写入任何配置。"""
@@ -93,12 +130,27 @@ class GatewayRuntimeManager:
         async with self._lock:
             if self._process is None or self._process.returncode is not None:
                 await self._start_locked()
-            return self.status()
+            status = self.status()
+            if self._process is not None and self._process.returncode is None and self._version:
+                return GatewayRuntimeStatus(
+                    state="ready",
+                    required=status.required,
+                    revision=status.revision,
+                    provider_count=status.provider_count,
+                    version=status.version,
+                )
+            return status
+
+    def validate_provider_configuration(self, provider: LLMProviderDTO) -> None:
+        """提交事务前复用真实快照构造规则校验单个候选 Provider。"""
+
+        self._build_snapshot([provider])
 
     async def shutdown(self) -> None:
         self._closing = True
         async with self._lock:
             self._desired = []
+            self._cancel_db_recovery_locked()
             await self._stop_locked()
             self._state = "not_required"
 
@@ -111,6 +163,16 @@ class GatewayRuntimeManager:
             version=self._version,
             error=self._error,
         )
+
+    async def mark_control_plane_degraded(self, error: Exception) -> None:
+        """DB/控制面暂不可用时公开 degraded，避免把未知状态误报为无需启动。"""
+
+        async with self._lock:
+            self._state = "degraded"
+            self._error = redact_text(f"Gateway 配置读取失败：{type(error).__name__}: {error}")[:300]
+            if self._desired:
+                await self._stop_locked()
+            self._schedule_db_recovery_locked()
 
     async def _start_locked(self) -> bool:
         binary_path = Path(self.binary)
@@ -240,19 +302,43 @@ class GatewayRuntimeManager:
         return_code = await process.wait()
         if self._closing:
             return
-        self._state = "degraded"
-        self._error = f"Gateway 意外退出（code={return_code}）"
+        async with self._lock:
+            self._state = "degraded"
+            self._error = f"Gateway 意外退出（code={return_code}）"
+            self._process = None
+            self._snapshot_fingerprint = ""
+            self._schedule_db_recovery_locked()
+
+    def _schedule_db_recovery_locked(self) -> None:
+        if self._closing:
+            return
+        if self._db_recovery_task is not None and not self._db_recovery_task.done():
+            return
+        self._db_recovery_task = asyncio.create_task(
+            self._recover_from_db(),
+            name="recover-gateway-from-db",
+        )
+
+    def _cancel_db_recovery_locked(self) -> None:
+        task = self._db_recovery_task
+        if task is not None and task is not asyncio.current_task():
+            task.cancel()
+        self._db_recovery_task = None
+
+    async def _recover_from_db(self) -> None:
         delay = 0.5
-        while self._desired and not self._closing:
+        while not self._closing:
             await asyncio.sleep(delay)
-            async with self._lock:
-                if await self._start_locked():
-                    try:
-                        self._snapshot_fingerprint = ""
-                        await self._sync_locked(self._desired)
-                        return
-                    except Exception as exc:  # noqa: BLE001
-                        self._error = redact_text(str(exc))[:300]
+            try:
+                status = await reconcile_gateway_runtime()
+                if status.state != "degraded":
+                    return
+            except Exception as exc:  # noqa: BLE001
+                async with self._lock:
+                    self._state = "degraded"
+                    self._error = redact_text(
+                        f"Gateway 配置读取失败：{type(exc).__name__}: {exc}"
+                    )[:300]
             delay = min(delay * 2, 30.0)
 
     async def _consume_logs(self, process: asyncio.subprocess.Process) -> None:
@@ -288,7 +374,126 @@ class GatewayRuntimeManager:
 
 
 gateway_runtime_manager = GatewayRuntimeManager()
+gateway_provider_transaction_lock = asyncio.Lock()
+
+
+async def acquire_gateway_configuration_db_lock(db: Any) -> None:
+    """跨 Web/System Agent 进程串行化 Gateway 配置事务。"""
+
+    get_bind = getattr(db, "get_bind", None)
+    if not callable(get_bind):
+        return
+    bind = get_bind()
+    dialect_name = str(getattr(getattr(bind, "dialect", None), "name", ""))
+    if dialect_name != "postgresql":
+        return
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(:lock_key)"),
+        {"lock_key": GATEWAY_CONFIGURATION_ADVISORY_LOCK_KEY},
+    )
+
+
+@asynccontextmanager
+async def gateway_configuration_transaction(db: Any, *, enabled: bool = True):
+    """持有进程锁与 PostgreSQL 事务锁，直到调用方 commit/rollback 完成。"""
+
+    if not enabled:
+        yield
+        return
+    await gateway_provider_transaction_lock.acquire()
+    try:
+        await acquire_gateway_configuration_db_lock(db)
+        yield
+    finally:
+        gateway_provider_transaction_lock.release()
+
+
+async def gateway_provider_uses_proxy(db: Any, proxy_id: int) -> bool:
+    row = await db.execute(
+        select(LLMProvider.id)
+        .where(
+            LLMProvider.proxy_id == proxy_id,
+            LLMProvider.execution_backend == "codex_gateway",
+        )
+        .limit(1)
+    )
+    return row.scalar_one_or_none() is not None
+
+
+async def llm_provider_uses_proxy(db: Any, proxy_id: int) -> bool:
+    row = await db.execute(
+        select(LLMProvider.id).where(LLMProvider.proxy_id == proxy_id).limit(1)
+    )
+    return row.scalar_one_or_none() is not None
+
+
+async def restore_committed_gateway_snapshot() -> GatewayRuntimeStatus:
+    """在新的锁事务内读取已提交真相源，避免补偿覆盖并发提交。"""
+
+    async with AsyncSessionLocal() as restore_db:
+        await acquire_gateway_configuration_db_lock(restore_db)
+        try:
+            status = await gateway_runtime_manager.reconcile_from_session(
+                restore_db,
+                recover_on_failure=True,
+            )
+            await restore_db.commit()
+            return status
+        except BaseException:
+            await restore_db.rollback()
+            raise
+
+
+async def rollback_and_restore_gateway(db: Any) -> bool:
+    """回滚当前事务，并以已提交 DB 快照补偿 Gateway；失败时保持 degraded。"""
+
+    rollback_ok = True
+    try:
+        await db.rollback()
+    except BaseException:  # noqa: BLE001
+        rollback_ok = False
+        log.exception("Gateway 配置事务回滚失败，继续尝试恢复已提交快照")
+
+    restore_task = asyncio.create_task(
+        restore_committed_gateway_snapshot(),
+        name="restore-gateway-committed-snapshot",
+    )
+    try:
+        status = await asyncio.shield(restore_task)
+    except asyncio.CancelledError:
+        try:
+            status = await restore_task
+        except Exception:  # noqa: BLE001
+            log.exception("Gateway 配置事务取消后恢复已提交快照失败")
+            await gateway_runtime_manager.mark_control_plane_degraded(
+                RuntimeError("恢复已提交 Gateway 快照失败")
+            )
+            return False
+    except Exception as exc:  # noqa: BLE001
+        log.exception("Gateway 配置事务失败后恢复已提交快照失败")
+        await gateway_runtime_manager.mark_control_plane_degraded(exc)
+        return False
+
+    restored = status.state in {"ready", "not_required"}
+    if not restored:
+        log.error("Gateway 已提交快照恢复未就绪：state=%s", status.state)
+    return rollback_ok and restored
 
 
 async def reconcile_gateway_runtime() -> GatewayRuntimeStatus:
-    return await gateway_runtime_manager.reconcile_from_db()
+    async with AsyncSessionLocal() as db:
+        async with gateway_configuration_transaction(db):
+            try:
+                status = await gateway_runtime_manager.reconcile_from_session(
+                    db,
+                    recover_on_failure=True,
+                )
+                await db.commit()
+                return status
+            except BaseException:
+                await db.rollback()
+                raise
+
+
+async def reconcile_gateway_runtime_from_session(db: Any) -> GatewayRuntimeStatus:
+    return await gateway_runtime_manager.reconcile_from_session(db)

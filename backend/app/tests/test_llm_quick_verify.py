@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -488,6 +489,43 @@ async def test_fetch_models_preview_direct_disables_env_proxy_and_bounds_results
     assert len(response.ids) == 200
     assert response.ids[0] == "model-0"
     assert response.ids[-1] == "model-199"
+
+
+@pytest.mark.asyncio
+async def test_fetch_models_preview_gateway_uses_saved_gateway_transport(monkeypatch) -> None:
+    from app.services import llm_client
+
+    class FakeGatewayClient:
+        async def list_models(self):
+            return ["gpt-5.6-sol", "gpt-5.6-sol", "gpt-5.6-terra"]
+
+    row = SimpleNamespace(
+        id=7,
+        api_key_enc="encrypted-key",
+        request_headers_enc=None,
+        execution_backend="codex_gateway",
+    )
+    monkeypatch.setattr(commands_api, "_require_ai_enabled", AsyncMock(return_value=None))
+    monkeypatch.setattr(commands_api.command_service, "get_provider_row", AsyncMock(return_value=row))
+    monkeypatch.setattr(commands_api.audit, "write", AsyncMock(return_value=None))
+    monkeypatch.setattr(llm_client, "GatewayResponsesClient", FakeGatewayClient)
+    monkeypatch.setattr(llm_client, "build_client", lambda *_args, **_kwargs: FakeGatewayClient())
+    db = AsyncMock()
+
+    response = await commands_api.fetch_models_preview(
+        payload=FetchModelsPreviewRequest(
+            provider="openai",
+            api_format="responses",
+            protocol_profile="codex_responses",
+            execution_backend="codex_gateway",
+            pid=7,
+        ),
+        db=db,
+        user=AsyncMock(id=1),
+    )
+
+    assert response.ids == ["gpt-5.6-sol", "gpt-5.6-terra"]
+    db.commit.assert_awaited_once()
 
 
 def test_quick_verify_rejects_credentials_embedded_in_base_url() -> None:

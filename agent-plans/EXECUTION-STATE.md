@@ -23,7 +23,7 @@
 - [x] WP-C1 运行时管理与配置同步 — done（本提交）
 - [x] WP-C2 Provider schema 与 Client Builder — done（本提交）
 - [x] WP-C3 Agent、插件、测活与 usage 验收 — done
-- [ ] WP-C4 Provider UI、健康与文档 — pending
+- [x] WP-C4 Provider UI、健康与文档 — done（本提交）
 
 ---
 

@@ -3578,6 +3578,59 @@
         "title": "ClientIdentityVersionsUpdateRequest",
         "type": "object"
       },
+      "CodexGatewayStatus": {
+        "properties": {
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "provider_count": {
+            "default": 0,
+            "title": "Provider Count",
+            "type": "integer"
+          },
+          "required": {
+            "default": false,
+            "title": "Required",
+            "type": "boolean"
+          },
+          "revision": {
+            "default": 0,
+            "title": "Revision",
+            "type": "integer"
+          },
+          "state": {
+            "default": "not_required",
+            "enum": [
+              "not_required",
+              "ready",
+              "degraded"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          }
+        },
+        "title": "CodexGatewayStatus",
+        "type": "object"
+      },
       "CommandAliasCreate": {
         "description": "创建命令别名请求。",
         "properties": {
@@ -5986,6 +6039,15 @@
             ],
             "title": "Base Url"
           },
+          "execution_backend": {
+            "default": "direct",
+            "enum": [
+              "direct",
+              "codex_gateway"
+            ],
+            "title": "Execution Backend",
+            "type": "string"
+          },
           "pid": {
             "anyOf": [
               {
@@ -6414,6 +6476,9 @@
           "alembic": {
             "$ref": "#/components/schemas/AlembicStatus"
           },
+          "codex_gateway": {
+            "$ref": "#/components/schemas/CodexGatewayStatus"
+          },
           "db": {
             "$ref": "#/components/schemas/DbStatus"
           },
@@ -6436,7 +6501,8 @@
           "redis",
           "providers",
           "proxies",
-          "workers"
+          "workers",
+          "codex_gateway"
         ],
         "title": "HealthOverview",
         "type": "object"
@@ -17066,7 +17132,7 @@
   },
   "info": {
     "title": "TelePilot",
-    "version": "0.90.0-beta.1"
+    "version": "0.91.0-beta.1"
   },
   "openapi": "3.1.0",
   "paths": {

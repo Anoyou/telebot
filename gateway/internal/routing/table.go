@@ -1,6 +1,7 @@
 package routing
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/url"
@@ -62,7 +63,7 @@ func NewTable(snapshot contract.ConfigSnapshot) (*Table, error) {
 				upstream = model
 			}
 			modelRoutes[model] = Route{
-				ProviderID: provider.ID, InternalModel: fmt.Sprintf("tp_%d/%s", provider.ID, model), UpstreamModel: upstream,
+				ProviderID: provider.ID, InternalModel: fmt.Sprintf("tp_%d/%s", provider.ID, base64.RawURLEncoding.EncodeToString([]byte(model))), UpstreamModel: upstream,
 				BaseURL: strings.TrimRight(provider.BaseURL, "/"), APIKey: provider.APIKey, ProxyURL: provider.ProxyURL,
 				TimeoutSeconds: provider.TimeoutSeconds, CompatibilityHeaders: cloneMap(provider.CompatibilityHeaders), MaxConcurrency: provider.MaxConcurrency,
 				LivenessCompatibilityHeaders: cloneMap(provider.LivenessCompatibilityHeaders),
@@ -127,8 +128,8 @@ func validateProvider(provider contract.ProviderConfig) error {
 	seen := make(map[string]struct{}, len(provider.Models))
 	for _, model := range provider.Models {
 		model = strings.TrimSpace(model)
-		if model == "" || strings.Contains(model, "/") {
-			return errors.New("model id is empty or contains reserved slash")
+		if model == "" {
+			return errors.New("model id is empty")
 		}
 		if _, ok := seen[model]; ok {
 			return fmt.Errorf("model %q is duplicated", model)

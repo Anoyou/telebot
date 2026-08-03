@@ -25,6 +25,36 @@
 
 ## [Unreleased]
 
+## [0.91.0-beta.1] - 2026-08-03 · minor（次版本预发布） · 内置 Codex Gateway 与全链路 Agent 接入
+
+### 新增
+
+- 新增独立 Go `telepilot-gateway`，通过权限收紧的 Unix Socket 按需启动，使用原子 Provider 快照、精确 Provider/模型路由和 Responses 数据面承载流式、非流式、reasoning、工具调用、工具结果回放、模型列表与取消。
+- Provider 新增「直接 API / 内置 Codex Gateway」执行后端；Gateway 模式固定 Responses/Codex 档案并由 Gateway 管理身份，切换后端时保留 API Key、代理、兼容请求头和已有客户端身份配置。
+- 系统健康新增 `not_required`、`ready`、`degraded` Gateway 状态；模型测活、完整巡检、Recent Usage 与 System Agent RunTrace 记录实际 backend、Gateway 版本、request ID 和阶段。
+- 生产 Web 镜像多阶段构建并内置 Gateway 静态二进制；新增 `make gateway-build`、`make gateway-test` 与 `make gateway-run` 开发入口，不新增 Compose 服务、端口、volume 或用户安装步骤。
+
+### 优化
+
+- 统一 LLM HTTP、流式、模型列表、协议探测、测活、Agent、插件和 usage 的错误事实，区分客户端受限、官方账号运行时要求、额度耗尽、Gateway 不可用、限流、超时、网络、协议和上游服务错误。
+- Gateway 失败后允许 TelePilot runtime 按既有策略切换其它 Provider，但不会在同一 Provider 内偷跑 direct；插件 Agent 成功切换后保持 Provider，避免后续工具轮次重复撞击已知故障路径。
+- Gateway Provider 的模型列表通过真实上游候选端点读取；推理、测活和模型列表兼容请求头按 scope 隔离。
+- Gateway Provider 与引用代理的 Web/System Agent 写入通过进程锁和 PostgreSQL 事务 advisory lock 串行同步候选快照；事务失败或取消后会在新锁事务内按已提交数据库补偿，模型列表更新也会立即刷新 Gateway 路由。
+
+### 安全
+
+- Gateway 凭据仅驻留内存，不读取或同步 Codex OAuth、账号身份、设备证明或 `~/.codex/auth.json`；日志、错误、usage 与 Trace 统一脱敏 API Key、Authorization、兼容头和代理信息。
+- Gateway 边界剥离内部请求头、拒绝回指 Socket 的转发环路和自动上游重定向，避免自定义鉴权头跨 origin 泄露；语音转写和图片生成明确拒绝 Gateway，不绕过 Unix Socket。
+- 未配置 Provider 代理时 Gateway 强制直连，不继承进程环境代理；网络错误使用稳定文案，不向 usage 或界面暴露上游 Base URL。
+
+### 文档
+
+- 新增内置 Codex Gateway 配置、健康、错误排查、部署升级、开发命令、System Agent 集成和安全边界文档，并同步 README、架构、生产部署、安全运维和开发指南。
+
+### 测试
+
+- 补充 Gateway 路由隔离、快照 revision、敏感日志、SSE/工具调用/取消、错误分类、fallback、usage 元数据、System Agent 与插件链路、Provider backend 切换和系统健康回归。
+
 ## [0.90.0-beta.1] - 2026-08-02 · minor（次版本预发布） · 插件受控识别与点击第三方 Bot 按钮
 
 ### 新增

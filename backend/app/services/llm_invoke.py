@@ -381,6 +381,9 @@ def _api_format_for_call(
     Default chat can stay on /chat/completions while web-search calls switch to
     /responses for OpenAI-compatible providers that support both protocols.
     """
+    if provider.execution_backend == "codex_gateway":
+        return LLM_API_FORMAT_RESPONSES
+
     if native_image:
         current = (provider.api_format or "").strip().lower()
         model = (override_model or provider.default_model or "").strip().lower()
