@@ -25,6 +25,16 @@
 
 ## [Unreleased]
 
+## [0.93.0-beta.4] - 2026-08-04 · patch（补丁预发布） · US Trace 父子落库顺序修复
+
+### 修复
+
+- 修复 beta.3 仍会在 US PostgreSQL 记录 `event_span_trace_id_fkey` 的根因：同一批新建的父 Trace 和子 Span/Action 没有 ORM relationship，SQLAlchemy 可能先 flush 子表；现在先显式 flush 新父 Trace，再在同一事务提交子记录，避免首次批量提交产生外键错误及后续 split retry。
+
+### 测试
+
+- 增加启用真实外键约束的 SQLAlchemy 回归测试，锁定同批写入顺序必须为 `event_trace → event_span`。
+
 ## [0.93.0-beta.3] - 2026-08-04 · patch（补丁预发布） · US Trace 写入竞态收口
 
 ### 修复

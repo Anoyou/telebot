@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import event, text
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from app.db.models.log import RuntimeLog
+from app.db.models.log import EventSpan, EventTrace, RuntimeLog
 from app.services import event_trace
 
 
@@ -43,6 +46,9 @@ async def test_start_trace_failure_writes_runtime_log(monkeypatch) -> None:
 
         def add(self, row):
             added.append(row)
+
+        async def flush(self):
+            return None
 
         async def commit(self):
             return None
@@ -91,6 +97,9 @@ async def test_start_trace_omits_native_raw_from_payload_snapshot_by_default(mon
 
         def add(self, row):
             added.append(row)
+
+        async def flush(self):
+            return None
 
         async def commit(self):
             return None
@@ -143,6 +152,9 @@ async def test_start_trace_persists_native_raw_when_enabled(monkeypatch) -> None
         def add(self, row):
             added.append(row)
 
+        async def flush(self):
+            return None
+
         async def commit(self):
             return None
 
@@ -187,6 +199,9 @@ async def test_trace_writes_are_buffered_until_flush(monkeypatch) -> None:
 
         def add(self, row):
             added.append(row)
+
+        async def flush(self):
+            return None
 
         async def commit(self):
             commits["count"] += 1
@@ -242,6 +257,9 @@ async def test_supplied_trace_id_is_deduped_in_batch(monkeypatch) -> None:
         def add(self, row):
             added.append(row)
 
+        async def flush(self):
+            return None
+
         async def commit(self):
             commits["count"] += 1
 
@@ -253,6 +271,67 @@ async def test_supplied_trace_id_is_deduped_in_batch(monkeypatch) -> None:
 
     assert [getattr(row, "trace_id", None) for row in added] == ["evt_same"]
     assert commits["count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_same_batch_flushes_new_trace_before_child_span(monkeypatch) -> None:
+    """同批新父子记录必须先落父 Trace，不能靠失败后的逐条重试补救。"""
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    insert_order: list[str] = []
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def _enable_foreign_keys(dbapi_connection, _connection_record) -> None:
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
+
+    @event.listens_for(engine.sync_engine, "before_cursor_execute")
+    def _capture_event_insert(
+        _connection,
+        _cursor,
+        statement,
+        _parameters,
+        _context,
+        _executemany,
+    ) -> None:
+        normalized = statement.lstrip().upper()
+        if normalized.startswith("INSERT INTO EVENT_"):
+            insert_order.append(statement.split()[2])
+
+    async with engine.begin() as connection:
+        await connection.execute(text("CREATE TABLE account (id BIGINT PRIMARY KEY)"))
+        await connection.run_sync(EventTrace.__table__.create)
+        await connection.run_sync(EventSpan.__table__.create)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    monkeypatch.setattr(event_trace, "AsyncSessionLocal", session_factory)
+    now = datetime.now(UTC)
+    trace = EventTrace(
+        id=1,
+        trace_id="evt_same_batch",
+        event_type="message",
+        status=event_trace.TRACE_STATUS_RUNNING,
+        started_at=now,
+    )
+    span = EventSpan(
+        id=1,
+        span_id="spn_same_batch",
+        trace_id=trace.trace_id,
+        phase="normalize",
+        status=event_trace.TRACE_STATUS_OK,
+        started_at=now,
+    )
+
+    try:
+        await event_trace._flush_trace_batch(
+            [
+                event_trace._TraceWrite(kind="trace", payload=trace),
+                event_trace._TraceWrite(kind="span", payload=span),
+            ]
+        )
+    finally:
+        await engine.dispose()
+
+    assert insert_order == ["event_trace", "event_span"]
 
 
 @pytest.mark.asyncio

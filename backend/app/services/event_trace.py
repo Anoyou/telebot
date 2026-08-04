@@ -734,6 +734,10 @@ async def _flush_trace_batch(batch: list[_TraceWrite], *, split_on_error: bool =
                 allowed_trace_ids = new_trace_ids | locked_trace_ids
                 for item in new_trace_items:
                     db.add(item.payload)
+                if new_trace_items:
+                    # 模型只声明了数据库外键，没有 ORM relationship；显式 flush
+                    # 确保同批 pending 的父 Trace 在任何 Span/Action 之前写入。
+                    await db.flush()
                 for item in ready_batch:
                     if item.kind == "trace":
                         continue
