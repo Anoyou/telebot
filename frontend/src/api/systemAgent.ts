@@ -152,6 +152,16 @@ export type SystemAgentStreamEvent = {
   delta?: string;
   message?: string;
   code?: string;
+  status_code?: number | null;
+  error_category?: string | null;
+  suggestion?: string | null;
+  upstream_status_code?: number | null;
+  upstream_error_code?: string | null;
+  upstream_error_message?: string | null;
+  upstream_error_detail?: string | null;
+  upstream_request_id?: string | null;
+  client_request_id?: string | null;
+  gateway_request_id?: string | null;
   tool_name?: string;
   call_id?: string;
   is_error?: boolean;

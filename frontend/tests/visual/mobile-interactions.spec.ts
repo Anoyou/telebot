@@ -224,6 +224,109 @@ test.describe("移动端交互细节", () => {
     fixture.assertClean();
   });
 
+  test("Codex Gateway 状态在桌面与 375px PWA 可完整阅读", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name === "tablet", "桌面与 375px PWA 视口已覆盖");
+    if (testInfo.project.name === "mobile") {
+      await page.setViewportSize({ width: 375, height: 812 });
+    }
+    const fixture = await installApiFixture(page);
+    const requestIds = [
+      "gw_very_long_safe_request_id_1234567890",
+      "80a1f4a9-0e88-4a6e-bd97-310a1fb144a7",
+      "53a17c9a-d53a-4df5-8509-13dc7ad36231",
+    ];
+    await page.route("**/api/system/health-overview", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          db: { ok: true },
+          redis: { ok: true },
+          alembic: { ok: true, pending: [] },
+          providers: { total: 1, with_api_key: 1 },
+          proxies: { total: 0, used_by_accounts: 0, used_by_llm: 0 },
+          workers: {
+            total: 0,
+            by_status: {},
+            runtime_total: 0,
+            runtime_alive: 0,
+            runtime_desired_running: 0,
+            runtime_desired_running_alive: 0,
+            runtime_failing: 0,
+          },
+          codex_gateway: {
+            state: "degraded",
+            required: true,
+            provider_count: 1,
+            revision: 42,
+            version: "0.1.0-alpha.1+telepilot.gateway.long-version",
+            protocol_version: "codex-responses-v1",
+            upstream_commit: "839616a1c0ffee1234567890abcdef1234567890",
+            build_commit: "46028ebc3d75deadbeef1234567890abcdef1234",
+            codex_client_version: "0.145.0",
+            codex_version_source: "builtin_default",
+            contract_review_date: "2026-08-04",
+            error: [
+              "上游 HTTP 400：Unsupported parameter: max_output_tokens",
+              `gateway_request_id=${requestIds[0]}`,
+              `upstream_request_id=${requestIds[1]}`,
+              `client_request_id=${requestIds[2]}`,
+            ].join("；"),
+          },
+        }),
+      });
+    });
+    await page.goto("/ai?tab=providers", { waitUntil: "networkidle" });
+    await page.getByRole("button", { name: "Gateway 管理" }).click();
+
+    const dialog = page.getByRole("dialog", { name: "Codex 客户端兼容 Gateway" });
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByText("0.1.0-alpha.1+telepilot.gateway.long-version")).toBeVisible();
+    await expect(dialog.getByText("Unsupported parameter: max_output_tokens", { exact: false })).toBeVisible();
+    for (const requestId of requestIds) {
+      await expect(dialog.getByText(requestId, { exact: false })).toBeVisible();
+    }
+    const layout = await dialog.evaluate((element) => {
+      const viewportWidth = document.documentElement.clientWidth;
+      const dialogRect = element.getBoundingClientRect();
+      const buttonRects = Array.from(element.querySelectorAll("button")).map((button) => {
+        const rect = button.getBoundingClientRect();
+        return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom };
+      });
+      const offenders = Array.from(element.querySelectorAll<HTMLElement>("*"))
+        .filter((child) => {
+          const rect = child.getBoundingClientRect();
+          return rect.right > viewportWidth + 1 || rect.left < -1;
+        })
+        .map((child) => {
+          const rect = child.getBoundingClientRect();
+          return {
+            tag: child.tagName.toLowerCase(),
+            className: child.className,
+            left: Math.round(rect.left),
+            right: Math.round(rect.right),
+          };
+        });
+      return {
+        viewportWidth,
+        documentWidth: document.documentElement.scrollWidth,
+        dialogLeft: dialogRect.left,
+        dialogRight: dialogRect.right,
+        buttonRects,
+        offenders,
+      };
+    });
+    expect(layout.documentWidth).toBeLessThanOrEqual(layout.viewportWidth + 1);
+    expect(layout.dialogLeft).toBeGreaterThanOrEqual(0);
+    expect(layout.dialogRight).toBeLessThanOrEqual(layout.viewportWidth + 1);
+    expect(layout.offenders).toEqual([]);
+    for (const rect of layout.buttonRects) {
+      expect(rect.left).toBeGreaterThanOrEqual(layout.dialogLeft - 1);
+      expect(rect.right).toBeLessThanOrEqual(layout.dialogRight + 1);
+    }
+    fixture.assertClean();
+  });
+
   test("Provider 模型行只保留真实单模型测活入口", async ({ page }, testInfo) => {
     test.skip(testInfo.project.name === "tablet", "手机与桌面视口已覆盖");
     const fixture = await installApiFixture(page);

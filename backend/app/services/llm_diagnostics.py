@@ -17,6 +17,8 @@ from typing import Any
 
 import httpx
 
+from .redactor import redact_text
+
 # ── 诊断状态枚举 ────────────────────────────────────────────
 DIAG_HEALTHY = "healthy"
 DIAG_EMPTY_RESPONSE = "empty_response"
@@ -123,7 +125,6 @@ _OFFICIAL_ACCOUNT_HINTS = (
 _POLICY_HINTS = ("account policy", "safety policy", "content policy", "moderation", "policy violation")
 _CONTEXT_HINTS = ("context_length_exceeded", "context window", "maximum context length", "too many tokens")
 _QUOTA_HINTS = ("insufficient_quota", "quota exceeded", "billing", "credit balance", "monthly limit")
-_WRAPPED_UPSTREAM_HINTS = ("upstream request failed", "upstream service failed", "error from provider")
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,13 +136,66 @@ class LLMDiagnostic:
     scope: str
     safe_message: str
     status_code: int | None = None
+    upstream_status_code: int | None = None
     upstream_error_code: str | None = None
+    upstream_error_message: str | None = None
+    upstream_error_detail: str | None = None
+    upstream_request_id: str | None = None
+    client_request_id: str | None = None
     request_id: str | None = None
     gateway_stage: str | None = None
     upstream_summary: str | None = None
 
 
-def _structured_error(body: str | Mapping[str, Any] | None) -> tuple[str | None, str]:
+@dataclass(frozen=True, slots=True)
+class _StructuredError:
+    code: str | None
+    message: str
+    upstream_status_code: int | None = None
+    upstream_error_code: str | None = None
+    upstream_error_message: str | None = None
+    upstream_error_detail: str | None = None
+    upstream_request_id: str | None = None
+    client_request_id: str | None = None
+
+
+def _safe_code(value: Any) -> str | None:
+    return re.sub(r"[^a-zA-Z0-9_.-]", "", str(value or ""))[:80] or None
+
+
+def _safe_status(value: Any) -> int | None:
+    try:
+        status = int(value)
+    except (TypeError, ValueError):
+        return None
+    return status if 100 <= status <= 599 else None
+
+
+def _safe_request_id(value: Any) -> str | None:
+    text = str(value or "").strip()[:128]
+    return text if text and re.fullmatch(r"[a-zA-Z0-9._:-]+", text) else None
+
+
+def _detail_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value.strip() or None
+    try:
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return str(value).strip() or None
+
+
+def _first_value(source: Mapping[str, Any], *keys: str) -> Any:
+    for key in keys:
+        value = source.get(key)
+        if value is not None and value != "":
+            return value
+    return None
+
+
+def _structured_error_facts(body: str | Mapping[str, Any] | None) -> _StructuredError:
     if isinstance(body, Mapping):
         payload: Any = body
         raw = json.dumps(body, ensure_ascii=False)
@@ -150,15 +204,96 @@ def _structured_error(body: str | Mapping[str, Any] | None) -> tuple[str | None,
         try:
             payload = json.loads(raw)
         except (TypeError, ValueError):
-            return None, raw
+            return _StructuredError(code=None, message=raw)
     if not isinstance(payload, Mapping):
-        return None, raw
+        return _StructuredError(code=None, message=raw)
     error = payload.get("error")
-    source = error if isinstance(error, Mapping) else payload
-    code = source.get("code") or source.get("type") or payload.get("code")
-    message = source.get("message") or source.get("detail") or payload.get("message") or raw
-    safe_code = re.sub(r"[^a-zA-Z0-9_.-]", "", str(code or ""))[:80] or None
-    return safe_code, str(message or raw)
+    response = payload.get("response")
+    response = response if isinstance(response, Mapping) else {}
+    response_error = response.get("error")
+    source = (
+        error
+        if isinstance(error, Mapping)
+        else response_error
+        if isinstance(response_error, Mapping)
+        else response
+        if response
+        else payload
+    )
+    nested_upstream: Mapping[str, Any] = {}
+    upstream_errors = next(
+        (
+            value
+            for container in (source, response, payload)
+            if isinstance((value := container.get("upstream_errors")), list)
+        ),
+        None,
+    )
+    if isinstance(upstream_errors, list) and upstream_errors and isinstance(upstream_errors[0], Mapping):
+        nested_upstream = upstream_errors[0]
+
+    upstream_status_code = _safe_status(
+        _first_value(source, "upstream_status_code")
+        or _first_value(response, "upstream_status_code")
+        or _first_value(payload, "upstream_status_code")
+        or _first_value(nested_upstream, "upstream_status_code")
+    )
+    upstream_error_code = _safe_code(
+        _first_value(source, "upstream_error_code")
+        or _first_value(response, "upstream_error_code")
+        or _first_value(payload, "upstream_error_code")
+        or _first_value(nested_upstream, "upstream_error_code", "code")
+    )
+    upstream_error_message = _detail_text(
+        _first_value(source, "upstream_error_message")
+        or _first_value(response, "upstream_error_message")
+        or _first_value(payload, "upstream_error_message")
+        or _first_value(nested_upstream, "upstream_error_message", "message")
+    )
+    upstream_error_detail = _detail_text(
+        _first_value(source, "upstream_error_detail")
+        or _first_value(response, "upstream_error_detail")
+        or _first_value(payload, "upstream_error_detail")
+        or _first_value(
+            nested_upstream,
+            "upstream_error_detail",
+            "detail",
+            "upstream_response_body",
+        )
+    )
+    return _StructuredError(
+        code=_safe_code(source.get("code") or source.get("type") or payload.get("code")),
+        message=str(
+            source.get("message")
+            or source.get("detail")
+            or payload.get("message")
+            or raw
+        ),
+        upstream_status_code=upstream_status_code,
+        upstream_error_code=upstream_error_code,
+        upstream_error_message=upstream_error_message,
+        upstream_error_detail=upstream_error_detail,
+        # ``request_id`` 属于当前 TelePilot/Gateway 层，绝不能在这里冒充上游 ID。
+        upstream_request_id=_safe_request_id(
+            _first_value(source, "upstream_request_id")
+            or _first_value(response, "upstream_request_id")
+            or _first_value(payload, "upstream_request_id")
+            or _first_value(nested_upstream, "upstream_request_id", "request_id")
+        ),
+        client_request_id=_safe_request_id(
+            _first_value(source, "client_request_id")
+            or _first_value(response, "client_request_id")
+            or _first_value(payload, "client_request_id")
+            or _first_value(nested_upstream, "client_request_id")
+        ),
+    )
+
+
+def _structured_error(body: str | Mapping[str, Any] | None) -> tuple[str | None, str]:
+    """兼容旧调用者；分类新逻辑使用完整结构化事实。"""
+
+    facts = _structured_error_facts(body)
+    return facts.upstream_error_code or facts.code, facts.upstream_error_message or facts.message
 
 
 def _category_from_code(code: str | None) -> str | None:
@@ -205,7 +340,14 @@ def _looks_like_model_missing(body_lower: str) -> bool:
 
 def classify_status_code(status_code: int, body: str | Mapping[str, Any]) -> str:
     """把 HTTP 状态码 + 响应体分类为 diagnostic_status。"""
-    code, message = _structured_error(body)
+    facts = _structured_error_facts(body)
+    status_code = facts.upstream_status_code or status_code
+    if facts.upstream_status_code:
+        code = facts.upstream_error_code
+        message = facts.upstream_error_message or facts.upstream_error_detail or ""
+    else:
+        code = facts.upstream_error_code or facts.code
+        message = facts.upstream_error_message or facts.message
     if category := _category_from_code(code):
         return category
     body_lower = f"{code or ''} {message}".lower()
@@ -217,8 +359,6 @@ def classify_status_code(status_code: int, body: str | Mapping[str, Any]) -> str
         return DIAG_QUOTA_EXHAUSTED
     if any(hint in body_lower for hint in _POLICY_HINTS):
         return DIAG_ACCOUNT_POLICY
-    if any(hint in body_lower for hint in _WRAPPED_UPSTREAM_HINTS):
-        return DIAG_UPSTREAM_ERROR
     if status_code == 401:
         return DIAG_AUTH_FAILED
     if status_code == 403:
@@ -286,21 +426,39 @@ def diagnose_http_error(
     api_key: str | None = None,
     base_url: str | None = None,
 ) -> LLMDiagnostic:
-    code, message = _structured_error(body)
-    category = classify_status_code(status_code, body)
-    wrapped_upstream = status_code < 500 and any(
-        hint in message.lower() for hint in _WRAPPED_UPSTREAM_HINTS
+    facts = _structured_error_facts(body)
+    effective_status = facts.upstream_status_code or status_code
+    category = classify_status_code(effective_status, body)
+    upstream_message = facts.upstream_error_message
+    summary = upstream_message or facts.upstream_error_detail or facts.message
+    exposed_error_code = (
+        facts.upstream_error_code
+        if facts.upstream_status_code
+        else facts.upstream_error_code or facts.code
     )
     return LLMDiagnostic(
         category=category,
-        retryable=is_retryable(category) and not wrapped_upstream,
-        scope="provider_local" if wrapped_upstream else scope_for(category),
+        retryable=is_retryable(category),
+        scope=scope_for(category),
         safe_message=suggestion_for(category),
         status_code=status_code,
-        upstream_error_code=code,
-        request_id=(request_id or "").strip()[:128] or None,
+        upstream_status_code=facts.upstream_status_code,
+        upstream_error_code=exposed_error_code,
+        upstream_error_message=(
+            redact(upstream_message, api_key=api_key, base_url=base_url, limit=500)
+            if upstream_message
+            else None
+        ),
+        upstream_error_detail=(
+            redact(facts.upstream_error_detail, api_key=api_key, base_url=base_url, limit=1000)
+            if facts.upstream_error_detail
+            else None
+        ),
+        upstream_request_id=facts.upstream_request_id,
+        client_request_id=facts.client_request_id,
+        request_id=_safe_request_id(request_id),
         gateway_stage=(gateway_stage or "").strip()[:64] or None,
-        upstream_summary=redact(message, api_key=api_key, base_url=base_url) or None,
+        upstream_summary=redact(summary, api_key=api_key, base_url=base_url, limit=500) or None,
     )
 
 
@@ -311,10 +469,32 @@ def diagnose_exception(exc: BaseException, *, request_id: str | None = None, gat
         retryable=is_retryable(category),
         scope=scope_for(category),
         safe_message=suggestion_for(category),
-        request_id=request_id,
+        request_id=_safe_request_id(request_id),
         gateway_stage=gateway_stage,
         upstream_summary=redact(str(exc)) or None,
     )
+
+
+def format_diagnostic_error(
+    value: LLMDiagnostic | BaseException,
+    *,
+    fallback: str = "模型请求失败",
+) -> str:
+    """用已核实的结构化事实生成用户可见错误，不从包装文本猜测原因。"""
+
+    upstream_status = getattr(value, "upstream_status_code", None)
+    direct_status = getattr(value, "status_code", None)
+    message = (
+        getattr(value, "upstream_error_message", None)
+        or getattr(value, "upstream_summary", None)
+        or (str(value) if isinstance(value, BaseException) else "")
+    )
+    message = redact(str(message or ""), limit=500).strip()
+    if upstream_status:
+        return f"上游 HTTP {upstream_status}：{message or fallback}"
+    if direct_status:
+        return f"HTTP {direct_status}：{message or fallback}"
+    return message or fallback
 
 
 def classify_message(message: str, *, retryable: bool = False) -> str:
@@ -322,7 +502,9 @@ def classify_message(message: str, *, retryable: bool = False) -> str:
 
     value = str(message or "")
     lowered = value.lower()
-    for status in (401, 403, 404, 429, 502, 503, 504):
+    # 5xx 只能来自 HTTP 状态或结构化 upstream_status_code；包装文本中的
+    # “502/503/504”不是可核实事实，不能据此提示临时故障可重试。
+    for status in (401, 403, 404, 429):
         if re.search(rf"(?:^|\D){status}(?:\D|$)", value):
             return classify_status_code(status, value)
     if "timeout" in lowered or "timed out" in lowered:
@@ -341,19 +523,36 @@ def is_valid_json(text: str) -> bool:
         return False
 
 
-def redact(text: str, *, api_key: str | None = None, base_url: str | None = None) -> str:
-    """脱敏错误文本：剥离 api_key / base_url / Bearer / sk- 片段并截断。"""
+def redact(
+    text: str,
+    *,
+    api_key: str | None = None,
+    base_url: str | None = None,
+    limit: int = 220,
+) -> str:
+    """脱敏错误文本：剥离凭据、网络位置与已知 Provider 地址并截断。"""
     if not text:
         return ""
     out = text
     if api_key:
-        out = out.replace(api_key, "<redacted-key>")
+        out = out.replace(api_key, "<redacted>")
     if base_url:
         out = out.replace(base_url, "<redacted-url>")
-    # 兜底剥离常见密钥前缀（保留少量上下文）。
-    out = re.sub(r"(sk-[A-Za-z0-9_\-]{4})[A-Za-z0-9_\-]+", r"\1<redacted>", out)
-    out = re.sub(r"Bearer\s+[A-Za-z0-9_\-\.]+", "Bearer <redacted>", out)
-    return out[:220]
+    out = redact_text(out)
+    # 错误回显中的测试凭据可能很短，也不能因为未达到生产 Token 的常见长度而泄漏。
+    out = re.sub(
+        r"(?i)\b(?:Bearer|Basic)\s+[A-Za-z0-9._+/=-]{4,}",
+        "<redacted-auth>",
+        out,
+    )
+    # 上游 detail 可能回显另一层 Base URL、代理 URL 或带凭据地址。诊断 API
+    # 不需要公开网络拓扑；保留错误语义即可。
+    out = re.sub(
+        r"(?i)\b(?:https?|socks5?|mtproxy)://[^\s\"'<>}\]),;]+",
+        "<redacted-url>",
+        out,
+    )
+    return out[: max(1, min(int(limit), 2000))]
 
 
 __all__ = [
@@ -388,6 +587,7 @@ __all__ = [
     "classify_status_code",
     "diagnose_exception",
     "diagnose_http_error",
+    "format_diagnostic_error",
     "is_retryable",
     "is_valid_json",
     "redact",

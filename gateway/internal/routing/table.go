@@ -23,12 +23,14 @@ type Route struct {
 	LivenessCompatibilityHeaders map[string]string
 	ModelsEndpoints              []string
 	MaxConcurrency               int
+	CodexClientVersion           string
 }
 
 type Table struct {
-	revision  int64
-	routes    map[int64]map[string]Route
-	providers map[int64]contract.ProviderConfig
+	revision           int64
+	codexClientVersion string
+	routes             map[int64]map[string]Route
+	providers          map[int64]contract.ProviderConfig
 }
 
 func NewTable(snapshot contract.ConfigSnapshot) (*Table, error) {
@@ -41,7 +43,19 @@ func NewTable(snapshot contract.ConfigSnapshot) (*Table, error) {
 	if snapshot.Revision < 1 {
 		return nil, errors.New("revision must be positive")
 	}
-	table := &Table{revision: snapshot.Revision, routes: make(map[int64]map[string]Route), providers: make(map[int64]contract.ProviderConfig)}
+	codexClientVersion := strings.TrimSpace(snapshot.CodexClientVersion)
+	if codexClientVersion == "" {
+		codexClientVersion = DefaultCodexClientVersion
+	}
+	if !validClientVersion(codexClientVersion) {
+		return nil, errors.New("codex_client_version is invalid")
+	}
+	table := &Table{
+		revision:           snapshot.Revision,
+		codexClientVersion: codexClientVersion,
+		routes:             make(map[int64]map[string]Route),
+		providers:          make(map[int64]contract.ProviderConfig),
+	}
 	for _, provider := range snapshot.Providers {
 		if err := validateProvider(provider); err != nil {
 			return nil, fmt.Errorf("provider %d: %w", provider.ID, err)
@@ -67,6 +81,7 @@ func NewTable(snapshot contract.ConfigSnapshot) (*Table, error) {
 				BaseURL: strings.TrimRight(provider.BaseURL, "/"), APIKey: provider.APIKey, ProxyURL: provider.ProxyURL,
 				TimeoutSeconds: provider.TimeoutSeconds, CompatibilityHeaders: cloneMap(provider.CompatibilityHeaders), MaxConcurrency: provider.MaxConcurrency,
 				LivenessCompatibilityHeaders: cloneMap(provider.LivenessCompatibilityHeaders),
+				CodexClientVersion:           codexClientVersion,
 			}
 		}
 		table.routes[provider.ID] = modelRoutes
@@ -74,8 +89,9 @@ func NewTable(snapshot contract.ConfigSnapshot) (*Table, error) {
 	return table, nil
 }
 
-func (t *Table) Revision() int64    { return t.revision }
-func (t *Table) ProviderCount() int { return len(t.providers) }
+func (t *Table) Revision() int64            { return t.revision }
+func (t *Table) ProviderCount() int         { return len(t.providers) }
+func (t *Table) CodexClientVersion() string { return t.codexClientVersion }
 
 func (t *Table) Resolve(providerID int64, model string) (Route, bool) {
 	routes := t.routes[providerID]
@@ -105,7 +121,29 @@ func (t *Table) ProviderRoute(providerID int64) (Route, bool) {
 		CompatibilityHeaders: cloneMap(provider.ModelsCompatibilityHeaders),
 		ModelsEndpoints:      slices.Clone(provider.ModelsEndpoints),
 		MaxConcurrency:       provider.MaxConcurrency,
+		CodexClientVersion:   t.codexClientVersion,
 	}, true
+}
+
+// 仅用于旧控制面快照缺少 codex_client_version 时的兼容回退。
+// 正常请求始终采用 Python 控制面下发的版本；此值必须与
+// backend/app/services/llm_identity.py 的 codex_tui 默认值一致。
+const DefaultCodexClientVersion = "0.145.0"
+
+func validClientVersion(value string) bool {
+	if len(value) < 1 || len(value) > 64 {
+		return false
+	}
+	for _, char := range value {
+		if (char >= '0' && char <= '9') ||
+			(char >= 'A' && char <= 'Z') ||
+			(char >= 'a' && char <= 'z') ||
+			char == '.' || char == '-' || char == '+' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func validateProvider(provider contract.ProviderConfig) error {

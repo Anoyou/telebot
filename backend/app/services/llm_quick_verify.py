@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from ..crypto import encrypt_str
+from . import llm_diagnostics
 from .llm_client import (
     LLMError,
     LLMErrorScope,
@@ -85,6 +86,33 @@ def suggested_name(base_url: str) -> str:
 
 def _safe_message(message: str, api_key: str) -> str:
     return _safe_error_message(message, api_key or None)
+
+
+def _error_event_facts(exc: LLMError, api_key: str) -> dict[str, object]:
+    """把已核实错误事实带到 Web 测活与 System Agent，不让下游解析文案猜状态。"""
+
+    category = str(getattr(exc, "category", None) or "").strip() or None
+    values: dict[str, object | None] = {
+        "status_code": getattr(exc, "status_code", None),
+        "error_category": category,
+        "suggestion": llm_diagnostics.suggestion_for(category) if category else None,
+        "upstream_status_code": getattr(exc, "upstream_status_code", None),
+        "upstream_error_code": getattr(exc, "upstream_error_code", None),
+        "upstream_error_message": getattr(exc, "upstream_error_message", None),
+        "upstream_error_detail": getattr(exc, "upstream_error_detail", None),
+        "upstream_request_id": getattr(exc, "upstream_request_id", None),
+        "client_request_id": getattr(exc, "client_request_id", None),
+        "gateway_request_id": getattr(exc, "request_id", None),
+    }
+    return {
+        key: (
+            _safe_message(value, api_key)
+            if isinstance(value, str) and key != "error_category"
+            else value
+        )
+        for key, value in values.items()
+        if value is not None and value != ""
+    }
 
 
 def _discovery_headers(api_format: str, api_key: str) -> dict[str, str]:
@@ -280,17 +308,22 @@ async def quick_verify_events(
             )
         except LLMError as exc:
             requires_model = _discovery_requires_manual_model(exc)
+            diagnostic_error = _safe_message(
+                llm_diagnostics.format_diagnostic_error(exc),
+                api_key,
+            )
             yield {
                 "type": "error",
                 "ok": False,
                 "error": (
-                    f"无法自动获取可对话模型，请填写模型 ID 后重试。{_safe_message(str(exc), api_key)}"
+                    f"无法自动获取可对话模型，请填写模型 ID 后重试。{diagnostic_error}"
                     if requires_model
-                    else _safe_message(str(exc), api_key)
+                    else diagnostic_error
                 ),
                 "requires_model": requires_model,
                 "models": [],
                 "api_format": api_format,
+                **_error_event_facts(exc, api_key),
             }
             return
         if not models:
@@ -465,10 +498,14 @@ async def quick_verify_events(
             "requested_model": selected_model,
             "latency_ms": int((time.monotonic() - started) * 1000),
             "response": "".join(text_parts).strip() or None,
-            "error": _safe_message(str(exc), api_key),
+            "error": _safe_message(
+                llm_diagnostics.format_diagnostic_error(exc),
+                api_key,
+            ),
             "requires_model": _requires_manual_model(exc, auto_selected=auto_selected),
             "models": models,
             "api_format": api_format,
+            **_error_event_facts(exc, api_key),
         }
     except Exception as exc:  # noqa: BLE001
         yield {

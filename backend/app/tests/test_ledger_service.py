@@ -225,7 +225,10 @@ async def test_ledger_summary_matches_filtered_entries_sum(ledger_session_factor
     assert Decimal(summary.income) == income == Decimal("100.50")
     assert Decimal(summary.payout) == payout == Decimal("30.25")
     assert Decimal(summary.net) == income - payout == Decimal("70.25")
-    assert {item.key for item in summary.by_day} == {base.date().isoformat()}
+    assert {item.key for item in summary.by_day} == {
+        base.date().isoformat(),
+        (base + timedelta(minutes=5)).date().isoformat(),
+    }
     assert {item.key for item in summary.by_chat} == {"-100123"}
     assert summary.by_chat[0].label == "测试群"
     assert {item.user_id for item in summary.by_recipient} == {9001, 9002}

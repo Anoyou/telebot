@@ -52,7 +52,7 @@ function summarize(h: HealthOverview): string[] {
   if (!h.redis.ok) out.push("✗ 实时通信不通");
   if (!h.alembic.ok && !h.alembic.error)
     out.push(`⚠ 数据库结构落后（${h.alembic.pending.length} 条迁移待跑）`);
-  if (h.codex_gateway?.state === "degraded") out.push("⚠ 内置 Codex Gateway 不可用");
+  if (h.codex_gateway?.state === "degraded") out.push("⚠ Codex 客户端兼容 Gateway 不可用");
   const noKey = h.providers.total - h.providers.with_api_key;
   if (h.providers.total > 0 && noKey > 0)
     out.push(`⚠ ${noKey} 个 AI 模型缺 api_key`);

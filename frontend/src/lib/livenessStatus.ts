@@ -70,15 +70,14 @@ export function livenessStatusLabel(key: LivenessStatusKey): string {
 
 export function extractHttpStatusCode(
   statusCode?: number | null,
-  error?: string | null,
+  _error?: string | null,
 ): number | null {
   if (typeof statusCode === "number" && statusCode >= 100 && statusCode <= 599) {
     return statusCode;
   }
-  const match = String(error || "").match(
-    /(?:HTTP(?:\/\d(?:\.\d)?)?|接口返回|status(?:_code)?\s*[=:]?)\s*([1-5]\d{2})\b/i,
-  );
-  return match ? Number(match[1]) : null;
+  // 错误字符串可能来自 TelePilot、Gateway 或中转站的外层包装，不能据此
+  // 猜测真实上游状态。UI 只展示后端已结构化确认的 status_code。
+  return null;
 }
 
 /** 从错误文案/分类推断状态 */

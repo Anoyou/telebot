@@ -210,6 +210,12 @@ class CodexGatewayStatus(BaseModel):
     provider_count: int = 0
     revision: int = 0
     version: str | None = None
+    protocol_version: str | None = None
+    upstream_commit: str | None = None
+    build_commit: str | None = None
+    codex_client_version: str | None = None
+    codex_version_source: Literal["builtin_default", "manual_override"] = "builtin_default"
+    contract_review_date: str | None = None
     error: str | None = None
 
 
@@ -226,6 +232,12 @@ def _snapshot_codex_gateway() -> CodexGatewayStatus:
         provider_count=status.provider_count,
         revision=status.revision,
         version=status.version,
+        protocol_version=status.protocol_version,
+        upstream_commit=status.upstream_commit,
+        build_commit=status.build_commit,
+        codex_client_version=status.codex_client_version,
+        codex_version_source=status.codex_version_source,
+        contract_review_date=status.contract_review_date,
         error=status.error,
     )
 

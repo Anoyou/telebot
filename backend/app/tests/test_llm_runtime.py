@@ -1269,7 +1269,7 @@ async def test_openai_client_wraps_typed_error(
     assert exc_info.value.scope is expected_scope
 
 
-def test_upstream_failed_400_is_provider_local() -> None:
+def test_upstream_failed_400_is_request_invalid() -> None:
     from app.services import llm_client
 
     scope = llm_client._error_scope_for_http(
@@ -1277,7 +1277,7 @@ def test_upstream_failed_400_is_provider_local() -> None:
         '{"error":{"message":"Error from provider (Console): Upstream request failed"}}',
     )
 
-    assert scope is LLMErrorScope.PROVIDER_LOCAL
+    assert scope is LLMErrorScope.REQUEST_INVALID
 
 
 def test_error_classifier_prefers_http_status_code() -> None:

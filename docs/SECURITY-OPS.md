@@ -105,7 +105,7 @@ python -m app.scripts.rekey --old "$OLD_MASTER_KEY" --new "$NEW_MASTER_KEY"
 从 `0.86.0-beta.9` 起，聊天中的自定义请求头配置会整段替换为安全提示，值只能在
 「AI → Provider 设置」中填写；上游错误回显也会按当前调用的全部 header value 脱敏。
 
-选择内置 Codex Gateway 的 Provider 仍只使用 TelePilot 保存的 Provider API Key。Gateway 不读取 Codex OAuth、账号身份、设备证明或 `~/.codex/auth.json`；凭据只经 `0600` Unix Socket 控制面进入子进程内存，不写配置文件。Gateway 不跟随上游重定向，不记录 Base URL、请求/响应正文或凭据；详细边界与排障见 [内置 Codex Gateway](./CODEX-GATEWAY.md)。
+选择 Codex 客户端兼容模式（Gateway）的 Provider 仍只使用 TelePilot 保存的 Provider API Key。Gateway 不读取 Codex OAuth、账号身份、设备证明或 `~/.codex/auth.json`；凭据只经 `0600` Unix Socket 控制面进入子进程内存，不写配置文件。Gateway 不跟随上游重定向，不记录 Base URL、请求/响应正文或凭据；详细边界与排障见 [Codex 客户端兼容模式（Gateway）](./CODEX-GATEWAY.md)。
 
 rekey 完成后更新 `.env` 的 `MASTER_KEY` 并重建 Web；Gateway 子进程会清空旧内存快照并从数据库重新同步。无需也不应导出、编辑或备份 Gateway 内存配置。
 

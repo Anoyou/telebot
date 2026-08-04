@@ -47,6 +47,7 @@ func (s *Store) Status() contract.ConfigStatus {
 	if table := s.current.Load(); table != nil {
 		status.Revision = table.Revision()
 		status.ProviderCount = table.ProviderCount()
+		status.CodexClientVersion = table.CodexClientVersion()
 	}
 	if value := s.synced.Load(); value != nil {
 		status.SyncedAt = value.(time.Time).Format(time.RFC3339Nano)

@@ -160,7 +160,12 @@ async def test_gateway_sse_error_preserves_structured_diagnostic() -> None:
             text=(
                 'event: response.failed\n'
                 'data: {"type":"response.failed","response":{"status":"failed",'
-                '"error":{"code":"client_rejected","message":"official client required"}}}\n\n'
+                '"error":{"type":"upstream_error","message":"Upstream request failed"},'
+                '"upstream_status_code":400,'
+                '"upstream_error_message":"Unsupported parameter: max_output_tokens",'
+                '"upstream_error_detail":{"detail":"Unsupported parameter: max_output_tokens"},'
+                '"upstream_request_id":"sub2api-request",'
+                '"client_request_id":"sub2api-client-request"}}\n\n'
             ),
         )
 
@@ -171,8 +176,13 @@ async def test_gateway_sse_error_preserves_structured_diagnostic() -> None:
             pass
 
     error = raised.value
-    assert error.category == "client_rejected"
-    assert error.upstream_error_code == "client_rejected"
+    assert error.category == "request_invalid"
+    assert error.retryable is False
+    assert error.upstream_status_code == 400
+    assert error.upstream_error_message == "Unsupported parameter: max_output_tokens"
+    assert "max_output_tokens" in (error.upstream_error_detail or "")
+    assert error.upstream_request_id == "sub2api-request"
+    assert error.client_request_id == "sub2api-client-request"
     assert error.request_id == "gw-sse-1"
     assert error.execution_backend == "codex_gateway"
 

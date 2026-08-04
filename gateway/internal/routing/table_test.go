@@ -59,3 +59,38 @@ func TestNamespacedModelUsesOpaqueInternalRoute(t *testing.T) {
 		t.Fatalf("unexpected namespaced route: %#v ok=%v", route, ok)
 	}
 }
+
+func TestCodexClientVersionIsValidatedAndCopiedToRoutes(t *testing.T) {
+	table, err := NewTable(contract.ConfigSnapshot{
+		SchemaVersion:      1,
+		ProtocolVersion:    contract.ProtocolVersion,
+		CodexClientVersion: "0.199.0",
+		Revision:           1,
+		Providers: []contract.ProviderConfig{{
+			ID:              9,
+			BaseURL:         "https://upstream.example/v1",
+			APIKey:          "key",
+			Models:          []string{"gpt-x"},
+			ModelsEndpoints: []string{"https://upstream.example/v1/models"},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	route, ok := table.Resolve(9, "gpt-x")
+	if !ok || route.CodexClientVersion != "0.199.0" || table.CodexClientVersion() != "0.199.0" {
+		t.Fatalf("codex version was not copied to route: %#v ok=%v", route, ok)
+	}
+
+	for _, invalid := range []string{"0.199.0\nX-Injected: yes", "0.199.0 beta", strings.Repeat("1", 65)} {
+		_, err := NewTable(contract.ConfigSnapshot{
+			SchemaVersion:      1,
+			ProtocolVersion:    contract.ProtocolVersion,
+			CodexClientVersion: invalid,
+			Revision:           1,
+		})
+		if err == nil {
+			t.Fatalf("invalid codex version was accepted: %q", invalid)
+		}
+	}
+}

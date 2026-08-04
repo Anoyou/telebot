@@ -1158,6 +1158,12 @@ export interface CodexGatewayHealthStatus {
   provider_count: number;
   revision: number;
   version?: string | null;
+  protocol_version?: string | null;
+  upstream_commit?: string | null;
+  build_commit?: string | null;
+  codex_client_version?: string | null;
+  codex_version_source?: "builtin_default" | "manual_override";
+  contract_review_date?: string | null;
   error?: string | null;
 }
 
@@ -1554,7 +1560,7 @@ export interface LLMProviderCreate {
   notes?: string | null;
   /** 出口代理；不传 / null = 直连 */
   proxy_id?: number | null;
-  /** 候选模型清单；通常新建时留空，建完用"Fetch 模型列表"按钮自动填 */
+  /** 候选模型清单；通常新建时留空，建完用“获取模型列表”按钮自动填 */
   models?: ProviderModel[];
   request_headers?: LLMRequestHeaderInput[];
 }
@@ -1709,6 +1715,12 @@ export interface ProtocolProbeResult {
   error_category?: string | null;
   /** 脱敏修复建议 */
   suggestion?: string | null;
+  upstream_status_code?: number | null;
+  upstream_error_code?: string | null;
+  upstream_error_message?: string | null;
+  upstream_error_detail?: string | null;
+  upstream_request_id?: string | null;
+  client_request_id?: string | null;
 }
 
 /** 某协议下按身份顺序的单次身份尝试结果 */
@@ -1721,6 +1733,12 @@ export interface ProtocolIdentityAttempt {
   error_category?: string | null;
   error?: string | null;
   suggestion?: string | null;
+  upstream_status_code?: number | null;
+  upstream_error_code?: string | null;
+  upstream_error_message?: string | null;
+  upstream_error_detail?: string | null;
+  upstream_request_id?: string | null;
+  client_request_id?: string | null;
 }
 
 export interface DetectProviderProtocolsResponse {
@@ -1754,6 +1772,15 @@ export interface TestModelResponse {
   preview?: string | null;
   /** 失败时的错误消息（已脱敏） */
   error?: string | null;
+  status_code?: number | null;
+  error_category?: string | null;
+  suggestion?: string | null;
+  upstream_status_code?: number | null;
+  upstream_error_code?: string | null;
+  upstream_error_message?: string | null;
+  upstream_error_detail?: string | null;
+  upstream_request_id?: string | null;
+  client_request_id?: string | null;
 }
 
 export interface ChatTestTurn {
@@ -1786,6 +1813,14 @@ export interface ChatTestModelResult {
   empty_response: boolean;
   error?: string | null;
   status_code?: number | null;
+  error_category?: string | null;
+  suggestion?: string | null;
+  upstream_status_code?: number | null;
+  upstream_error_code?: string | null;
+  upstream_error_message?: string | null;
+  upstream_error_detail?: string | null;
+  upstream_request_id?: string | null;
+  client_request_id?: string | null;
   client_identity_profile?: string | null;
   effective_api_format?: string | null;
   execution_backend?: string | null;
@@ -1856,6 +1891,12 @@ export interface LivenessResultItem {
   status_code?: number | null;
   error_category?: string | null;
   suggestion?: string | null;
+  upstream_status_code?: number | null;
+  upstream_error_code?: string | null;
+  upstream_error_message?: string | null;
+  upstream_error_detail?: string | null;
+  upstream_request_id?: string | null;
+  client_request_id?: string | null;
   client_identity_profile?: string | null;
   effective_api_format?: string | null;
   execution_backend?: string | null;

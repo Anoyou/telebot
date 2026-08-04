@@ -19,6 +19,7 @@ from sqlalchemy import select, text
 from ..crypto import decrypt_str
 from ..db.base import AsyncSessionLocal
 from ..db.models.command import LLM_API_FORMAT_RESPONSES, LLMProvider
+from . import llm_identity
 from .llm_dto import LLMProviderDTO
 from .llm_protocol import provider_endpoint, provider_models_endpoints
 from .llm_request_headers import (
@@ -45,6 +46,12 @@ class GatewayRuntimeStatus:
     provider_count: int
     version: str | None = None
     error: str | None = None
+    protocol_version: str | None = None
+    upstream_commit: str | None = None
+    build_commit: str | None = None
+    codex_client_version: str | None = None
+    codex_version_source: str = "builtin_default"
+    contract_review_date: str | None = None
 
 
 class GatewayRuntimeManager:
@@ -63,6 +70,10 @@ class GatewayRuntimeManager:
         self._snapshot_fingerprint = ""
         self._state = "not_required"
         self._version: str | None = None
+        self._protocol_version: str | None = None
+        self._upstream_commit: str | None = None
+        self._build_commit: str | None = None
+        self._contract_review_date: str | None = None
         self._error: str | None = None
         self._closing = False
 
@@ -133,13 +144,7 @@ class GatewayRuntimeManager:
                 await self._start_locked()
             status = self.status()
             if self._process is not None and self._process.returncode is None and self._version:
-                return GatewayRuntimeStatus(
-                    state="ready",
-                    required=status.required,
-                    revision=status.revision,
-                    provider_count=status.provider_count,
-                    version=status.version,
-                )
+                return replace(status, state="ready", error=None)
             return status
 
     def validate_provider_configuration(self, provider: LLMProviderDTO) -> None:
@@ -156,6 +161,9 @@ class GatewayRuntimeManager:
             self._state = "not_required"
 
     def status(self) -> GatewayRuntimeStatus:
+        current_versions = llm_identity.current_client_versions()
+        default_versions = llm_identity.default_client_versions()
+        codex_version = current_versions.get("codex_tui") or default_versions.get("codex_tui")
         return GatewayRuntimeStatus(
             state=self._state,
             required=bool(self._desired),
@@ -163,6 +171,16 @@ class GatewayRuntimeManager:
             provider_count=len(self._desired),
             version=self._version,
             error=self._error,
+            protocol_version=self._protocol_version,
+            upstream_commit=self._upstream_commit,
+            build_commit=self._build_commit,
+            codex_client_version=codex_version,
+            codex_version_source=(
+                "manual_override"
+                if codex_version and codex_version != default_versions.get("codex_tui")
+                else "builtin_default"
+            ),
+            contract_review_date=self._contract_review_date,
         )
 
     async def mark_control_plane_degraded(self, error: Exception) -> None:
@@ -194,9 +212,16 @@ class GatewayRuntimeManager:
             self._log_task = asyncio.create_task(self._consume_logs(self._process), name="gateway-log-reader")
             await self._wait_health()
             version = await self._request_json("GET", "/version")
-            if str(version.get("gateway_protocol_version") or "") != GATEWAY_PROTOCOL_VERSION:
+            protocol_version = str(version.get("gateway_protocol_version") or "")
+            if protocol_version != GATEWAY_PROTOCOL_VERSION:
                 raise RuntimeError("Gateway 协议版本不兼容")
             self._version = str(version.get("version") or "") or None
+            self._protocol_version = protocol_version
+            self._upstream_commit = str(version.get("upstream_commit") or "") or None
+            self._build_commit = str(version.get("build_commit") or "") or None
+            self._contract_review_date = (
+                str(version.get("codex_contract_review_date") or "") or None
+            )
             self._watch_task = asyncio.create_task(
                 self._watch_process(self._process), name="gateway-process-watch"
             )
@@ -210,7 +235,11 @@ class GatewayRuntimeManager:
     async def _sync_locked(self, providers: list[LLMProviderDTO]) -> None:
         payload = self._build_snapshot(providers)
         fingerprint = hashlib.sha256(
-            json.dumps(payload["providers"], sort_keys=True, ensure_ascii=False).encode()
+            json.dumps(
+                {key: value for key, value in payload.items() if key != "revision"},
+                sort_keys=True,
+                ensure_ascii=False,
+            ).encode()
         ).hexdigest()
         if fingerprint == self._snapshot_fingerprint and self._state == "ready":
             return
@@ -269,6 +298,10 @@ class GatewayRuntimeManager:
         return {
             "schema_version": 1,
             "gateway_protocol_version": GATEWAY_PROTOCOL_VERSION,
+            "codex_client_version": llm_identity.current_client_versions().get(
+                "codex_tui",
+                llm_identity.default_client_versions()["codex_tui"],
+            ),
             "revision": 0,
             "providers": items,
         }
@@ -361,6 +394,10 @@ class GatewayRuntimeManager:
         self._watch_task = None
         self._log_task = None
         self._version = None
+        self._protocol_version = None
+        self._upstream_commit = None
+        self._build_commit = None
+        self._contract_review_date = None
         self._snapshot_fingerprint = ""
 
     async def _terminate_process(self) -> None:

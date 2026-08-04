@@ -219,15 +219,24 @@ async def test_probe_and_add_rejects_upstream_model_field_that_echoes_key(monkey
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("upstream_error", "expected_code", "expected_message"),
+    ("error_event", "expected_code", "expected_message"),
     (
         (
-            'Responses streaming 接口返回 503: {"error":{"code":"model_not_found"}}',
+            {
+                "error": "上游 HTTP 400：Unsupported parameter: max_output_tokens",
+                "status_code": 502,
+                "upstream_status_code": 400,
+                "error_category": "request_invalid",
+            },
             "PROVIDER_VERIFY_FAILED",
             "无需重新输入 API Key",
         ),
         (
-            "Responses streaming 接口返回 401: invalid api key",
+            {
+                "error": "HTTP 401：invalid api key",
+                "status_code": 401,
+                "error_category": "auth_failed",
+            },
             "API_KEY_REJECTED",
             "如需更换密钥，请重新输入",
         ),
@@ -235,12 +244,12 @@ async def test_probe_and_add_rejects_upstream_model_field_that_echoes_key(monkey
 )
 async def test_saved_provider_verify_distinguishes_auth_from_upstream_failure(
     monkeypatch,
-    upstream_error: str,
+    error_event: dict[str, object],
     expected_code: str,
     expected_message: str,
 ) -> None:
     async def fake_events(**kwargs):  # noqa: ANN003
-        yield {"type": "error", "ok": False, "error": upstream_error}
+        yield {"type": "error", "ok": False, **error_event}
 
     monkeypatch.setattr(provider_verify.llm_quick_verify, "quick_verify_events", fake_events)
     monkeypatch.setattr(
@@ -266,3 +275,35 @@ async def test_saved_provider_verify_distinguishes_auth_from_upstream_failure(
         assert ei.value.clear_secret_names == ()
     assert expected_message in ei.value.message
     assert "已保存的 Provider 配置未修改" in ei.value.message
+
+
+@pytest.mark.asyncio
+async def test_saved_provider_verify_does_not_parse_auth_status_from_wrapper_text(
+    monkeypatch,
+) -> None:
+    async def fake_events(**kwargs):  # noqa: ANN003
+        yield {
+            "type": "error",
+            "ok": False,
+            "error": "包装层记录了 401，但没有返回结构化上游状态",
+        }
+
+    monkeypatch.setattr(provider_verify.llm_quick_verify, "quick_verify_events", fake_events)
+    monkeypatch.setattr(
+        provider_verify.llm_quick_verify,
+        "normalize_quick_verify_base_url",
+        lambda value: value,
+    )
+
+    with pytest.raises(ActionKeepPendingError) as ei:
+        await provider_verify.run_quick_verify(
+            base_url="https://api.example/v1",
+            api_key="sk-secret",
+            api_format="responses",
+            default_model="deepseek-chat",
+            provider="openai",
+            using_saved_key=True,
+        )
+
+    assert ei.value.code == "PROVIDER_VERIFY_FAILED"
+    assert ei.value.clear_secret_names == ()

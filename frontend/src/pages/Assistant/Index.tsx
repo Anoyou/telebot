@@ -66,6 +66,7 @@ import {
   sortSystemAgentQueue,
   sortSystemAgentRuns,
 } from "@/components/assistant/taskCenterState";
+import { upstreamErrorRequestIds } from "@/lib/upstreamErrorFacts";
 import {
   SessionDrawer,
   type SessionOriginFilter,
@@ -959,6 +960,14 @@ export function AssistantIndex() {
       });
     }
     if (event.type === "error") {
+      const requestIds = upstreamErrorRequestIds(event);
+      const errorDescription = [
+        event.upstream_error_detail
+          ? `详细信息：${event.upstream_error_detail}`
+          : null,
+        requestIds,
+        event.suggestion ? `建议：${event.suggestion}` : null,
+      ].filter(Boolean).join("\n");
       if (event.code === "RUN_STREAM_FAILED") {
         setStreamNotice("进度连接中断，正在恢复…");
         updatePendingText("进度连接中断，正在恢复…");
@@ -966,9 +975,13 @@ export function AssistantIndex() {
         event.code === "AGENT_PROVIDER_SWITCH_REQUIRED" ||
         event.code === "AGENT_TOOL_APPROVAL_REQUIRED"
       ) {
-        toast.message(event.message || "当前 Provider 内模型均不可用，请确认是否切换");
+        toast.message(event.message || "当前 Provider 内模型均不可用，请确认是否切换", {
+          description: errorDescription || undefined,
+        });
       } else {
-        toast.error(event.message || "助手运行失败");
+        toast.error(event.message || "助手运行失败", {
+          description: errorDescription || undefined,
+        });
       }
       if (event.hint?.web_path) {
         toast.message(event.hint.message || "请检查模型配置", {

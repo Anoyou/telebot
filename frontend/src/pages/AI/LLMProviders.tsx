@@ -66,6 +66,7 @@ import {
   ProviderCreateVerification,
   type ProviderCreateStage,
 } from "@/components/ai/ProviderCreateVerification";
+import { UpstreamErrorFacts } from "@/components/ai/UpstreamErrorFacts";
 
 // 各 provider 的默认 base_url 提示，仅作 placeholder
 const DEFAULT_BASE_URLS: Record<LLMProviderKind, string> = {
@@ -168,13 +169,13 @@ const CLIENT_IDENTITY_OPTIONS: {
   },
   {
     value: "codex_tui",
-    label: "Codex 兼容请求头（非官方运行时）",
-    hint: "仅附加可复核的 Codex 兼容请求头；不提供官方运行时、OAuth、账号或设备身份。",
+    label: "Codex TUI（基础身份）",
+    hint: "仅覆盖 UA、Originator 和基础会话头；若上游要求 x-codex-*、installation/window 或完整 client_metadata，请使用 Codex 客户端兼容 Gateway。",
   },
   {
     value: "codex_desktop",
-    label: "Codex Desktop",
-    hint: "Codex 桌面端身份（originator=Codex Desktop），用于 Responses。",
+    label: "Codex Desktop（基础身份）",
+    hint: "仅覆盖 Codex Desktop 的 UA、Originator 和基础会话头；不等同于真实客户端完整请求契约。",
   },
   {
     value: "claude_code",
@@ -1061,7 +1062,7 @@ export function LLMProviders({
                 onClick={() => setGatewayStatusOpen(true)}
               >
                 <ServerCog className="mr-1 h-4 w-4" />
-                <span className="truncate">Gateway 状态</span>
+                <span className="truncate">Gateway 管理</span>
               </Button>
             </div>
           </div>
@@ -1169,7 +1170,7 @@ export function LLMProviders({
                   <TableHead>名称</TableHead>
                   <TableHead>提供商协议</TableHead>
                   <TableHead>API 协议</TableHead>
-                  <TableHead>执行后端</TableHead>
+                  <TableHead>调用方式</TableHead>
                   <TableHead>联网搜索协议</TableHead>
                   <TableHead>默认模型 ID</TableHead>
                   <TableHead>已启用模型</TableHead>
@@ -1627,15 +1628,15 @@ function ProviderCreateWorkspace({
 
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-1.5 sm:col-span-2">
-                <Label htmlFor="provider-create-execution-backend">执行后端</Label>
+                <Label htmlFor="provider-create-execution-backend">调用方式</Label>
                 <Select
                   id="provider-create-execution-backend"
                   value={form.execution_backend}
                   disabled={connectionLocked}
                   onChange={(event) => setExecutionBackend(event.target.value as LLMExecutionBackend)}
                 >
-                  <option value="direct">Provider 直连</option>
-                  <option value="codex_gateway">内置 Codex Gateway</option>
+                  <option value="direct">标准 API 直连</option>
+                  <option value="codex_gateway">Codex 客户端兼容模式（Gateway）</option>
                 </Select>
                 {gatewayMode ? (
                   <div className={cn(
@@ -1649,15 +1650,15 @@ function ProviderCreateWorkspace({
                     ) : gatewayHealthQ.isError ? (
                       "无法读取 Gateway 状态，暂不能保存 Gateway Provider。"
                     ) : gatewayHealth?.state === "degraded" ? (
-                      gatewayHealth.error || "内置 Gateway 当前不可用；Provider 直连不受影响。"
+                      gatewayHealth.error || "Codex 客户端兼容 Gateway 当前不可用；标准 API 直连不受影响。"
                     ) : gatewayHealth?.state === "ready" ? (
-                      `Gateway 已就绪${gatewayHealth.version ? ` · ${gatewayHealth.version}` : ""}。身份由 Gateway 管理。`
+                      `Gateway 已就绪${gatewayHealth.version ? ` · ${gatewayHealth.version}` : ""}。它会按接近真实 Codex Responses 客户端的请求契约发送。`
                     ) : (
-                      "当前无需运行 Gateway；保存时会验证内置二进制并按需启动。身份由 Gateway 管理。"
+                      "当前无需运行 Gateway；保存时会验证内置二进制并按需启动。它不包含 OAuth、ChatGPT 账号身份或设备证明。"
                     )}
                   </div>
                 ) : (
-                  <p className="text-xs text-muted-foreground">由 TelePilot 直接调用当前 Provider API，并使用所选身份档案与出口代理。</p>
+                  <p className="text-xs text-muted-foreground">由 TelePilot 直接调用当前 Provider API，并使用所选基础身份与出口代理。</p>
                 )}
               </div>
               <div className="space-y-1.5 sm:col-span-2">
@@ -1732,7 +1733,7 @@ function ProviderCreateWorkspace({
                 </p>
               </div>
               <div className="space-y-1.5">
-                <Label htmlFor="provider-create-client">客户端身份</Label>
+                <Label htmlFor="provider-create-client">客户端身份模拟</Label>
                 <Select
                   id="provider-create-client"
                   value={form.client_identity_profile}
@@ -1745,7 +1746,7 @@ function ProviderCreateWorkspace({
                 </Select>
                 <p className="text-xs leading-5 text-muted-foreground">
                   {gatewayMode
-                    ? "身份由 Gateway 管理；当前已保存的身份配置会保留，切回 Provider 直连后继续使用。"
+                    ? "Gateway 会补齐 x-codex-*、installation/window、client_metadata 等请求契约；当前基础身份配置会保留，切回标准 API 直连后继续使用。"
                     : CLIENT_IDENTITY_OPTIONS.find((option) => option.value === form.client_identity_profile)?.hint}
                 </p>
               </div>
@@ -1916,7 +1917,7 @@ function ProviderCreateWorkspace({
                     ))}
                   </Select>
                   {gatewayMode ? (
-                    <p className="text-xs leading-5 text-muted-foreground">Gateway 的联网请求固定使用 Responses；切回 Provider 直连后恢复原设置。</p>
+                    <p className="text-xs leading-5 text-muted-foreground">Gateway 的联网请求固定使用 Responses；切回标准 API 直连后恢复原设置。</p>
                   ) : null}
                 </div>
                 <div className="space-y-1.5">
@@ -2012,8 +2013,8 @@ function ProviderCreateWorkspace({
           <dl className="space-y-3 text-xs">
             <div><dt className="text-muted-foreground">接入地址</dt><dd className="mt-1 break-all font-mono">{endpoint}</dd></div>
             <div><dt className="text-muted-foreground">实际协议</dt><dd className="mt-1 font-medium">{form.api_format}</dd></div>
-            <div><dt className="text-muted-foreground">执行后端</dt><dd className="mt-1 font-medium">{executionBackendLabel(form.execution_backend)}</dd></div>
-            <div><dt className="text-muted-foreground">客户端身份</dt><dd className="mt-1 font-medium">{gatewayMode ? "由 Gateway 管理" : form.client_identity_profile}</dd></div>
+            <div><dt className="text-muted-foreground">调用方式</dt><dd className="mt-1 font-medium">{executionBackendLabel(form.execution_backend)}</dd></div>
+            <div><dt className="text-muted-foreground">客户端身份模拟</dt><dd className="mt-1 font-medium">{gatewayMode ? "由 Gateway 管理" : form.client_identity_profile}</dd></div>
             <div><dt className="text-muted-foreground">默认模型</dt><dd className="mt-1 break-all font-mono">{form.default_model || "待选择"}</dd></div>
             <div><dt className="text-muted-foreground">启用模型</dt><dd className="mt-1 font-medium">{enabledModelCount} 个</dd></div>
           </dl>
@@ -2175,7 +2176,13 @@ function ProtocolDetectionPanel({ result }: { result: DetectProviderProtocolsRes
                 <MetaBadge mono>{a.api_format}</MetaBadge>
                 <MetaBadge mono>{a.client_identity_profile}</MetaBadge>
                 <MetaBadge mono tone={a.ok ? "success" : "warn"}>
-                  {a.ok ? "OK" : a.status_code ? `HTTP ${a.status_code}` : "FAIL"}
+                  {a.ok
+                    ? "OK"
+                    : a.upstream_status_code
+                      ? `上游 HTTP ${a.upstream_status_code}`
+                      : a.status_code
+                        ? `HTTP ${a.status_code}`
+                        : "FAIL"}
                 </MetaBadge>
                 {a.error_category ? (
                   <span className="text-muted-foreground">{a.error_category}</span>
@@ -2183,6 +2190,7 @@ function ProtocolDetectionPanel({ result }: { result: DetectProviderProtocolsRes
                 {a.suggestion ? (
                   <span className="w-full break-words text-muted-foreground">{a.suggestion}</span>
                 ) : null}
+                <UpstreamErrorFacts value={a} className="w-full" />
               </div>
             ))}
           </div>
@@ -2198,11 +2206,21 @@ function ProbeRow({ label, probe }: { label: string; probe: ProtocolProbeResult 
       <div className="flex items-center justify-between gap-2">
         <span className="font-mono">{label}</span>
         <MetaBadge mono tone={probe.ok ? "success" : "warn"}>
-          {probe.ok ? "OK" : probe.status_code ? `HTTP ${probe.status_code}` : "FAIL"}
+          {probe.ok
+            ? "OK"
+            : probe.upstream_status_code
+              ? `上游 HTTP ${probe.upstream_status_code}`
+              : probe.status_code
+                ? `HTTP ${probe.status_code}`
+                : "FAIL"}
         </MetaBadge>
       </div>
       <div className="mt-1 text-muted-foreground">{probe.latency_ms} ms</div>
       {probe.error ? <div className="mt-1 break-words text-muted-foreground">{probe.error}</div> : null}
+      <UpstreamErrorFacts value={probe} className="mt-1.5" />
+      {probe.suggestion && probe.suggestion !== probe.error ? (
+        <div className="mt-1 break-words text-muted-foreground">建议：{probe.suggestion}</div>
+      ) : null}
     </div>
   );
 }
@@ -2213,7 +2231,7 @@ function ProbeRow({ label, probe }: { label: string; probe: ProtocolProbeResult 
 //
 // 设计：
 // - models 是 form 的本地状态；toggle / 删除 / 自定义添加都改本地，最终随"保存"PATCH 落库
-// - "Fetch 模型列表"现在直接读编辑表单当前值（provider/base_url/api_key/api_format/proxy_id）
+// - “获取模型列表”直接读取编辑表单当前值（provider/base_url/api_key/api_format/proxy_id）
 //   走 ``/fetch-models-preview`` 预览端点，不需要先保存；新增模型 merge 到 form.models 本地。
 // - 单模型测活在后台复用真实对话接口并原地返回结果；未保存的 provider
 //   （form.id 为空）按钮置灰 + 提示"先保存"。
@@ -2455,7 +2473,7 @@ function ProviderModelsSection({
             className="text-[10px] leading-4"
             title={isGatewayBackend(result.execution_backend)
               ? [result.gateway_version, result.gateway_stage, result.gateway_request_id].filter(Boolean).join(" · ")
-              : "实际通过 Provider 直连调用"}
+              : "实际通过标准 API 直连调用"}
           >
             {executionBackendLabel(result.execution_backend)}
           </MetaBadge>
@@ -2481,7 +2499,7 @@ function ProviderModelsSection({
           variant="ghost"
           loading={testingId === m.id}
           disabled={!persisted || (testingId !== null && testingId !== m.id)}
-          title={persisted ? "使用当前表单所选执行后端发起真实单模型对话测活" : "先保存 Provider 再测活"}
+          title={persisted ? "使用当前表单所选调用方式发起真实单模型对话测活" : "先保存 Provider 再测活"}
           onClick={() => onTest(m.id)}
         >
           {testingId !== m.id ? <Activity className="h-3.5 w-3.5" /> : null}
@@ -2515,7 +2533,7 @@ function ProviderModelsSection({
         <div>
           <Label className="text-sm font-semibold">模型管理</Label>
           <p className="text-xs text-muted-foreground">
-            点 <code>Fetch</code> 使用当前表单所选执行后端和接入参数拉模型列表，无需先保存；
+            点击“获取模型列表”会使用当前表单所选调用方式和接入参数，无需先保存；
             手动启用要用的几个；也能手动添加。
             启用的模型会在「自定义指令 → AI 子表单」的下拉里展开成
             <code> 名称（提供商 · 模型ID）</code>
@@ -2533,7 +2551,7 @@ function ProviderModelsSection({
           {!fetchMut.isPending ? (
             <Download className="mr-1 h-4 w-4" />
           ) : null}
-          Fetch 模型列表
+          获取模型列表
         </Button>
       </div>
 
@@ -2568,7 +2586,7 @@ function ProviderModelsSection({
       {/* 模型列表 */}
       {models.length === 0 ? (
         <p className="rounded-md border border-dashed py-4 text-center text-xs text-muted-foreground">
-          尚无候选模型。点 Fetch 自动拉，或在上面手动添加。
+          尚无候选模型。点击“获取模型列表”自动读取，或在上面手动添加。
         </p>
       ) : (
         <div className="space-y-2">
@@ -2578,7 +2596,7 @@ function ProviderModelsSection({
             </div>
           ) : (
             <p className="rounded-md border border-dashed py-3 text-center text-xs text-muted-foreground">
-              当前没有启用任何模型。展开下方未启用列表开启模型，或在上面 Fetch 后自定义添加
+              当前没有启用任何模型。展开下方未启用列表开启模型，或获取列表后自定义添加
             </p>
           )}
 
@@ -2620,6 +2638,10 @@ function GatewayStatusDialog({
   open: boolean;
   onOpenChange: (value: boolean) => void;
 }) {
+  const queryClient = useQueryClient();
+  const [detectedVersion, setDetectedVersion] = useState<string | null>(null);
+  const [detectError, setDetectError] = useState<string | null>(null);
+  const [action, setAction] = useState<"detect" | "apply" | "restore" | null>(null);
   const healthQ = useQuery({
     queryKey: ["system", "health-overview"],
     queryFn: getHealthOverview,
@@ -2627,7 +2649,14 @@ function GatewayStatusDialog({
     staleTime: 5_000,
     refetchOnWindowFocus: true,
   });
+  const versionsQ = useQuery({
+    queryKey: ["llm", "identity-versions", "gateway"],
+    queryFn: getClientIdentityVersions,
+    enabled: open,
+    staleTime: 5_000,
+  });
   const gateway = healthQ.data?.codex_gateway;
+  const codexVersion = versionsQ.data?.items.find((item) => item.key === "codex_tui");
   const stateLabel = gateway?.state === "ready"
     ? "已就绪"
     : gateway?.state === "degraded"
@@ -2641,34 +2670,136 @@ function GatewayStatusDialog({
       ? "danger"
       : "outline";
 
+  const refresh = async () => {
+    await Promise.all([healthQ.refetch(), versionsQ.refetch()]);
+  };
+
+  const detectLatest = async () => {
+    setAction("detect");
+    setDetectError(null);
+    try {
+      const response = await detectClientIdentityVersions();
+      const result = response.items.find((item) => item.key === "codex_tui");
+      if (!result?.latest || result.error) {
+        throw new Error(result?.error || "检测源没有返回 Codex 版本");
+      }
+      setDetectedVersion(result.latest);
+      toast.success(`检测到 Codex ${result.latest}`);
+    } catch (error) {
+      setDetectError(getErrMsg(error));
+    } finally {
+      setAction(null);
+    }
+  };
+
+  const saveCodexVersion = async (version: string | null) => {
+    const items = versionsQ.data?.items || [];
+    const overrides: Record<string, string> = {};
+    for (const item of items) {
+      if (item.key === "codex_tui") continue;
+      if (item.current.trim() && item.current.trim() !== item.default.trim()) {
+        overrides[item.key] = item.current.trim();
+      }
+    }
+    if (version && codexVersion && version.trim() !== codexVersion.default.trim()) {
+      overrides.codex_tui = version.trim();
+    }
+    await updateClientIdentityVersions({ overrides });
+    await queryClient.invalidateQueries({ queryKey: ["system", "health-overview"] });
+    await queryClient.invalidateQueries({ queryKey: ["llm", "identity-versions"] });
+    await refresh();
+  };
+
+  const applyDetected = async () => {
+    if (!detectedVersion) return;
+    setAction("apply");
+    setDetectError(null);
+    try {
+      await saveCodexVersion(detectedVersion);
+      toast.success(`已保存 Codex ${detectedVersion}，Gateway 状态已刷新`);
+    } catch (error) {
+      setDetectError(getErrMsg(error));
+    } finally {
+      setAction(null);
+    }
+  };
+
+  const restoreBuiltin = async () => {
+    setAction("restore");
+    setDetectError(null);
+    try {
+      await saveCodexVersion(null);
+      toast.success("已恢复 Codex 内置版本，Gateway 状态已刷新");
+    } catch (error) {
+      setDetectError(getErrMsg(error));
+    } finally {
+      setAction(null);
+    }
+  };
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-lg">
+      <DialogContent className="max-h-[90vh] min-w-0 max-w-2xl overflow-x-hidden overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>内置 Codex Gateway 状态</DialogTitle>
+          <DialogTitle>Codex 客户端兼容 Gateway</DialogTitle>
           <DialogDescription>
-            Gateway 没有单独的用户配置表单。它会读取所有选择“内置 Codex Gateway”的 Provider，并在 Web 容器内按需启动。
+            最接近真实 Codex Responses 客户端请求契约的内置调用方式，会补齐动态会话头和 client_metadata；不包含 OAuth、ChatGPT 账号身份或设备证明。
           </DialogDescription>
         </DialogHeader>
-        {healthQ.isLoading ? (
+        {healthQ.isLoading || versionsQ.isLoading ? (
           <div className="flex min-h-32 items-center justify-center gap-2 text-sm text-muted-foreground">
             <Spinner className="text-primary" />
             正在读取 Gateway 状态…
           </div>
-        ) : healthQ.isError ? (
+        ) : healthQ.isError || versionsQ.isError ? (
           <p className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
-            {getErrMsg(healthQ.error)}
+            {getErrMsg(healthQ.error ?? versionsQ.error)}
           </p>
         ) : (
-          <div className="space-y-4">
+          <div className="min-w-0 space-y-4">
             <div className="flex items-center justify-between rounded-md border bg-muted/20 px-3 py-2.5">
               <span className="text-sm font-medium">运行状态</span>
               <MetaBadge tone={stateTone}>{stateLabel}</MetaBadge>
             </div>
-            <dl className="grid grid-cols-2 gap-3 text-sm">
+            <dl className="grid min-w-0 grid-cols-1 gap-3 text-sm sm:grid-cols-2">
               <div className="rounded-md border p-3">
-                <dt className="text-xs text-muted-foreground">Gateway 版本</dt>
+                <dt className="text-xs text-muted-foreground">Gateway 模块版本</dt>
                 <dd className="mt-1 break-all font-mono text-xs">{gateway?.version || "暂无"}</dd>
+              </div>
+              <div className="rounded-md border p-3">
+                <dt className="text-xs text-muted-foreground">Gateway 协议版本</dt>
+                <dd className="mt-1 break-all font-mono text-xs">{gateway?.protocol_version || "暂无"}</dd>
+              </div>
+              <div className="rounded-md border p-3">
+                <dt className="text-xs text-muted-foreground">当前 Codex 客户端版本</dt>
+                <dd className="mt-1 break-all font-mono text-xs">
+                  {gateway?.codex_client_version || codexVersion?.current || "暂无"}
+                </dd>
+              </div>
+              <div className="rounded-md border p-3">
+                <dt className="text-xs text-muted-foreground">版本来源</dt>
+                <dd className="mt-1 font-medium">
+                  {gateway?.codex_version_source === "manual_override" ? "手动覆盖" : "内置默认"}
+                </dd>
+              </div>
+              <div className="rounded-md border p-3">
+                <dt className="text-xs text-muted-foreground">检测到的最新版本</dt>
+                <dd className="mt-1 break-all font-mono text-xs">{detectedVersion || "尚未检测"}</dd>
+              </div>
+              <div className="rounded-md border p-3">
+                <dt className="text-xs text-muted-foreground">请求契约审查基线</dt>
+                <dd className="mt-1 text-xs leading-5">
+                  协议 {gateway?.protocol_version || "暂无"}
+                  {gateway?.contract_review_date ? ` · ${gateway.contract_review_date}` : ""}
+                </dd>
+              </div>
+              <div className="rounded-md border p-3">
+                <dt className="text-xs text-muted-foreground">上游基线提交</dt>
+                <dd className="mt-1 break-all font-mono text-xs">{gateway?.upstream_commit || "暂无"}</dd>
+              </div>
+              <div className="rounded-md border p-3">
+                <dt className="text-xs text-muted-foreground">构建提交</dt>
+                <dd className="mt-1 break-all font-mono text-xs">{gateway?.build_commit || "暂无"}</dd>
               </div>
               <div className="rounded-md border p-3">
                 <dt className="text-xs text-muted-foreground">Provider 数量</dt>
@@ -2678,11 +2809,15 @@ function GatewayStatusDialog({
                 <dt className="text-xs text-muted-foreground">配置修订</dt>
                 <dd className="mt-1 font-mono text-xs">{gateway?.revision ?? 0}</dd>
               </div>
-              <div className="rounded-md border p-3">
-                <dt className="text-xs text-muted-foreground">是否需要运行</dt>
-                <dd className="mt-1 font-medium">{gateway?.required ? "是" : "否"}</dd>
-              </div>
             </dl>
+            <p className="rounded-md border border-primary/20 bg-primary/[0.04] px-3 py-2 text-xs leading-5 text-muted-foreground">
+              “检测最新版本”只查询版本号，不会自动应用，也不代表请求契约已经自动完成审查。应用或恢复版本后，模型列表、测活和 Agent 请求会热同步，无需重启 Web。
+            </p>
+            {detectError ? (
+              <p className="break-words rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs leading-5 text-destructive">
+                {detectError}
+              </p>
+            ) : null}
             {gateway?.error ? (
               <div className="rounded-md border border-destructive/30 bg-destructive/5 p-3">
                 <div className="text-xs font-medium text-destructive">最近错误</div>
@@ -2695,16 +2830,46 @@ function GatewayStatusDialog({
             )}
           </div>
         )}
-        <DialogFooter>
+        <DialogFooter className="flex-row flex-wrap justify-end gap-2">
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={action !== null}
+            onClick={() => void detectLatest()}
+          >
+            {action === "detect" ? <Spinner className="mr-1 h-4 w-4" /> : <Download className="mr-1 h-4 w-4" />}
+            检测最新版本
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={action !== null || !detectedVersion || detectedVersion === codexVersion?.current}
+            onClick={() => void applyDetected()}
+          >
+            {action === "apply" ? <Spinner className="mr-1 h-4 w-4" /> : null}
+            应用检测版本
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={action !== null || codexVersion?.current === codexVersion?.default}
+            onClick={() => void restoreBuiltin()}
+          >
+            {action === "restore" ? <Spinner className="mr-1 h-4 w-4" /> : null}
+            恢复内置版本
+          </Button>
           <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
             关闭
           </Button>
           <Button
             type="button"
-            disabled={healthQ.isFetching}
-            onClick={() => void healthQ.refetch()}
+            disabled={healthQ.isFetching || versionsQ.isFetching || action !== null}
+            onClick={() => void refresh()}
           >
-            <RefreshCw className={cn("mr-1 h-4 w-4", healthQ.isFetching && "animate-spin")} />
+            <RefreshCw className={cn("mr-1 h-4 w-4", (healthQ.isFetching || versionsQ.isFetching) && "animate-spin")} />
             刷新状态
           </Button>
         </DialogFooter>

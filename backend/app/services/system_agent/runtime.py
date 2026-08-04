@@ -22,6 +22,7 @@ from ...db.models.system_agent import (
     SystemAgentMessage,
     SystemAgentSession,
 )
+from .. import llm_diagnostics
 from ..llm_agent import AgentCallbacks, AgentLimits, AgentTool, run_agent
 from ..llm_call_context import runtime_metadata as build_runtime_metadata
 from ..llm_dto import LLMProviderDTO
@@ -849,10 +850,23 @@ class SystemAgentRuntime:
             error_facts = diagnostic_error_kwargs(exc.last_error)
             execution_backend = error_facts.get("execution_backend") or active_provider.execution_backend
             gateway_facts = error_facts if execution_backend == "codex_gateway" else {}
+            error_category = error_facts.get("category")
             yield next_event(
                 "error",
                 code="AGENT_PROVIDER_SWITCH_REQUIRED",
-                message=str(exc)[:500],
+                message=llm_diagnostics.format_diagnostic_error(
+                    exc.last_error or exc,
+                    fallback=str(exc),
+                ),
+                status_code=error_facts.get("status_code"),
+                error_category=error_category,
+                suggestion=llm_diagnostics.suggestion_for(str(error_category or "")) or None,
+                upstream_status_code=error_facts.get("upstream_status_code"),
+                upstream_error_code=error_facts.get("upstream_error_code"),
+                upstream_error_message=error_facts.get("upstream_error_message"),
+                upstream_error_detail=error_facts.get("upstream_error_detail"),
+                upstream_request_id=error_facts.get("upstream_request_id"),
+                client_request_id=error_facts.get("client_request_id"),
                 execution_backend=execution_backend,
                 gateway_version=gateway_facts.get("gateway_version"),
                 gateway_request_id=gateway_facts.get("request_id"),
@@ -875,10 +889,22 @@ class SystemAgentRuntime:
             error_facts = diagnostic_error_kwargs(exc)
             execution_backend = error_facts.get("execution_backend") or active_provider.execution_backend
             gateway_facts = error_facts if execution_backend == "codex_gateway" else {}
+            error_category = error_facts.get("category")
             yield next_event(
                 "error",
                 code="AGENT_RUN_FAILED",
-                message=redact_turn_text(str(exc))[:500],
+                message=redact_turn_text(
+                    llm_diagnostics.format_diagnostic_error(exc)
+                )[:500],
+                status_code=error_facts.get("status_code"),
+                error_category=error_category,
+                suggestion=llm_diagnostics.suggestion_for(str(error_category or "")) or None,
+                upstream_status_code=error_facts.get("upstream_status_code"),
+                upstream_error_code=error_facts.get("upstream_error_code"),
+                upstream_error_message=error_facts.get("upstream_error_message"),
+                upstream_error_detail=error_facts.get("upstream_error_detail"),
+                upstream_request_id=error_facts.get("upstream_request_id"),
+                client_request_id=error_facts.get("client_request_id"),
                 execution_backend=execution_backend,
                 gateway_version=gateway_facts.get("gateway_version"),
                 gateway_request_id=gateway_facts.get("request_id"),
@@ -1371,9 +1397,9 @@ def _apply_client_selection(resolved: Any, selection: dict[str, Any]) -> Any | s
     model = resolved.model
     if primary is None:
         if selection.get("mode") == "pinned":
-            return "该 Provider 未配置为内置 Codex Gateway，不能在 Agent 中临时转入 Gateway"
+            return "该 Provider 未配置为 Codex 客户端兼容模式（Gateway），不能在 Agent 中临时切换"
         if not providers:
-            return "当前 Agent 路由中没有已配置内置 Codex Gateway 的 Provider"
+            return "当前 Agent 路由中没有已配置 Codex 客户端兼容模式（Gateway）的 Provider"
         primary = next(iter(providers.values()))
         model = tools_model_for_dto(primary) or primary.default_model
         if not model:

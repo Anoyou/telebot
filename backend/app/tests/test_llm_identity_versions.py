@@ -264,6 +264,10 @@ async def test_identity_version_save_notifies_all_spawn_workers(monkeypatch) -> 
 
     monkeypatch.setattr(commands.command_service, "list_all_account_ids", _list_accounts)
     monkeypatch.setattr(commands.command_service, "notify_reload", _notify_reload)
+    from app.services import gateway_runtime
+
+    reconcile = AsyncMock(return_value=SimpleNamespace(state="ready", error=None))
+    monkeypatch.setattr(gateway_runtime, "reconcile_gateway_runtime", reconcile)
 
     try:
         response = await commands.update_client_identity_versions(
@@ -273,6 +277,40 @@ async def test_identity_version_save_notifies_all_spawn_workers(monkeypatch) -> 
         )
         assert row.value == {"codex_tui": "0.199.0"}
         assert events == ["commit", "list_accounts", ("notify_reload", [7, 9])]
+        assert next(item for item in response.items if item.key == "codex_tui").current == "0.199.0"
+        reconcile.assert_awaited_once_with()
+    finally:
+        _reset()
+
+
+@pytest.mark.asyncio
+async def test_identity_version_save_survives_gateway_hot_sync_failure(monkeypatch) -> None:
+    row = SimpleNamespace(value={})
+
+    class _DB:
+        async def get(self, _model, _key):  # noqa: ANN001, ANN202
+            return row
+
+        async def commit(self) -> None:
+            return None
+
+    monkeypatch.setattr(commands.command_service, "list_all_account_ids", AsyncMock(return_value=[]))
+    monkeypatch.setattr(commands.command_service, "notify_reload", AsyncMock())
+    from app.services import gateway_runtime
+
+    monkeypatch.setattr(
+        gateway_runtime,
+        "reconcile_gateway_runtime",
+        AsyncMock(side_effect=RuntimeError("gateway unavailable")),
+    )
+
+    try:
+        response = await commands.update_client_identity_versions(
+            ClientIdentityVersionsUpdateRequest(overrides={"codex_tui": "0.199.0"}),
+            None,
+            _DB(),
+        )
+        assert row.value == {"codex_tui": "0.199.0"}
         assert next(item for item in response.items if item.key == "codex_tui").current == "0.199.0"
     finally:
         _reset()

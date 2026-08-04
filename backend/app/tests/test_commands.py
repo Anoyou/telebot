@@ -2919,7 +2919,7 @@ async def test_stream_chat_gateway_setup_failure_returns_one_error_per_model(mon
 
     assert [event["requested_model"] for event in events] == ["gpt-5", "gpt-5-mini"]
     assert all(event["type"] == "error" for event in events)
-    assert all("临时执行后端准备失败" in event["result"]["error"] for event in events)
+    assert all("临时调用方式准备失败" in event["result"]["error"] for event in events)
 
 
 # ════════════════════════════════════════════════════════════

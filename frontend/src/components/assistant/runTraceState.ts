@@ -147,7 +147,7 @@ export function summarizeTraceEvents(events: TraceEvent[]): TraceSummary {
       errorMessage,
       headline: errorMessage
         ? `执行失败 · ${errorMessage}`
-        : "执行失败 · 可重试或切换 Provider",
+        : "执行失败 · 请查看错误详情",
     };
   }
 

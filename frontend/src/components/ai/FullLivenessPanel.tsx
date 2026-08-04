@@ -17,6 +17,7 @@ import type {
   LLMProviderOut,
 } from "@/api/types";
 import { ModelRunMeta } from "@/components/ai/ModelRunMeta";
+import { UpstreamErrorFacts } from "@/components/ai/UpstreamErrorFacts";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -173,7 +174,10 @@ function enabledModelIds(provider: LLMProviderOut): string[] {
 }
 
 function resultStatusText(item: FullLivenessRunResponse["results"][number]): string {
-  const statusCode = extractHttpStatusCode(item.status_code, item.error);
+  const statusCode = extractHttpStatusCode(
+    item.upstream_status_code ?? item.status_code,
+    item.error,
+  );
   return [
     livenessStatusLabel(item.status),
     statusCode,
@@ -908,7 +912,10 @@ export function FullLivenessPanel({
                         const healthyCount = allProviderResults.filter((item) => item.status === "healthy").length;
                         const statusCodes = Array.from(new Set(
                           allProviderResults
-                            .map((item) => extractHttpStatusCode(item.status_code, item.error))
+                            .map((item) => extractHttpStatusCode(
+                              item.upstream_status_code ?? item.status_code,
+                              item.error,
+                            ))
                             .filter((code): code is number => code !== null),
                         ));
                         return (
@@ -963,7 +970,7 @@ export function FullLivenessPanel({
                                               tone={isGatewayBackend(item.execution_backend) ? "info" : "neutral"}
                                               title={isGatewayBackend(item.execution_backend)
                                                 ? [item.gateway_version, item.gateway_stage, item.gateway_request_id].filter(Boolean).join(" · ") || "实际通过内置 Gateway 调用"
-                                                : "实际通过 Provider 直连调用"}
+                                                : "实际通过标准 API 直连调用"}
                                             >
                                               实际后端 {executionBackendLabel(item.execution_backend)}
                                             </MetaBadge>
@@ -994,6 +1001,7 @@ export function FullLivenessPanel({
                                     </div>
                                     {item.preview ? <div className="mt-2 whitespace-pre-wrap break-words text-muted-foreground">{item.preview}</div> : null}
                                     {item.error ? <div className="mt-2 break-words text-amber-600 dark:text-amber-400">{item.error}</div> : null}
+                                    <UpstreamErrorFacts value={item} className="mt-2" />
                                     {item.suggestion && item.suggestion !== item.error ? (
                                       <div className="mt-1 break-words text-muted-foreground">建议：{item.suggestion}</div>
                                     ) : null}

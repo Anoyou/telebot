@@ -81,15 +81,85 @@ def test_gateway_and_timeout_categories() -> None:
     assert diag.classify_status_code(504, "gateway timeout") == diag.DIAG_TIMEOUT
 
 
-def test_wrapped_upstream_400_is_provider_local_and_not_retryable() -> None:
+def test_wrapped_upstream_400_is_request_invalid_and_not_retryable() -> None:
     fact = diag.diagnose_http_error(400, "Error from provider: upstream request failed")
-    assert fact.category == diag.DIAG_UPSTREAM_ERROR
-    assert fact.scope == "provider_local"
+    assert fact.category == diag.DIAG_REQUEST_INVALID
+    assert fact.scope == "request_invalid"
     assert fact.retryable is False
+
+
+def test_real_upstream_400_facts_override_wrapper_and_keep_trace_layers() -> None:
+    fact = diag.diagnose_http_error(
+        502,
+        {
+            "error": {
+                "message": "Upstream request failed",
+                "type": "upstream_error",
+            },
+            "upstream_errors": [
+                {
+                    "upstream_status_code": 400,
+                    "message": "Unsupported parameter: max_output_tokens",
+                    "detail": {"detail": "Unsupported parameter: max_output_tokens"},
+                    "request_id": "80a1f4a9-0e88-4a6e-bd97-310a1fb144a7",
+                    "client_request_id": "53a17c9a-d53a-4df5-8509-13dc7ad36231",
+                }
+            ],
+        },
+        request_id="5f7a7c52-0757-4627-945e-2935595fb921",
+    )
+
+    assert fact.category == diag.DIAG_REQUEST_INVALID
+    assert fact.scope == "request_invalid"
+    assert fact.retryable is False
+    assert fact.status_code == 502
+    assert fact.upstream_status_code == 400
+    assert fact.upstream_error_message == "Unsupported parameter: max_output_tokens"
+    assert fact.upstream_error_detail == '{"detail":"Unsupported parameter: max_output_tokens"}'
+    assert fact.upstream_request_id == "80a1f4a9-0e88-4a6e-bd97-310a1fb144a7"
+    assert fact.client_request_id == "53a17c9a-d53a-4df5-8509-13dc7ad36231"
+    assert fact.request_id == "5f7a7c52-0757-4627-945e-2935595fb921"
+    rendered = diag.format_diagnostic_error(fact)
+    assert rendered == "上游 HTTP 400：Unsupported parameter: max_output_tokens"
+    assert "临时" not in rendered
+    assert "5xx" not in rendered
+
+
+def test_responses_failed_event_reads_nested_real_upstream_facts() -> None:
+    fact = diag.diagnose_http_error(
+        400,
+        {
+            "type": "response.failed",
+            "response": {
+                "status": "failed",
+                "error": {"message": "Upstream request failed", "type": "upstream_error"},
+                "upstream_status_code": 400,
+                "upstream_error_detail": {
+                    "detail": "Unsupported parameter: max_output_tokens"
+                },
+                "upstream_request_id": "sub2api-request",
+                "client_request_id": "sub2api-client-request",
+            },
+        },
+    )
+
+    assert fact.category == diag.DIAG_REQUEST_INVALID
+    assert fact.retryable is False
+    assert fact.upstream_status_code == 400
+    assert "max_output_tokens" in (fact.upstream_error_detail or "")
+    assert fact.upstream_request_id == "sub2api-request"
+    assert fact.client_request_id == "sub2api-client-request"
 
 
 def test_classify_5xx_upstream() -> None:
     assert diag.classify_status_code(502, "bad gateway") == diag.DIAG_UPSTREAM_ERROR
+
+
+def test_wrapper_text_cannot_invent_retryable_5xx() -> None:
+    assert (
+        diag.classify_message("Sub2API wrapper says temporary upstream 503")
+        == diag.DIAG_INVALID_RESPONSE
+    )
 
 
 def test_classify_timeout_exception() -> None:
@@ -114,6 +184,56 @@ def test_redact_strips_secrets() -> None:
     assert "sk-abcd1234efgh" not in out
     assert "https://api.x.ai/v1" not in out
     assert "tok123" not in out
+
+
+def test_structured_upstream_details_are_redacted() -> None:
+    fact = diag.diagnose_http_error(
+        400,
+        {
+            "error": {
+                "upstream_status_code": 400,
+                "upstream_error_message": "bad sk-secret123456",
+                "upstream_error_detail": {"authorization": "Bearer token123"},
+            }
+        },
+    )
+    exposed = f"{fact.upstream_error_message} {fact.upstream_error_detail}"
+    assert "sk-secret123456" not in exposed
+    assert "token123" not in exposed
+
+
+def test_structured_upstream_details_redact_json_keys_urls_and_unsafe_request_ids() -> None:
+    fact = diag.diagnose_http_error(
+        502,
+        {
+            "error": {
+                "upstream_status_code": 400,
+                "upstream_error_message": "invalid request",
+                "upstream_error_detail": {
+                    "apiKey": "opaque-secret-value",
+                    "authorization": "Basic dXNlcjpwYXNz",
+                    "endpoint": "https://tenant.example/private/v1",
+                    "proxy": "socks5://user:pass@proxy.example:1080",
+                },
+                "upstream_request_id": "valid-upstream-id",
+                "client_request_id": "invalid id with spaces",
+            }
+        },
+        request_id="bad\nrequest-id",
+    )
+
+    exposed = f"{fact.upstream_error_message} {fact.upstream_error_detail}"
+    for secret in (
+        "opaque-secret-value",
+        "dXNlcjpwYXNz",
+        "tenant.example",
+        "proxy.example",
+        "user:pass",
+    ):
+        assert secret not in exposed
+    assert fact.upstream_request_id == "valid-upstream-id"
+    assert fact.client_request_id is None
+    assert fact.request_id is None
 
 
 # ── 探测辅助（_probe_result 分类与脱敏）──────────────────────

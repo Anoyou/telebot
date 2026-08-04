@@ -65,6 +65,7 @@ async def test_snapshot_sync_is_revisioned_and_deduplicated(monkeypatch: pytest.
     assert request.await_count == 1
     snapshot = request.await_args.kwargs["json_body"]
     assert snapshot["gateway_protocol_version"] == "2"
+    assert snapshot["codex_client_version"]
     provider = snapshot["providers"][0]
     assert provider["base_url"] == "https://upstream.example/v1"
     assert provider["liveness_compatibility_headers"] == {}
@@ -72,6 +73,36 @@ async def test_snapshot_sync_is_revisioned_and_deduplicated(monkeypatch: pytest.
         "https://upstream.example/v1/models",
         "https://upstream.example/models",
     ]
+
+
+@pytest.mark.asyncio
+async def test_codex_version_change_triggers_new_gateway_revision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = GatewayRuntimeManager(binary="/fake")
+    manager._process = type("Process", (), {"returncode": None})()  # type: ignore[assignment]
+    monkeypatch.setattr("app.services.gateway_runtime.decrypt_str", lambda _: "plain-key")
+    version = {"value": "0.198.0"}
+    monkeypatch.setattr(
+        "app.services.gateway_runtime.llm_identity.current_client_versions",
+        lambda: {"codex_tui": version["value"]},
+    )
+    monkeypatch.setattr(
+        "app.services.gateway_runtime.llm_identity.default_client_versions",
+        lambda: {"codex_tui": "0.145.0"},
+    )
+    request = AsyncMock(side_effect=[{"revision": 1}, {"revision": 2}])
+    monkeypatch.setattr(manager, "_request_json", request)
+
+    first = await manager.reconcile([_provider()])
+    version["value"] = "0.199.0"
+    second = await manager.reconcile([_provider()])
+
+    assert first.revision == 1
+    assert second.revision == 2
+    assert request.await_count == 2
+    assert request.await_args_list[0].kwargs["json_body"]["codex_client_version"] == "0.198.0"
+    assert request.await_args_list[1].kwargs["json_body"]["codex_client_version"] == "0.199.0"
 
 
 @pytest.mark.asyncio

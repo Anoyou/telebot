@@ -19,15 +19,15 @@ const OPTIONS: Array<{
   identity?: AgentClientIdentity;
 }> = [
   { value: "provider", label: "跟随 Provider", executionBackend: "provider" },
-  { value: "direct:auto", label: "Provider 直连", executionBackend: "direct", identity: "auto" },
+  { value: "direct:auto", label: "标准 API 直连", executionBackend: "direct", identity: "auto" },
   { value: "direct:minimal", label: "最小请求", executionBackend: "direct", identity: "minimal" },
   { value: "direct:openai_sdk", label: "OpenAI SDK", executionBackend: "direct", identity: "openai_sdk" },
-  { value: "direct:codex_tui", label: "Codex 兼容", executionBackend: "direct", identity: "codex_tui" },
-  { value: "direct:codex_desktop", label: "Codex Desktop", executionBackend: "direct", identity: "codex_desktop" },
+  { value: "direct:codex_tui", label: "Codex TUI（基础身份）", executionBackend: "direct", identity: "codex_tui" },
+  { value: "direct:codex_desktop", label: "Codex Desktop（基础身份）", executionBackend: "direct", identity: "codex_desktop" },
   { value: "direct:claude_code", label: "Claude Code", executionBackend: "direct", identity: "claude_code" },
   { value: "direct:claude_desktop", label: "Claude Desktop", executionBackend: "direct", identity: "claude_desktop" },
   { value: "direct:grok_cli", label: "Grok CLI", executionBackend: "direct", identity: "grok_cli" },
-  { value: "codex_gateway", label: "Codex Gateway", executionBackend: "codex_gateway" },
+  { value: "codex_gateway", label: "Codex 客户端兼容模式", executionBackend: "codex_gateway" },
 ];
 
 export function ClientPicker({

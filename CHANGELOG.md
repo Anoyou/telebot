@@ -25,6 +25,32 @@
 
 ## [Unreleased]
 
+## [0.93.0-beta.1] - 2026-08-04 · minor（次版本预发布） · Codex Gateway 契约维护与真实上游错误诊断
+
+### 新增
+
+- Gateway 状态新增 Codex 客户端版本检测、应用和恢复入口，并展示 Gateway 协议版本、程序版本、构建提交、上游提交与契约复核日期；保存后会刷新运行状态，模型列表、模型测活和 Agent 调用共用当前版本。
+- LLM 错误链路新增真实上游状态码、错误码、错误消息、错误详情、上游 Request ID 与 Client Request ID 等结构化事实，并在模型测活、完整巡检和 Agent 错误提示中分层展示。
+
+### 优化
+
+- Gateway 为每次 Codex Responses 调用生成受保护的会话、线程、轮次、窗口、安装标识、`client_metadata` 与 `prompt_cache_key`，并按当前 Codex 版本维护身份头；Provider 自定义头不能覆盖这些 Gateway 身份字段。
+- 将 Provider 的调用方式明确区分为「标准 API 直连」与「Codex 客户端兼容模式（Gateway）」，统一模型列表入口为「获取模型列表」，补充 Gateway 的用途、运行边界和版本维护说明。
+- Gateway 状态弹窗适配 375px PWA 与长版本、提交和错误文本，避免横向溢出。
+
+### 修复
+
+- 修复外层 502/503 包装覆盖真实上游 4xx 的问题；错误归一化现在优先使用结构化上游事实，只有确实为 5xx 时才提示临时故障可重试。对于已核实的示例链路会展示「上游 HTTP 400：Unsupported parameter: max_output_tokens」。
+- 修复普通 `request_id` 被误作上游 Request ID 的问题，TelePilot、Gateway、上游和客户端请求标识保持独立。
+- 修复 Responses 流式失败事件只读取内层通用错误、丢失外层结构化上游字段的问题。
+- 加强错误详情脱敏，Gateway 会在转发流式 `response.failed` 前清理失败事件中的敏感值，避免 API Key、Authorization、Provider 地址及 HTTP、SOCKS、MTProxy 代理地址通过嵌套错误内容进入日志或界面；正常流内容保持原样。
+- 修正 Codex 版本保存提示，避免 Gateway 热同步失败时仍错误宣称已经同步成功；实际健康状态由 Gateway 状态入口展示。
+
+### 测试
+
+- 增加真实上游 400 被外层 502 包装、Responses 失败事件、Request ID 分层、结构化错误脱敏、Codex 版本热更新和 Gateway 身份头防覆盖回归。
+- 增加 Gateway 状态桌面端与 375px PWA 视觉回归，并覆盖版本检测、应用、恢复和长文本布局。
+
 ## [0.92.0-beta.1] - 2026-08-04 · minor（次版本预发布） · Provider 临时 Gateway 与 Agent 客户端控制
 
 ### 新增

@@ -536,6 +536,52 @@ async def test_runtime_emits_provider_switch_confirmation(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_runtime_emits_verified_upstream_error_facts(monkeypatch) -> None:
+    primary, fallback = _providers()
+    await _patch_runtime_config(monkeypatch, primary, fallback)
+
+    async def run(_model_call, _request, _tools, **_kwargs):  # noqa: ANN001
+        raise LLMError(
+            "Upstream request failed",
+            status_code=502,
+            upstream_status_code=400,
+            upstream_error_message="Unsupported parameter: max_output_tokens",
+            upstream_error_detail='{"detail":"Unsupported parameter: max_output_tokens"}',
+            upstream_request_id="sub2api-request",
+            client_request_id="sub2api-client-request",
+            request_id="gateway-request",
+            execution_backend="codex_gateway",
+        )
+
+    monkeypatch.setattr(runtime_module, "run_agent", run)
+
+    events = [
+        event
+        async for event in SystemAgentRuntime(_registry()).stream_turn(
+            None,  # type: ignore[arg-type]
+            session=_session(),  # type: ignore[arg-type]
+            user_text="测试模型",
+            role="admin",
+            channel="web",
+        )
+    ]
+
+    error = next(event for event in events if event["type"] == "error")
+    assert error["code"] == "AGENT_RUN_FAILED"
+    assert error["message"] == "上游 HTTP 400：Unsupported parameter: max_output_tokens"
+    assert error["status_code"] == 502
+    assert error["error_category"] == "request_invalid"
+    assert error["upstream_status_code"] == 400
+    assert error["upstream_error_message"] == "Unsupported parameter: max_output_tokens"
+    assert error["upstream_error_detail"] == '{"detail":"Unsupported parameter: max_output_tokens"}'
+    assert error["upstream_request_id"] == "sub2api-request"
+    assert error["client_request_id"] == "sub2api-client-request"
+    assert error["gateway_request_id"] == "gateway-request"
+    assert events[-1]["type"] == "done"
+    assert events[-1]["ok"] is False
+
+
+@pytest.mark.asyncio
 async def test_provider_switch_keeps_existing_tool_approval(monkeypatch) -> None:
     primary, fallback = _providers()
     await _patch_runtime_config(

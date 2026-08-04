@@ -111,7 +111,7 @@ func (h *Handler) responses(w http.ResponseWriter, r *http.Request) {
 	for name, value := range compatibilityHeaders {
 		upstreamRequest.Header.Set(name, value)
 	}
-	applyCodexIdentity(payload, upstreamRequest, identity)
+	applyCodexIdentity(payload, upstreamRequest, identity, route.CodexClientVersion)
 	security.StripInternalHeaders(upstreamRequest.Header)
 	upstreamBody, _ := json.Marshal(payload)
 	upstreamRequest.Body = io.NopCloser(bytes.NewReader(upstreamBody))
@@ -130,7 +130,8 @@ func (h *Handler) responses(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-TelePilot-Gateway-Stage", "upstream")
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		errorBody, _ := io.ReadAll(io.LimitReader(response.Body, 1<<20))
-		writeError(w, normalizedUpstreamStatus(response.StatusCode), diagnostics.FromUpstream(response.StatusCode, errorBody, requestID(r), routeSecretValues(route)...))
+		gatewayError := diagnostics.FromUpstream(response.StatusCode, errorBody, requestID(r), routeSecretValues(route)...)
+		writeError(w, normalizedUpstreamStatus(response.StatusCode), diagnostics.WithUpstreamHeaders(gatewayError, response.Header))
 		return
 	}
 	contentType := strings.ToLower(response.Header.Get("Content-Type"))
@@ -138,14 +139,21 @@ func (h *Handler) responses(w http.ResponseWriter, r *http.Request) {
 		if downstreamStream {
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.WriteHeader(http.StatusOK)
-			_ = copySSE(w, response.Body, route.UpstreamModel, model)
+			_ = copySSE(
+				w,
+				response.Body,
+				route.UpstreamModel,
+				model,
+				routeSecretValues(route)...,
+			)
 			return
 		}
 		final, err := aggregateSSE(response.Body, route.UpstreamModel, model)
 		if err != nil {
 			var failed *upstreamEventFailure
 			if errors.As(err, &failed) {
-				writeError(w, http.StatusBadGateway, diagnostics.FromUpstream(http.StatusBadGateway, failed.body, requestID(r), routeSecretValues(route)...))
+				gatewayError := diagnostics.FromUpstream(http.StatusBadGateway, failed.body, requestID(r), routeSecretValues(route)...)
+				writeError(w, http.StatusBadGateway, diagnostics.WithUpstreamHeaders(gatewayError, response.Header))
 				return
 			}
 			writeError(w, http.StatusBadGateway, contract.GatewayError{Code: "invalid_response", Message: err.Error(), RequestID: requestID(r), GatewayStage: "response"})
@@ -202,6 +210,8 @@ func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 		for name, value := range route.CompatibilityHeaders {
 			upstreamRequest.Header.Set(name, value)
 		}
+		identity := buildRequestIdentity(route, r)
+		applyCodexHeaders(upstreamRequest, identity, route.CodexClientVersion)
 		security.StripInternalHeaders(upstreamRequest.Header)
 		response, err = doUpstreamRequest(client, upstreamRequest, r.Context())
 		if err != nil {
@@ -227,7 +237,8 @@ func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		writeError(w, normalizedUpstreamStatus(response.StatusCode), diagnostics.FromUpstream(response.StatusCode, body, requestID(r), routeSecretValues(route)...))
+		gatewayError := diagnostics.FromUpstream(response.StatusCode, body, requestID(r), routeSecretValues(route)...)
+		writeError(w, normalizedUpstreamStatus(response.StatusCode), diagnostics.WithUpstreamHeaders(gatewayError, response.Header))
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -280,11 +291,22 @@ func compatibilityHeadersForRequest(route routing.Route, r *http.Request) (map[s
 }
 
 func routeSecretValues(route routing.Route) []string {
-	values := make([]string, 0, len(route.CompatibilityHeaders)+len(route.ModelsEndpoints)+3)
+	values := make(
+		[]string,
+		0,
+		len(route.CompatibilityHeaders)+
+			len(route.LivenessCompatibilityHeaders)+
+			len(route.ModelsEndpoints)+3,
+	)
 	values = append(values, route.APIKey, route.ProxyURL, route.BaseURL)
 	values = append(values, route.ModelsEndpoints...)
-	for _, value := range route.CompatibilityHeaders {
-		values = append(values, value)
+	for _, headers := range []map[string]string{
+		route.CompatibilityHeaders,
+		route.LivenessCompatibilityHeaders,
+	} {
+		for _, value := range headers {
+			values = append(values, value)
+		}
 	}
 	return values
 }
@@ -345,7 +367,13 @@ func httpClient(route routing.Route) *http.Client {
 	}
 }
 
-func copySSE(w io.Writer, reader io.Reader, upstreamModel, publicModel string) error {
+func copySSE(
+	w io.Writer,
+	reader io.Reader,
+	upstreamModel,
+	publicModel string,
+	knownSecrets ...string,
+) error {
 	flusher, _ := w.(http.Flusher)
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 64<<10), 1<<20)
@@ -355,6 +383,7 @@ func copySSE(w io.Writer, reader io.Reader, upstreamModel, publicModel string) e
 			data := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
 			if !bytes.Equal(data, []byte("[DONE]")) {
 				data = restoreModel(data, upstreamModel, publicModel)
+				data = redactFailedSSEEvent(data, knownSecrets...)
 			}
 			line = append([]byte("data: "), data...)
 		}
@@ -366,6 +395,70 @@ func copySSE(w io.Writer, reader io.Reader, upstreamModel, publicModel string) e
 		}
 	}
 	return scanner.Err()
+}
+
+func redactFailedSSEEvent(data []byte, knownSecrets ...string) []byte {
+	var event map[string]any
+	if json.Unmarshal(data, &event) != nil || event["type"] != "response.failed" {
+		return data
+	}
+	redactJSONValue(event, knownSecrets)
+	redacted, err := json.Marshal(event)
+	if err != nil {
+		return []byte(`{"type":"response.failed","response":{"error":{"message":"Upstream request failed"}}}`)
+	}
+	return redacted
+}
+
+func redactJSONValue(value any, knownSecrets []string) {
+	switch typed := value.(type) {
+	case map[string]any:
+		for childKey, child := range typed {
+			if sensitiveJSONKey(childKey) {
+				if child != nil && child != "" {
+					typed[childKey] = "<redacted>"
+				}
+				continue
+			}
+			if text, ok := child.(string); ok {
+				typed[childKey] = security.RedactKnown(text, knownSecrets...)
+				continue
+			}
+			redactJSONValue(child, knownSecrets)
+		}
+	case []any:
+		for index, child := range typed {
+			if text, ok := child.(string); ok {
+				typed[index] = security.RedactKnown(text, knownSecrets...)
+				continue
+			}
+			redactJSONValue(child, knownSecrets)
+		}
+	}
+}
+
+func sensitiveJSONKey(value string) bool {
+	normalized := strings.NewReplacer("-", "", "_", "", ".", "").Replace(strings.ToLower(value))
+	for _, fragment := range []string{
+		"authorization",
+		"apikey",
+		"accesstoken",
+		"refreshtoken",
+		"authtoken",
+		"bearertoken",
+		"bottoken",
+		"password",
+		"secret",
+		"credential",
+		"cookie",
+		"proxyuser",
+		"proxypass",
+	} {
+		if strings.Contains(normalized, fragment) {
+			return true
+		}
+	}
+	return false
 }
 
 func aggregateSSE(reader io.Reader, upstreamModel, publicModel string) (json.RawMessage, error) {

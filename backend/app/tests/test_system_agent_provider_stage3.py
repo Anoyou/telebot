@@ -595,4 +595,4 @@ def test_agent_gateway_client_rejects_direct_pinned_provider() -> None:
         {"mode": "pinned", "execution_backend": "codex_gateway"},
     )
 
-    assert selected == "该 Provider 未配置为内置 Codex Gateway，不能在 Agent 中临时转入 Gateway"
+    assert selected == "该 Provider 未配置为 Codex 客户端兼容模式（Gateway），不能在 Agent 中临时切换"

@@ -203,11 +203,20 @@ def _responses_event_error(prefix: str, error: Any, api_key: str | None) -> LLME
     payload = error if isinstance(error, Mapping) else {"message": str(error or "")}
     fact = llm_diag.diagnose_http_error(400, payload, api_key=api_key)
     return LLMError(
-        _safe_error_message(f"{prefix}: {str(error)[:200]}", api_key),
+        _safe_error_message(
+            f"{prefix}：{llm_diag.format_diagnostic_error(fact)}",
+            api_key,
+        ),
         retryable=fact.retryable,
         scope=fact.scope,
+        status_code=fact.status_code,
         category=fact.category,
+        upstream_status_code=fact.upstream_status_code,
         upstream_error_code=fact.upstream_error_code,
+        upstream_error_message=fact.upstream_error_message,
+        upstream_error_detail=fact.upstream_error_detail,
+        upstream_request_id=fact.upstream_request_id,
+        client_request_id=fact.client_request_id,
         upstream_summary=fact.upstream_summary,
     )
 
@@ -1314,7 +1323,7 @@ def _parse_responses_sse(text: str, api_key: str | None = None) -> dict[str, Any
             if payload_type in {"response.completed", "response.incomplete"}:
                 return with_stream_text(response)
             if payload_type == "response.failed":
-                error_payload = payload.get("error") or response.get("error") or response
+                error_payload = payload
                 continue
 
         if payload_type == "response.output_text.delta" and isinstance(payload.get("delta"), str):
@@ -3242,7 +3251,22 @@ class ResponsesClient(LLMClient):
         body: str,
     ) -> dict[str, Any]:
         self._capture_response_metadata(response)
-        return {}
+        fact = llm_diag.diagnose_http_error(
+            response.status_code,
+            body,
+            api_key=self._api_key,
+            base_url=self._base_url,
+        )
+        return {
+            "category": fact.category,
+            "upstream_status_code": fact.upstream_status_code,
+            "upstream_error_code": fact.upstream_error_code,
+            "upstream_error_message": fact.upstream_error_message,
+            "upstream_error_detail": fact.upstream_error_detail,
+            "upstream_request_id": fact.upstream_request_id,
+            "client_request_id": fact.client_request_id,
+            "upstream_summary": fact.upstream_summary,
+        }
 
     def _network_error(self, exc: httpx.HTTPError) -> LLMError:
         return LLMError(
@@ -3705,7 +3729,7 @@ class ResponsesClient(LLMClient):
                                 ):
                                     raise _responses_event_error(
                                         f"Responses streaming 结束状态异常: {status}",
-                                        response.get("error") or incomplete or response,
+                                        payload,
                                         self._api_key,
                                     )
                                 if event_type in {"response.completed", "response.incomplete"}:
@@ -3713,10 +3737,9 @@ class ResponsesClient(LLMClient):
                                     yield ModelStreamEvent(response=terminal_response())
                                     return
                                 if event_type == "response.failed":
-                                    error = payload.get("error") or response.get("error") or response
                                     raise _responses_event_error(
                                         "Responses streaming 返回失败事件",
-                                        error,
+                                        payload,
                                         self._api_key,
                                     )
                             if event_type == "response.output_text.delta":
@@ -3964,7 +3987,7 @@ class ResponsesClient(LLMClient):
                                 if status in {"failed", "cancelled"}:
                                     raise _responses_event_error(
                                         f"Responses streaming 结束状态异常: {status}",
-                                        response.get("error") or response,
+                                        payload,
                                         self._api_key,
                                     )
                                 if payload_type in {"response.completed", "response.incomplete"}:
@@ -3977,10 +4000,9 @@ class ResponsesClient(LLMClient):
                                     )
                                     return
                                 if payload_type == "response.failed":
-                                    error = payload.get("error") or response.get("error") or response
                                     raise _responses_event_error(
                                         "Responses streaming 返回失败事件",
-                                        error,
+                                        payload,
                                         self._api_key,
                                     )
                             if payload_type == "response.output_text.delta":
@@ -4253,7 +4275,12 @@ class GatewayResponsesClient(ResponsesClient):
         )
         return {
             "category": fact.category,
+            "upstream_status_code": fact.upstream_status_code,
             "upstream_error_code": fact.upstream_error_code,
+            "upstream_error_message": fact.upstream_error_message,
+            "upstream_error_detail": fact.upstream_error_detail,
+            "upstream_request_id": fact.upstream_request_id,
+            "client_request_id": fact.client_request_id,
             "request_id": fact.request_id,
             "gateway_stage": fact.gateway_stage,
             "gateway_version": self._last_gateway_version,
@@ -4306,7 +4333,7 @@ class GatewayResponsesClient(ResponsesClient):
 
     async def transcribe(self, audio: bytes, model: str) -> str:
         del audio, model
-        raise NotImplementedError("内置 Codex Gateway 首版不支持语音转写")
+        raise NotImplementedError("Codex 客户端兼容模式（Gateway）暂不支持语音转写")
 
     async def generate_image(
         self,
@@ -4331,7 +4358,7 @@ class GatewayResponsesClient(ResponsesClient):
             reasoning_effort,
             timeout_seconds,
         )
-        raise NotImplementedError("内置 Codex Gateway 首版不支持图片生成")
+        raise NotImplementedError("Codex 客户端兼容模式（Gateway）暂不支持图片生成")
 
     async def complete(self, *args: Any, **kwargs: Any) -> LLMResult:
         self._reset_gateway_diagnostics()
@@ -4455,6 +4482,44 @@ class LLMErrorScope(StrEnum):
     UNKNOWN = "unknown"
 
 
+def _diagnostic_body_for_error(
+    message: str,
+    *,
+    upstream_status_code: int | None,
+    upstream_error_code: str | None,
+    upstream_error_message: str | None,
+    upstream_error_detail: str | None,
+    upstream_request_id: str | None,
+    client_request_id: str | None,
+) -> str | Mapping[str, Any]:
+    structured_values = (
+        upstream_status_code,
+        upstream_error_code,
+        upstream_error_message,
+        upstream_error_detail,
+        upstream_request_id,
+        client_request_id,
+    )
+    if not any(value is not None for value in structured_values):
+        try:
+            payload = json.loads(message)
+        except (TypeError, ValueError):
+            payload = None
+        if isinstance(payload, Mapping):
+            return payload
+    return {
+        "error": {
+            "message": message,
+            "upstream_status_code": upstream_status_code,
+            "upstream_error_code": upstream_error_code,
+            "upstream_error_message": upstream_error_message,
+            "upstream_error_detail": upstream_error_detail,
+            "upstream_request_id": upstream_request_id,
+            "client_request_id": client_request_id,
+        }
+    }
+
+
 class LLMError(Exception):
     """LLM 调用层统一异常；message 已脱敏。"""
 
@@ -4466,7 +4531,12 @@ class LLMError(Exception):
         scope: LLMErrorScope | str | None = None,
         status_code: int | None = None,
         category: str | None = None,
+        upstream_status_code: int | None = None,
         upstream_error_code: str | None = None,
+        upstream_error_message: str | None = None,
+        upstream_error_detail: str | None = None,
+        upstream_request_id: str | None = None,
+        client_request_id: str | None = None,
         request_id: str | None = None,
         gateway_stage: str | None = None,
         gateway_version: str | None = None,
@@ -4474,10 +4544,19 @@ class LLMError(Exception):
         upstream_summary: str | None = None,
     ):
         super().__init__(message)
+        diagnostic_body = _diagnostic_body_for_error(
+            message,
+            upstream_status_code=upstream_status_code,
+            upstream_error_code=upstream_error_code,
+            upstream_error_message=upstream_error_message,
+            upstream_error_detail=upstream_error_detail,
+            upstream_request_id=upstream_request_id,
+            client_request_id=client_request_id,
+        )
         fact = (
             llm_diag.diagnose_http_error(
                 status_code,
-                message,
+                diagnostic_body,
                 request_id=request_id,
                 gateway_stage=gateway_stage,
             )
@@ -4497,7 +4576,22 @@ class LLMError(Exception):
             or (LLMErrorScope.TRANSIENT if self.retryable else LLMErrorScope.UNKNOWN)
         )
         self.status_code = status_code
+        self.upstream_status_code = upstream_status_code or (
+            fact.upstream_status_code if fact else None
+        )
         self.upstream_error_code = upstream_error_code or (fact.upstream_error_code if fact else None)
+        self.upstream_error_message = upstream_error_message or (
+            fact.upstream_error_message if fact else None
+        )
+        self.upstream_error_detail = upstream_error_detail or (
+            fact.upstream_error_detail if fact else None
+        )
+        self.upstream_request_id = upstream_request_id or (
+            fact.upstream_request_id if fact else None
+        )
+        self.client_request_id = client_request_id or (
+            fact.client_request_id if fact else None
+        )
         self.request_id = request_id or (fact.request_id if fact else None)
         self.gateway_stage = gateway_stage or (fact.gateway_stage if fact else None)
         self.gateway_version = (gateway_version or "").strip()[:64] or None
@@ -4518,7 +4612,12 @@ class LLMCallFailed(Exception):
         retryable: bool = False,
         scope: LLMErrorScope | str | None = None,
         category: str | None = None,
+        upstream_status_code: int | None = None,
         upstream_error_code: str | None = None,
+        upstream_error_message: str | None = None,
+        upstream_error_detail: str | None = None,
+        upstream_request_id: str | None = None,
+        client_request_id: str | None = None,
         request_id: str | None = None,
         gateway_stage: str | None = None,
         gateway_version: str | None = None,
@@ -4530,10 +4629,19 @@ class LLMCallFailed(Exception):
         self.provider_name = provider_name
         self.error_type = error_type  # "timeout" / "network" / "rate_limit" / "auth" / "server_error"
         self.status_code = status_code
+        diagnostic_body = _diagnostic_body_for_error(
+            message,
+            upstream_status_code=upstream_status_code,
+            upstream_error_code=upstream_error_code,
+            upstream_error_message=upstream_error_message,
+            upstream_error_detail=upstream_error_detail,
+            upstream_request_id=upstream_request_id,
+            client_request_id=client_request_id,
+        )
         fact = (
             llm_diag.diagnose_http_error(
                 status_code,
-                message,
+                diagnostic_body,
                 request_id=request_id,
                 gateway_stage=gateway_stage,
             )
@@ -4543,7 +4651,22 @@ class LLMCallFailed(Exception):
         self.category = category or (fact.category if fact else error_type) or llm_diag.DIAG_INVALID_RESPONSE
         self.retryable = fact.retryable if fact is not None else retryable
         self.scope = LLMErrorScope((fact.scope if fact else None) or scope or LLMErrorScope.UNKNOWN)
+        self.upstream_status_code = upstream_status_code or (
+            fact.upstream_status_code if fact else None
+        )
         self.upstream_error_code = upstream_error_code or (fact.upstream_error_code if fact else None)
+        self.upstream_error_message = upstream_error_message or (
+            fact.upstream_error_message if fact else None
+        )
+        self.upstream_error_detail = upstream_error_detail or (
+            fact.upstream_error_detail if fact else None
+        )
+        self.upstream_request_id = upstream_request_id or (
+            fact.upstream_request_id if fact else None
+        )
+        self.client_request_id = client_request_id or (
+            fact.client_request_id if fact else None
+        )
         self.request_id = request_id or (fact.request_id if fact else None)
         self.gateway_stage = gateway_stage or (fact.gateway_stage if fact else None)
         self.gateway_version = (gateway_version or "").strip()[:64] or None
@@ -4569,15 +4692,6 @@ def _error_scope_for_http(status_code: int, body: str = "") -> LLMErrorScope:
             return LLMErrorScope.ACCOUNT_POLICY
         return LLMErrorScope.PROVIDER_LOCAL
     if status_code == 400:
-        if any(
-            word in normalized
-            for word in (
-                "upstream request failed",
-                "upstream service failed",
-                "error from provider",
-            )
-        ):
-            return LLMErrorScope.PROVIDER_LOCAL
         if any(
             word in normalized
             for word in (
@@ -4706,7 +4820,7 @@ def build_client(
     execution_backend = getattr(provider_row, "execution_backend", "direct") or "direct"
     if execution_backend == LLM_EXECUTION_BACKEND_CODEX_GATEWAY:
         if fmt != LLM_API_FORMAT_RESPONSES:
-            raise ValueError("内置 Codex Gateway 仅支持 Responses")
+            raise ValueError("Codex 客户端兼容模式（Gateway）仅支持 Responses")
         from .gateway_runtime import DEFAULT_GATEWAY_SOCKET
 
         return GatewayResponsesClient(
@@ -4801,7 +4915,7 @@ def build_client_from_dto(
     fmt = api_format_override or dto.api_format or default_api_format_for(dto.provider)
     if dto.execution_backend == LLM_EXECUTION_BACKEND_CODEX_GATEWAY:
         if fmt != LLM_API_FORMAT_RESPONSES:
-            raise ValueError("内置 Codex Gateway 仅支持 Responses")
+            raise ValueError("Codex 客户端兼容模式（Gateway）仅支持 Responses")
         from .gateway_runtime import DEFAULT_GATEWAY_SOCKET
 
         return GatewayResponsesClient(

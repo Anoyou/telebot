@@ -396,9 +396,9 @@ async def create_provider(
     gateway_mode = payload.execution_backend == "codex_gateway"
     if gateway_mode:
         if effective_api_format != "responses":
-            raise _err("LLM_GATEWAY_FORMAT_INVALID", "内置 Codex Gateway 仅支持 Responses", 422)
+            raise _err("LLM_GATEWAY_FORMAT_INVALID", "Codex 客户端兼容模式（Gateway）仅支持 Responses", 422)
         if not payload.api_key:
-            raise _err("LLM_GATEWAY_CONFIG_INVALID", "内置 Codex Gateway 必须配置 API Key", 422)
+            raise _err("LLM_GATEWAY_CONFIG_INVALID", "Codex 客户端兼容模式（Gateway）必须配置 API Key", 422)
     identity_profile = normalize_client_identity_profile(
         payload.client_identity_profile
     )
@@ -486,11 +486,11 @@ async def update_provider(
     gateway_mode = effective_execution_backend == "codex_gateway"
     if gateway_mode:
         if effective_api_format != "responses":
-            raise _err("LLM_GATEWAY_FORMAT_INVALID", "内置 Codex Gateway 仅支持 Responses", 422)
+            raise _err("LLM_GATEWAY_FORMAT_INVALID", "Codex 客户端兼容模式（Gateway）仅支持 Responses", 422)
         requested_key = data.get("api_key") if "api_key" in data else None
         has_effective_key = bool(row.api_key_enc) if requested_key is None else bool(requested_key)
         if not has_effective_key:
-            raise _err("LLM_GATEWAY_CONFIG_INVALID", "内置 Codex Gateway 必须配置 API Key", 422)
+            raise _err("LLM_GATEWAY_CONFIG_INVALID", "Codex 客户端兼容模式（Gateway）必须配置 API Key", 422)
     if "base_url" in data:
         row.base_url = data["base_url"]
     if gateway_mode and not row.base_url:

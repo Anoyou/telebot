@@ -142,6 +142,17 @@ function jsonResponse(pathname: string): unknown | undefined {
   if (pathname === "/api/accounts") return [accountFixture];
   if (pathname === "/api/commands/llm-providers") return [];
   if (pathname === "/api/commands/llm-providers/runtime-health") return [];
+  if (pathname === "/api/commands/llm-providers/identity-versions") return {
+    items: [{
+      key: "codex_tui",
+      label: "Codex CLI",
+      current: "0.145.0",
+      default: "0.145.0",
+      registry: "npm",
+      detectable: true,
+    }],
+    profiles: [],
+  };
   if (pathname === "/api/system/resource-dashboard") return emptyResourceDashboard;
   if (pathname === "/api/system/settings") return { timezone: "Asia/Shanghai", login_security: {} };
   if (pathname === "/api/system-agent/config") return {

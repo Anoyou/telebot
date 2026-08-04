@@ -623,6 +623,35 @@ def _llm_err(code: str, message: str, status: int = 400) -> HTTPException:
     return HTTPException(status_code=status, detail={"code": code, "message": message})
 
 
+def _llm_upstream_err(code: str, prefix: str, exc: BaseException) -> HTTPException:
+    """保留已核实的上游错误事实，不把包装层状态冒充真实上游状态。"""
+
+    direct_status = getattr(exc, "status_code", None)
+    upstream_status = getattr(exc, "upstream_status_code", None)
+    response_status = upstream_status or direct_status
+    if not isinstance(response_status, int) or response_status < 400 or response_status > 599:
+        response_status = 502
+    category = str(getattr(exc, "category", None) or "").strip() or None
+    detail: dict[str, Any] = {
+        "code": code,
+        "message": f"{prefix}：{llm_diagnostics.format_diagnostic_error(exc)}",
+        "status_code": direct_status,
+        "error_category": category,
+        "suggestion": llm_diagnostics.suggestion_for(category) if category else None,
+        "upstream_status_code": upstream_status,
+        "upstream_error_code": getattr(exc, "upstream_error_code", None),
+        "upstream_error_message": getattr(exc, "upstream_error_message", None),
+        "upstream_error_detail": getattr(exc, "upstream_error_detail", None),
+        "upstream_request_id": getattr(exc, "upstream_request_id", None),
+        "client_request_id": getattr(exc, "client_request_id", None),
+        "gateway_request_id": getattr(exc, "request_id", None),
+    }
+    return HTTPException(
+        status_code=response_status,
+        detail={key: value for key, value in detail.items() if value is not None},
+    )
+
+
 async def _resolve_proxy_url(db, proxy_id: int | None) -> str | None:
     """把 provider.proxy_id 翻译成 httpx 接受的 ``socks5://...`` / ``http://...`` URL。
 
@@ -719,11 +748,7 @@ async def fetch_models_preview(
                     raise RuntimeError("Gateway Provider 未使用 Gateway transport")
                 gateway_ids = await gateway_client.list_models()
         except (LLMError, RuntimeError, ValueError) as exc:
-            raise _llm_err(
-                "FETCH_GATEWAY",
-                f"Gateway 拉取模型失败：{str(exc)[:300]}",
-                502,
-            ) from None
+            raise _llm_upstream_err("FETCH_GATEWAY", "Gateway 拉取模型失败", exc) from None
         new_ids = list(dict.fromkeys(str(item).strip() for item in gateway_ids if str(item).strip()))[:200]
         await audit.write(
             db,
@@ -1147,6 +1172,12 @@ async def detect_provider_protocols(
                     error_category=result.error_category,
                     error=result.error,
                     suggestion=result.suggestion,
+                    upstream_status_code=result.upstream_status_code,
+                    upstream_error_code=result.upstream_error_code,
+                    upstream_error_message=result.upstream_error_message,
+                    upstream_error_detail=result.upstream_error_detail,
+                    upstream_request_id=result.upstream_request_id,
+                    client_request_id=result.client_request_id,
                 )
             )
             if best is None or result.ok:
@@ -1358,16 +1389,26 @@ def _probe_result(
             latency_ms=latency_ms,
             stage=stage,
         )
-    body = diag.redact(resp.text, api_key=api_key or None, base_url=base_url)
-    category = diag.classify_status_code(resp.status_code, resp.text or "")
+    fact = diag.diagnose_http_error(
+        resp.status_code,
+        resp.text or "",
+        api_key=api_key or None,
+        base_url=base_url,
+    )
     return ProtocolProbeResult(
         ok=False,
         status_code=resp.status_code,
         latency_ms=latency_ms,
         stage=stage,
-        error_category=category,
-        suggestion=diag.suggestion_for(category),
-        error=f"HTTP {resp.status_code}: {body}",
+        error_category=fact.category,
+        suggestion=diag.suggestion_for(fact.category),
+        error=diag.format_diagnostic_error(fact),
+        upstream_status_code=fact.upstream_status_code,
+        upstream_error_code=fact.upstream_error_code,
+        upstream_error_message=fact.upstream_error_message,
+        upstream_error_detail=fact.upstream_error_detail,
+        upstream_request_id=fact.upstream_request_id,
+        client_request_id=fact.client_request_id,
     )
 
 
@@ -1464,11 +1505,7 @@ async def fetch_models(pid: int, db: DBSession, user: CurrentUser) -> FetchModel
         try:
             new_ids = await gateway_client.list_models()
         except LLMError as exc:
-            raise _llm_err(
-                "FETCH_GATEWAY",
-                f"Gateway 拉取模型失败：{str(exc)[:300]}",
-                502,
-            ) from None
+            raise _llm_upstream_err("FETCH_GATEWAY", "Gateway 拉取模型失败", exc) from None
     else:
         base_url = normalize_base_url(row.base_url or "https://api.openai.com/v1")
         api_key = decrypt_str(row.api_key_enc) if row.api_key_enc else ""
@@ -1646,8 +1683,13 @@ async def test_model(
             model=payload.model.strip(),
             error=e,
         )
-        # LLMError 已脱敏
-        return TestModelResponse(ok=False, latency_ms=elapsed_ms, error=str(e))
+        return TestModelResponse(
+            ok=False,
+            latency_ms=elapsed_ms,
+            error=llm_diagnostics.format_diagnostic_error(e),
+            status_code=e.status_code,
+            **_diagnostic_result_metadata(e),
+        )
     except Exception as e:  # noqa: BLE001
         elapsed_ms = int((_time.monotonic() - started) * 1000)
         await _emit_llm_diagnostic_usage(
@@ -1719,7 +1761,7 @@ def _temporary_backend_error(exc: Exception) -> str:
     from ..services.redactor import redact_text
 
     detail = redact_text(f"{type(exc).__name__}: {exc}")[:300]
-    return f"临时执行后端准备失败：{detail}"
+    return f"临时调用方式准备失败：{detail}"
 
 
 @asynccontextmanager
@@ -1882,8 +1924,9 @@ async def chat_test_models(
                     ok=False,
                     requested_model=model_id,
                     latency_ms=elapsed_ms,
-                    error=str(exc),
+                    error=llm_diagnostics.format_diagnostic_error(exc),
                     status_code=exc.status_code,
+                    **_diagnostic_result_metadata(exc),
                     **transport_metadata,
                     **_gateway_transport_metadata(exc),
                 )
@@ -2256,8 +2299,9 @@ async def stream_chat_test_models(
                     model=actual_model,
                     latency_ms=elapsed_ms,
                     response="".join(text_parts).strip() or None,
-                    error=str(exc),
+                    error=llm_diagnostics.format_diagnostic_error(exc),
                     status_code=exc.status_code,
+                    **_diagnostic_result_metadata(exc),
                     streaming=streaming,
                     stream_fallback=stream_fallback,
                     **transport_metadata,
@@ -2398,6 +2442,12 @@ def _liveness_result_items(raw: list[dict[str, Any]]) -> list[LivenessResultItem
             status_code=r.get("status_code"),
             error_category=r.get("error_category"),
             suggestion=r.get("suggestion"),
+            upstream_status_code=r.get("upstream_status_code"),
+            upstream_error_code=r.get("upstream_error_code"),
+            upstream_error_message=r.get("upstream_error_message"),
+            upstream_error_detail=r.get("upstream_error_detail"),
+            upstream_request_id=r.get("upstream_request_id"),
+            client_request_id=r.get("client_request_id"),
             client_identity_profile=r.get("client_identity_profile"),
             effective_api_format=r.get("effective_api_format"),
             execution_backend=r.get("execution_backend"),
@@ -2475,6 +2525,37 @@ def _gateway_error_metadata(outcome: object | None) -> dict[str, str | None]:
         "gateway_version": metadata["gateway_version"],
         "request_id": metadata["gateway_request_id"],
         "gateway_stage": metadata["gateway_stage"],
+    }
+
+
+def _diagnostic_result_metadata(outcome: object | None) -> dict[str, Any]:
+    """返回已经核实、可安全展示的上游错误事实。"""
+
+    category = str(getattr(outcome, "category", None) or "").strip() or None
+    return {
+        "error_category": category,
+        "suggestion": llm_diagnostics.suggestion_for(category) if category else None,
+        "upstream_status_code": getattr(outcome, "upstream_status_code", None),
+        "upstream_error_code": str(
+            getattr(outcome, "upstream_error_code", None) or ""
+        ).strip()
+        or None,
+        "upstream_error_message": str(
+            getattr(outcome, "upstream_error_message", None) or ""
+        ).strip()
+        or None,
+        "upstream_error_detail": str(
+            getattr(outcome, "upstream_error_detail", None) or ""
+        ).strip()
+        or None,
+        "upstream_request_id": str(
+            getattr(outcome, "upstream_request_id", None) or ""
+        ).strip()
+        or None,
+        "client_request_id": str(
+            getattr(outcome, "client_request_id", None) or ""
+        ).strip()
+        or None,
     }
 
 
@@ -2646,10 +2727,9 @@ async def full_liveness_run(
                 status,
                 {
                     "latency_ms": elapsed_ms,
-                    "error": llm_liveness.diag.redact(str(exc)),
+                    "error": llm_diagnostics.format_diagnostic_error(exc),
                     "status_code": exc.status_code,
-                    "error_category": status,
-                    "suggestion": llm_liveness.diag.suggestion_for(status),
+                    **_diagnostic_result_metadata(exc),
                     **transport_metadata,
                     **_gateway_transport_metadata(exc),
                 },
@@ -2739,16 +2819,13 @@ async def full_liveness_cancel(run_id: str, _user: CurrentUser) -> FullLivenessR
 
 def _liveness_status_from_error(exc: Any) -> str:
     """把 LLMError 映射为诊断状态（用于测活结果分类）。"""
-    text = str(exc).lower()
-    if "429" in text or "rate" in text or "too many" in text:
-        return llm_liveness.diag.DIAG_RATE_LIMITED
-    if "401" in text or "unauthor" in text or "api key" in text:
-        return llm_liveness.diag.DIAG_AUTH_FAILED
-    if "timeout" in text or "timed out" in text:
-        return llm_liveness.diag.DIAG_TIMEOUT
-    if "空" in text or "empty" in text:
-        return llm_liveness.diag.DIAG_EMPTY_RESPONSE
-    return llm_liveness.diag.DIAG_UPSTREAM_ERROR
+    category = str(getattr(exc, "category", None) or "").strip()
+    if category in llm_liveness.diag.ALL_DIAGNOSTIC_STATUSES:
+        return category
+    return llm_liveness.diag.classify_message(
+        str(exc),
+        retryable=bool(getattr(exc, "retryable", False)),
+    )
 
 
 # ═══════════════ 客户端身份 UA 版本配置（0.57.0 收口） ═══════════════
@@ -2969,6 +3046,16 @@ async def update_client_identity_versions(
 
     # 立即应用到进程内目录，使新版本对后续请求生效。
     llm_identity.apply_version_overrides(cleaned)
+    # Gateway 与 Provider 直连共用同一份 Codex 版本真相源。版本覆盖保存后立即
+    # 重新生成配置快照；已运行的模型列表、测活与 Agent 请求无需重启即可生效。
+    from ..services.gateway_runtime import reconcile_gateway_runtime
+
+    try:
+        gateway_status = await reconcile_gateway_runtime()
+        if gateway_status.state == "degraded":
+            log.warning("Codex 版本保存后 Gateway 热同步未就绪：%s", gateway_status.error)
+    except Exception:  # noqa: BLE001 - 设置已提交，运行状态由健康页明确展示
+        log.exception("Codex 版本保存后 Gateway 热同步失败")
     # Telegram 命令与插件运行在 multiprocessing spawn worker 中，各自持有独立的
     # 身份目录。复用 reload_commands 让全部账号 worker 从 DB 重载版本覆盖；Redis
     # 消息未确认时仍会由 worker 的周期 reconcile 最终收敛。

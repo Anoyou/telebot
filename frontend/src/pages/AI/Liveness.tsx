@@ -34,6 +34,7 @@ import { ModelRunMeta } from "@/components/ai/ModelRunMeta";
 import { FullLivenessPanel } from "@/components/ai/FullLivenessPanel";
 import { RuntimeHealthBar } from "@/components/ai/RuntimeHealthBar";
 import { StreamingText } from "@/components/ai/StreamingText";
+import { UpstreamErrorFacts } from "@/components/ai/UpstreamErrorFacts";
 import { PageHeader, PageShell } from "@/components/layout/PageScaffold";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
@@ -287,7 +288,10 @@ function ChatResponseBranch({
 
   const statusKey = classifyChatResult(result);
   const statusTone = livenessStatusTone(statusKey);
-  const httpStatus = extractHttpStatusCode(result.status_code, result.error);
+  const httpStatus = extractHttpStatusCode(
+    result.upstream_status_code ?? result.status_code,
+    result.error,
+  );
   const statusLabel =
     statusKey === "pending"
       ? result.streaming
@@ -395,7 +399,7 @@ function ChatResponseBranch({
             tone={isGatewayBackend(result.execution_backend) ? "info" : "neutral"}
             title={isGatewayBackend(result.execution_backend)
               ? [result.gateway_version, result.gateway_stage, result.gateway_request_id].filter(Boolean).join(" · ") || "实际通过内置 Gateway 调用"
-              : "实际通过 Provider 直连调用"}
+              : "实际通过标准 API 直连调用"}
           >
             实际后端 {executionBackendLabel(result.execution_backend)}
           </MetaBadge>
@@ -460,6 +464,12 @@ function ChatResponseBranch({
             <XCircle className="mt-0.5 h-4 w-4 shrink-0" />
             <span className="min-w-0 break-words">{result.error || "没有拿到可展示文本。"}</span>
           </div>
+          <UpstreamErrorFacts value={result} className="mt-2" />
+          {result.suggestion && result.suggestion !== result.error ? (
+            <div className="mt-2 break-words text-sm text-muted-foreground">
+              建议：{result.suggestion}
+            </div>
+          ) : null}
           <div className="mt-3 border-t pt-3">
             <Button
               type="button"
@@ -515,8 +525,8 @@ function LivenessOverrideFields({
           value={executionBackend}
           onChange={(event) => onExecutionBackendChange(event.target.value as LLMExecutionBackend)}
         >
-          <option value="direct">Provider 直连</option>
-          <option value="codex_gateway">内置 Codex Gateway</option>
+          <option value="direct">标准 API 直连</option>
+          <option value="codex_gateway">Codex 客户端兼容模式（Gateway）</option>
         </Select>
       </div>
       <div className="space-y-1.5">

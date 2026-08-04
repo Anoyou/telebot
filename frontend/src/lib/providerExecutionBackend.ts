@@ -55,10 +55,10 @@ export function applyExecutionBackend<T extends ProviderBackendFields>(
 
 export function executionBackendLabel(
   value?: string | null,
-  missingLabel = "Provider 直连",
+  missingLabel = "标准 API 直连",
 ): string {
-  if (value === "codex_gateway") return "Codex Gateway";
-  if (value === "direct") return "Provider 直连";
+  if (value === "codex_gateway") return "Codex 客户端兼容模式（Gateway）";
+  if (value === "direct") return "标准 API 直连";
   return missingLabel;
 }
 

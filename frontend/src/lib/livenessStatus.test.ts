@@ -40,9 +40,9 @@ test("全量测活 status 映射到九态词表", () => {
   assert.equal(livenessStatusLabel("degraded"), "降级");
 });
 
-test("extracts structured and legacy HTTP status codes", () => {
+test("只读取结构化 HTTP 状态，不从外层错误文案猜测", () => {
   assert.equal(extractHttpStatusCode(429, "ignored 503"), 429);
-  assert.equal(extractHttpStatusCode(null, "Responses streaming 接口返回 503"), 503);
+  assert.equal(extractHttpStatusCode(null, "Responses streaming 接口返回 503"), null);
   assert.equal(extractHttpStatusCode(null, "模型 gpt-404 暂不可用"), null);
   assert.equal(extractHttpStatusCode(null, "网络连接失败"), null);
 });

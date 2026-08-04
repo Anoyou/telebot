@@ -5274,6 +5274,8 @@ export interface components {
         ChatTestModelResult: {
             /** Client Identity Profile */
             client_identity_profile?: string | null;
+            /** Client Request Id */
+            client_request_id?: string | null;
             /** Effective Api Format */
             effective_api_format?: string | null;
             /**
@@ -5283,6 +5285,8 @@ export interface components {
             empty_response: boolean;
             /** Error */
             error?: string | null;
+            /** Error Category */
+            error_category?: string | null;
             /** Execution Backend */
             execution_backend?: string | null;
             /** Gateway Request Id */
@@ -5325,6 +5329,18 @@ export interface components {
              * @default false
              */
             streaming: boolean;
+            /** Suggestion */
+            suggestion?: string | null;
+            /** Upstream Error Code */
+            upstream_error_code?: string | null;
+            /** Upstream Error Detail */
+            upstream_error_detail?: string | null;
+            /** Upstream Error Message */
+            upstream_error_message?: string | null;
+            /** Upstream Request Id */
+            upstream_request_id?: string | null;
+            /** Upstream Status Code */
+            upstream_status_code?: number | null;
         };
         /**
          * ChatTestModelsRequest
@@ -5591,8 +5607,22 @@ export interface components {
         };
         /** CodexGatewayStatus */
         CodexGatewayStatus: {
+            /** Build Commit */
+            build_commit?: string | null;
+            /** Codex Client Version */
+            codex_client_version?: string | null;
+            /**
+             * Codex Version Source
+             * @default builtin_default
+             * @enum {string}
+             */
+            codex_version_source: "builtin_default" | "manual_override";
+            /** Contract Review Date */
+            contract_review_date?: string | null;
             /** Error */
             error?: string | null;
+            /** Protocol Version */
+            protocol_version?: string | null;
             /**
              * Provider Count
              * @default 0
@@ -5614,6 +5644,8 @@ export interface components {
              * @enum {string}
              */
             state: "not_required" | "ready" | "degraded";
+            /** Upstream Commit */
+            upstream_commit?: string | null;
             /** Version */
             version?: string | null;
         };
@@ -6412,7 +6444,7 @@ export interface components {
          * FetchModelsPreviewRequest
          * @description ``POST /api/commands/llm-providers/fetch-models-preview`` 入参。
          *
-         *     用于"未保存的 provider 也想 Fetch 模型列表"场景：
+         *     用于“未保存的 Provider 也想获取模型列表”场景：
          *     前端把当前编辑表单里的字段（provider / api_format / base_url / api_key / proxy_id）
          *     直接送过来，后端发一次 ``GET {base_url}/models`` 后**只返 ID 列表**，不落库，
          *     避免用户为了 Fetch 还得先保存。
@@ -7333,6 +7365,8 @@ export interface components {
         LivenessResultItem: {
             /** Client Identity Profile */
             client_identity_profile?: string | null;
+            /** Client Request Id */
+            client_request_id?: string | null;
             /** Effective Api Format */
             effective_api_format?: string | null;
             /** Error */
@@ -7381,6 +7415,16 @@ export interface components {
             status_code?: number | null;
             /** Suggestion */
             suggestion?: string | null;
+            /** Upstream Error Code */
+            upstream_error_code?: string | null;
+            /** Upstream Error Detail */
+            upstream_error_detail?: string | null;
+            /** Upstream Error Message */
+            upstream_error_message?: string | null;
+            /** Upstream Request Id */
+            upstream_request_id?: string | null;
+            /** Upstream Status Code */
+            upstream_status_code?: number | null;
         };
         /** LoginRequest */
         LoginRequest: {
@@ -8403,6 +8447,8 @@ export interface components {
             api_format: string;
             /** Client Identity Profile */
             client_identity_profile: string;
+            /** Client Request Id */
+            client_request_id?: string | null;
             /** Error */
             error?: string | null;
             /** Error Category */
@@ -8418,6 +8464,16 @@ export interface components {
             status_code?: number | null;
             /** Suggestion */
             suggestion?: string | null;
+            /** Upstream Error Code */
+            upstream_error_code?: string | null;
+            /** Upstream Error Detail */
+            upstream_error_detail?: string | null;
+            /** Upstream Error Message */
+            upstream_error_message?: string | null;
+            /** Upstream Request Id */
+            upstream_request_id?: string | null;
+            /** Upstream Status Code */
+            upstream_status_code?: number | null;
         };
         /**
          * ProtocolProbeResult
@@ -8428,6 +8484,8 @@ export interface components {
         ProtocolProbeResult: {
             /** Client Identity Profile */
             client_identity_profile?: string | null;
+            /** Client Request Id */
+            client_request_id?: string | null;
             /** Error */
             error?: string | null;
             /** Error Category */
@@ -8442,6 +8500,16 @@ export interface components {
             status_code?: number | null;
             /** Suggestion */
             suggestion?: string | null;
+            /** Upstream Error Code */
+            upstream_error_code?: string | null;
+            /** Upstream Error Detail */
+            upstream_error_detail?: string | null;
+            /** Upstream Error Message */
+            upstream_error_message?: string | null;
+            /** Upstream Request Id */
+            upstream_request_id?: string | null;
+            /** Upstream Status Code */
+            upstream_status_code?: number | null;
         };
         /**
          * ProviderModel
@@ -9932,8 +10000,12 @@ export interface components {
          * @description ``POST /api/commands/llm-providers/{pid}/test-model`` 出参。
          */
         TestModelResponse: {
+            /** Client Request Id */
+            client_request_id?: string | null;
             /** Error */
             error?: string | null;
+            /** Error Category */
+            error_category?: string | null;
             /** Latency Ms */
             latency_ms: number;
             /** Model */
@@ -9942,6 +10014,20 @@ export interface components {
             ok: boolean;
             /** Preview */
             preview?: string | null;
+            /** Status Code */
+            status_code?: number | null;
+            /** Suggestion */
+            suggestion?: string | null;
+            /** Upstream Error Code */
+            upstream_error_code?: string | null;
+            /** Upstream Error Detail */
+            upstream_error_detail?: string | null;
+            /** Upstream Error Message */
+            upstream_error_message?: string | null;
+            /** Upstream Request Id */
+            upstream_request_id?: string | null;
+            /** Upstream Status Code */
+            upstream_status_code?: number | null;
         };
         /**
          * TotpDisableRequest

@@ -362,7 +362,7 @@ function HealthGrid({ data }: { data: HealthOverview }) {
       </HealthBlock>
 
       <HealthBlock
-        title="内置 Codex Gateway"
+        title="Codex 客户端兼容 Gateway"
         subtitle="仅为选择 Gateway 的 Responses Provider 按需启动"
         tone={gateway.state === "degraded" ? "err" : "ok"}
         techName="telepilot-gateway / Unix Socket"
@@ -390,7 +390,7 @@ function HealthGrid({ data }: { data: HealthOverview }) {
               {gateway.error || "Gateway 启动、协议握手或配置同步失败。"}
             </div>
             <div className="mt-1 text-xs text-muted-foreground">
-              Provider 直连、Web 与 Worker 不受影响；请检查 Web 镜像是否包含 Gateway 二进制。
+              标准 API 直连、Web 与 Worker 不受影响；请检查 Web 镜像是否包含 Gateway 二进制。
             </div>
           </>
         ) : (

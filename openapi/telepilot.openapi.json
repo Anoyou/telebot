@@ -2835,6 +2835,17 @@
             ],
             "title": "Client Identity Profile"
           },
+          "client_request_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Client Request Id"
+          },
           "effective_api_format": {
             "anyOf": [
               {
@@ -2861,6 +2872,17 @@
               }
             ],
             "title": "Error"
+          },
+          "error_category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Category"
           },
           "execution_backend": {
             "anyOf": [
@@ -2981,6 +3003,72 @@
             "default": false,
             "title": "Streaming",
             "type": "boolean"
+          },
+          "suggestion": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Suggestion"
+          },
+          "upstream_error_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Upstream Error Code"
+          },
+          "upstream_error_detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Upstream Error Detail"
+          },
+          "upstream_error_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Upstream Error Message"
+          },
+          "upstream_request_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Upstream Request Id"
+          },
+          "upstream_status_code": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Upstream Status Code"
           }
         },
         "required": [
@@ -3595,6 +3683,48 @@
       },
       "CodexGatewayStatus": {
         "properties": {
+          "build_commit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Build Commit"
+          },
+          "codex_client_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Codex Client Version"
+          },
+          "codex_version_source": {
+            "default": "builtin_default",
+            "enum": [
+              "builtin_default",
+              "manual_override"
+            ],
+            "title": "Codex Version Source",
+            "type": "string"
+          },
+          "contract_review_date": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Contract Review Date"
+          },
           "error": {
             "anyOf": [
               {
@@ -3605,6 +3735,17 @@
               }
             ],
             "title": "Error"
+          },
+          "protocol_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Protocol Version"
           },
           "provider_count": {
             "default": 0,
@@ -3630,6 +3771,17 @@
             ],
             "title": "State",
             "type": "string"
+          },
+          "upstream_commit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Upstream Commit"
           },
           "version": {
             "anyOf": [
@@ -6018,7 +6170,7 @@
         "type": "object"
       },
       "FetchModelsPreviewRequest": {
-        "description": "``POST /api/commands/llm-providers/fetch-models-preview`` 入参。\n\n用于\"未保存的 provider 也想 Fetch 模型列表\"场景：\n前端把当前编辑表单里的字段（provider / api_format / base_url / api_key / proxy_id）\n直接送过来，后端发一次 ``GET {base_url}/models`` 后**只返 ID 列表**，不落库，\n避免用户为了 Fetch 还得先保存。\n\n若 ``pid`` 给了且 ``api_key`` 留空 / None，则用 DB 里已存的 api_key——\n前端\"编辑模式下不预填明文 key\"的约定下，用户只想换 base_url 重新 Fetch 也能跑。",
+        "description": "``POST /api/commands/llm-providers/fetch-models-preview`` 入参。\n\n用于“未保存的 Provider 也想获取模型列表”场景：\n前端把当前编辑表单里的字段（provider / api_format / base_url / api_key / proxy_id）\n直接送过来，后端发一次 ``GET {base_url}/models`` 后**只返 ID 列表**，不落库，\n避免用户为了 Fetch 还得先保存。\n\n若 ``pid`` 给了且 ``api_key`` 留空 / None，则用 DB 里已存的 api_key——\n前端\"编辑模式下不预填明文 key\"的约定下，用户只想换 base_url 重新 Fetch 也能跑。",
         "properties": {
           "api_format": {
             "default": "chat_completions",
@@ -8587,6 +8739,17 @@
             ],
             "title": "Client Identity Profile"
           },
+          "client_request_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Client Request Id"
+          },
           "effective_api_format": {
             "anyOf": [
               {
@@ -8732,6 +8895,61 @@
               }
             ],
             "title": "Suggestion"
+          },
+          "upstream_error_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Upstream Error Code"
+          },
+          "upstream_error_detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Upstream Error Detail"
+          },
+          "upstream_error_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Upstream Error Message"
+          },
+          "upstream_request_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Upstream Request Id"
+          },
+          "upstream_status_code": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Upstream Status Code"
           }
         },
         "required": [
@@ -11484,6 +11702,17 @@
             "title": "Client Identity Profile",
             "type": "string"
           },
+          "client_request_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Client Request Id"
+          },
           "error": {
             "anyOf": [
               {
@@ -11536,6 +11765,61 @@
               }
             ],
             "title": "Suggestion"
+          },
+          "upstream_error_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Upstream Error Code"
+          },
+          "upstream_error_detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Upstream Error Detail"
+          },
+          "upstream_error_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Upstream Error Message"
+          },
+          "upstream_request_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Upstream Request Id"
+          },
+          "upstream_status_code": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Upstream Status Code"
           }
         },
         "required": [
@@ -11559,6 +11843,17 @@
               }
             ],
             "title": "Client Identity Profile"
+          },
+          "client_request_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Client Request Id"
           },
           "error": {
             "anyOf": [
@@ -11622,6 +11917,61 @@
               }
             ],
             "title": "Suggestion"
+          },
+          "upstream_error_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Upstream Error Code"
+          },
+          "upstream_error_detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Upstream Error Detail"
+          },
+          "upstream_error_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Upstream Error Message"
+          },
+          "upstream_request_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Upstream Request Id"
+          },
+          "upstream_status_code": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Upstream Status Code"
           }
         },
         "required": [
@@ -15765,6 +16115,17 @@
       "TestModelResponse": {
         "description": "``POST /api/commands/llm-providers/{pid}/test-model`` 出参。",
         "properties": {
+          "client_request_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Client Request Id"
+          },
           "error": {
             "anyOf": [
               {
@@ -15775,6 +16136,17 @@
               }
             ],
             "title": "Error"
+          },
+          "error_category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Category"
           },
           "latency_ms": {
             "title": "Latency Ms",
@@ -15805,6 +16177,83 @@
               }
             ],
             "title": "Preview"
+          },
+          "status_code": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status Code"
+          },
+          "suggestion": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Suggestion"
+          },
+          "upstream_error_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Upstream Error Code"
+          },
+          "upstream_error_detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Upstream Error Detail"
+          },
+          "upstream_error_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Upstream Error Message"
+          },
+          "upstream_request_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Upstream Request Id"
+          },
+          "upstream_status_code": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Upstream Status Code"
           }
         },
         "required": [
@@ -17187,7 +17636,7 @@
   },
   "info": {
     "title": "TelePilot",
-    "version": "0.92.0-beta.1"
+    "version": "0.93.0-beta.1"
   },
   "openapi": "3.1.0",
   "paths": {

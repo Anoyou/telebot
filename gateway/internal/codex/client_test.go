@@ -117,6 +117,26 @@ func TestCodexIdentityOverridesConflictingPayloadMetadata(t *testing.T) {
 	}
 }
 
+func TestCodexIdentityUsesConfiguredVersionInHeaders(t *testing.T) {
+	payload := map[string]any{}
+	upstream := httptest.NewRequest(http.MethodPost, "https://upstream.example/responses", nil)
+	identity := requestIdentity{
+		installationID: "installation",
+		sessionID:      "session",
+		threadID:       "thread",
+		turnID:         "turn",
+		windowID:       "window",
+		promptCacheKey: "cache",
+		turnIndex:      1,
+	}
+
+	applyCodexIdentity(payload, upstream, identity, "0.199.0")
+
+	if upstream.Header.Get("Version") != "0.199.0" || !strings.Contains(upstream.Header.Get("User-Agent"), "codex-tui/0.199.0") {
+		t.Fatalf("configured version missing from headers: %#v", upstream.Header)
+	}
+}
+
 func TestCodexIdentityIsStableAndCredentialScoped(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
 	request.Header.Set("X-TelePilot-Session-ID", "session")
@@ -184,6 +204,34 @@ func TestAggregateSSEPreservesStructuredResponseFailedFact(t *testing.T) {
 	}
 }
 
+func TestStreamingResponseFailedRedactsSecretsWithoutChangingNormalEvents(t *testing.T) {
+	input := "data: {\"type\":\"response.output_text.delta\",\"delta\":\"visit https://public.example/docs\"}\n\n" +
+		"data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"bad opaque-provider-key at https://tenant.example/private\",\"authorization\":\"Bearer upstream-secret\"}}}\n\n"
+	var output bytes.Buffer
+
+	if err := copySSE(&output, strings.NewReader(input), "model", "model", "opaque-provider-key"); err != nil {
+		t.Fatal(err)
+	}
+
+	body := output.String()
+	if !strings.Contains(body, "https://public.example/docs") {
+		t.Fatalf("normal stream event was unexpectedly redacted: %s", body)
+	}
+	for _, secret := range []string{
+		"opaque-provider-key",
+		"tenant.example",
+		"upstream-secret",
+	} {
+		if strings.Contains(body, secret) {
+			t.Fatalf("streaming failure leaked %q: %s", secret, body)
+		}
+	}
+	if !strings.Contains(body, `"type":"response.failed"`) ||
+		!strings.Contains(body, `"authorization":"\u003credacted\u003e"`) {
+		t.Fatalf("streaming failure structure was lost: %s", body)
+	}
+}
+
 func TestUpstreamErrorPreservesStableFactWithoutSecret(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
@@ -200,12 +248,14 @@ func TestUpstreamErrorPreservesStableFactWithoutSecret(t *testing.T) {
 	}
 }
 
-func TestModelsUsesProviderCredentialsAndModelsHeaders(t *testing.T) {
+func TestModelsUsesProviderCredentialsAndCompleteCodexIdentity(t *testing.T) {
 	var gotAuth, gotScope, leakedHeader string
+	var identityHeaders http.Header
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
 		gotScope = r.Header.Get("X-Models-Scope")
 		leakedHeader = r.Header.Get("X-TelePilot-Session-ID")
+		identityHeaders = r.Header.Clone()
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"upstream-model"}]}`))
 	}))
@@ -224,6 +274,21 @@ func TestModelsUsesProviderCredentialsAndModelsHeaders(t *testing.T) {
 	}
 	if recorder.Header().Get("X-TelePilot-Gateway-Request-ID") != "models-req-1" {
 		t.Fatalf("gateway request id missing: %#v", recorder.Header())
+	}
+	for _, name := range []string{
+		"User-Agent",
+		"Originator",
+		"Version",
+		"Session-Id",
+		"Session_id",
+		"Thread-Id",
+		"X-Client-Request-Id",
+		"X-Codex-Window-Id",
+		"X-Codex-Turn-Metadata",
+	} {
+		if identityHeaders.Get(name) == "" {
+			t.Fatalf("models request missing Codex identity header %s: %#v", name, identityHeaders)
+		}
 	}
 }
 

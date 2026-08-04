@@ -14,8 +14,9 @@ import (
 // 该档案固定对齐 gateway/UPSTREAM.md 中审查过的 CLIProxyAPI Codex executor。
 // 这里只复现公开的 Responses 请求契约，不生成 OAuth Account ID、设备证明或 attestation。
 const (
-	codexClientVersion = "0.146.0"
-	codexUserAgent     = "codex-tui/0.146.0 (Mac OS 26.5.0; arm64) iTerm.app/3.6.10 (codex-tui; 0.146.0)"
+	// 仅供缺少控制面版本的兼容调用与测试使用，须与控制面默认值一致。
+	codexClientVersion = "0.145.0"
+	codexUserAgent     = "codex-tui/0.145.0 (Mac OS 26.5.0; arm64) iTerm.app/3.6.10 (codex-tui; 0.145.0)"
 	codexOriginator    = "codex-tui"
 )
 
@@ -66,7 +67,12 @@ func buildRequestIdentity(route routing.Route, request *http.Request) requestIde
 	}
 }
 
-func applyCodexIdentity(payload map[string]any, upstream *http.Request, identity requestIdentity) {
+func applyCodexIdentity(
+	payload map[string]any,
+	upstream *http.Request,
+	identity requestIdentity,
+	configuredVersion ...string,
+) {
 	turnMetadata := map[string]any{
 		"installation_id":  identity.installationID,
 		"session_id":       identity.sessionID,
@@ -94,10 +100,39 @@ func applyCodexIdentity(payload map[string]any, upstream *http.Request, identity
 	payload["client_metadata"] = clientMetadata
 	payload["prompt_cache_key"] = identity.promptCacheKey
 
+	version := ""
+	if len(configuredVersion) > 0 {
+		version = configuredVersion[0]
+	}
+	applyCodexHeaders(upstream, identity, version)
+}
+
+func applyCodexHeaders(upstream *http.Request, identity requestIdentity, configuredVersion string) {
+	version := strings.TrimSpace(configuredVersion)
+	if version == "" {
+		version = codexClientVersion
+	}
+	userAgent := fmt.Sprintf(
+		"codex-tui/%s (Mac OS 26.5.0; arm64) iTerm.app/3.6.10 (codex-tui; %s)",
+		version,
+		version,
+	)
+	turnMetadata := map[string]any{
+		"installation_id":  identity.installationID,
+		"session_id":       identity.sessionID,
+		"thread_id":        identity.threadID,
+		"turn_id":          identity.turnID,
+		"window_id":        identity.windowID,
+		"request_kind":     "turn",
+		"prompt_cache_key": identity.promptCacheKey,
+		"turn_index":       identity.turnIndex,
+	}
+	turnMetadataJSON, _ := json.Marshal(turnMetadata)
+
 	// 身份字段在 Provider 兼容头之后覆盖，确保用户配置不能伪造或拆散同一份身份。
-	upstream.Header.Set("User-Agent", codexUserAgent)
+	upstream.Header.Set("User-Agent", userAgent)
 	upstream.Header.Set("Originator", codexOriginator)
-	upstream.Header.Set("Version", codexClientVersion)
+	upstream.Header.Set("Version", version)
 	upstream.Header.Set("Session_id", identity.promptCacheKey)
 	upstream.Header.Set("Session-Id", identity.sessionID)
 	upstream.Header.Set("Thread-Id", identity.threadID)

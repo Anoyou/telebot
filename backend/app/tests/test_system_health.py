@@ -55,6 +55,12 @@ def test_snapshot_codex_gateway_exposes_only_public_runtime_facts() -> None:
         revision=4,
         provider_count=2,
         version="0.1.0-beta.1",
+        protocol_version="2",
+        upstream_commit="abc123",
+        build_commit="def456",
+        codex_client_version="0.146.0",
+        codex_version_source="manual_override",
+        contract_review_date="2026-08-04",
         error=None,
     )
     with patch("app.services.gateway_runtime.gateway_runtime_manager.status", return_value=status):
@@ -66,6 +72,12 @@ def test_snapshot_codex_gateway_exposes_only_public_runtime_facts() -> None:
         revision=4,
         provider_count=2,
         version="0.1.0-beta.1",
+        protocol_version="2",
+        upstream_commit="abc123",
+        build_commit="def456",
+        codex_client_version="0.146.0",
+        codex_version_source="manual_override",
+        contract_review_date="2026-08-04",
     )
 
 

@@ -3,10 +3,11 @@ package contract
 const ProtocolVersion = "2"
 
 type VersionInfo struct {
-	Version         string `json:"version"`
-	ProtocolVersion string `json:"gateway_protocol_version"`
-	UpstreamCommit  string `json:"upstream_commit"`
-	BuildCommit     string `json:"build_commit"`
+	Version                 string `json:"version"`
+	ProtocolVersion         string `json:"gateway_protocol_version"`
+	UpstreamCommit          string `json:"upstream_commit"`
+	BuildCommit             string `json:"build_commit"`
+	CodexContractReviewDate string `json:"codex_contract_review_date"`
 }
 
 type ErrorEnvelope struct {
@@ -14,20 +15,26 @@ type ErrorEnvelope struct {
 }
 
 type GatewayError struct {
-	Code              string `json:"code"`
-	Message           string `json:"message"`
-	Retryable         bool   `json:"retryable"`
-	StatusCode        int    `json:"status_code,omitempty"`
-	UpstreamErrorCode string `json:"upstream_error_code,omitempty"`
-	RequestID         string `json:"request_id,omitempty"`
-	GatewayStage      string `json:"gateway_stage,omitempty"`
+	Code                 string `json:"code"`
+	Message              string `json:"message"`
+	Retryable            bool   `json:"retryable"`
+	StatusCode           int    `json:"status_code,omitempty"`
+	UpstreamStatusCode   int    `json:"upstream_status_code,omitempty"`
+	UpstreamErrorCode    string `json:"upstream_error_code,omitempty"`
+	UpstreamErrorMessage string `json:"upstream_error_message,omitempty"`
+	UpstreamErrorDetail  string `json:"upstream_error_detail,omitempty"`
+	UpstreamRequestID    string `json:"upstream_request_id,omitempty"`
+	ClientRequestID      string `json:"client_request_id,omitempty"`
+	RequestID            string `json:"request_id,omitempty"`
+	GatewayStage         string `json:"gateway_stage,omitempty"`
 }
 
 type ConfigSnapshot struct {
-	SchemaVersion   int              `json:"schema_version"`
-	ProtocolVersion string           `json:"gateway_protocol_version"`
-	Revision        int64            `json:"revision"`
-	Providers       []ProviderConfig `json:"providers"`
+	SchemaVersion      int              `json:"schema_version"`
+	ProtocolVersion    string           `json:"gateway_protocol_version"`
+	CodexClientVersion string           `json:"codex_client_version,omitempty"`
+	Revision           int64            `json:"revision"`
+	Providers          []ProviderConfig `json:"providers"`
 }
 
 type ProviderConfig struct {
@@ -46,9 +53,10 @@ type ProviderConfig struct {
 }
 
 type ConfigStatus struct {
-	Ready         bool   `json:"ready"`
-	Revision      int64  `json:"revision"`
-	ProviderCount int    `json:"provider_count"`
-	SyncedAt      string `json:"synced_at,omitempty"`
-	Error         string `json:"error,omitempty"`
+	Ready              bool   `json:"ready"`
+	Revision           int64  `json:"revision"`
+	ProviderCount      int    `json:"provider_count"`
+	CodexClientVersion string `json:"codex_client_version,omitempty"`
+	SyncedAt           string `json:"synced_at,omitempty"`
+	Error              string `json:"error,omitempty"`
 }

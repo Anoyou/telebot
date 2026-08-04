@@ -1,20 +1,22 @@
-# 内置 Codex Gateway
+# Codex 客户端兼容模式（Gateway）
 
-TelePilot 可以让单个 LLM Provider 选择「Provider 直连」或「内置 Codex Gateway」。Gateway 是 Web 进程按需管理的独立 Go 子进程，只负责 Responses 协议传输，不是第二个 Agent，也不改变 System Agent、插件 AI、预算、重试或 fallback 的决策归属。
+TelePilot 可以让单个 LLM Provider 选择「标准 API 直连」或「Codex 客户端兼容模式（Gateway）」。Gateway 是最接近真实 Codex Responses 客户端公开请求契约的内置调用方式：由 Web 进程按需管理独立 Go 子进程，通过 Unix Socket 补齐动态会话身份并转发 Responses 请求。它不是第二个 Agent，也不改变 System Agent、插件 AI、预算、重试或 fallback 的决策归属。
 
 ## Provider 配置
 
 在「AI → 模型提供商」新建或编辑 Provider：
 
-1. 「Provider 直连」保持原有请求路径，继续使用 Provider 的协议档案、客户端身份、代理和兼容请求头。
-2. 「内置 Codex Gateway」固定使用 Responses API 与 Codex Responses 档案，身份由 Gateway 管理。
+1. 「标准 API 直连」保持原有请求路径，继续使用 Provider 的协议档案、客户端身份、代理和兼容请求头。
+2. 「Codex 客户端兼容模式（Gateway）」固定使用 Responses API 与 Codex Responses 档案，身份由 Gateway 管理。
 3. direct 与 Gateway 之间切换不会清空 API Key、代理、兼容请求头或已保存的客户端身份；切回 direct 后恢复原协议、联网协议和身份配置。LLM Provider 代理仅支持 HTTP/HTTPS/SOCKS5；被 Provider 引用的代理不能改成 MTProxy。
 4. Gateway Provider 必须配置 API Key；Base URL 留空时会物化当前服务类型的默认地址。新建或编辑表单可把当前未保存参数临时注入 Gateway，用于读取模型列表和快速验证；临时快照会与已提交 Provider 串行同步，请求结束后立即恢复数据库中的已提交快照。
 5. Gateway 只支持文本、图片输入与工具调用的 Responses 路径。Chat Completions、Anthropic Messages、语音转写和 `/images/generations` 图片生成必须使用 direct Provider。
 
 模型测活的成功与失败结果都可展开“临时配置并再次测试”。临时选择 Gateway 时固定使用 Responses 且身份由 Gateway 管理；这些覆盖只作用于当次重试，不写回 Provider。
 
-模型提供商页的“Gateway 状态”展示进程状态、版本、Provider 数和最近错误。Gateway 当前没有独立的用户配置表单；二进制路径与 Unix Socket 属于部署配置，超时、并发和身份契约由 TelePilot 随版本统一维护。
+模型提供商页的“Gateway 管理”入口展示进程状态、模块版本、协议版本、构建与上游提交、Codex 客户端版本、Provider 数和最近错误。这里可以检测最新 Codex 版本、显式应用检测结果或恢复 TelePilot 内置版本；应用或恢复后会热同步模型列表、模型测活和 Agent 的后续调用，无需重启 Web。版本检测只读取候选版本，不会自动应用，也不代表请求契约已经完成兼容审查。
+
+Gateway 不提供 Base URL、请求头、Socket、超时或并发等独立用户配置：Provider 接入参数仍在 Provider 表单维护，二进制路径与 Unix Socket 属于部署配置，其余传输契约由 TelePilot 随版本统一维护。
 
 Gateway Provider 保存前会检查内置二进制和协议兼容性。Gateway 不可用时保存失败，不会在同一 Provider 内静默改走 direct。
 
@@ -52,6 +54,10 @@ Gateway 不是把普通请求只换一个 UA。它依据 TelePilot 传入的 Pro
 - `client_rejected`：上游拒绝当前客户端。Gateway 已补齐公开 Codex 请求契约；若仍出现该错误，先核对 Provider 是否确实支持 API-Key 形式的 Codex Responses，再检查固定上游基线是否需要升级。
 - `official_account_required`：上游明确要求 OAuth / ChatGPT 账号等官方账号运行时；它不等同于 API Key 错误，也不由 Gateway 伪造。
 - `quota_exhausted`、`rate_limited`、`upstream_error`、`timeout`：由 TelePilot runtime 按现有规则决定重试或切换其它 Provider。Gateway 自己不做语义重试。
+
+错误诊断优先展示上游返回的结构化事实，包括 `upstream_status_code`、`upstream_error_code`、`upstream_error_message`、`upstream_error_detail`、`upstream_request_id` 和 `client_request_id`。即使中转站把真实上游 400 包装成外层 502，TelePilot 也应显示真实上游 400 及其错误详情；只有没有更具体上游事实且有效状态确实为 5xx 时，才提示“临时故障可重试”。
+
+TelePilot Request ID、Gateway Request ID、上游 Request ID 与 Client Request ID 属于不同链路标识，不得互相冒充。排查多级中转时，先用 TelePilot Request ID 找到本次调用，再按界面或日志保留的上游 Request ID 查询中转站的结构化错误记录；不要根据外层包装文案反推真实上游状态。
 
 若 Gateway Provider 失败，TelePilot 可以按配置切换到另一个 Provider；不会在同一个 Provider 内绕过 Gateway 偷跑 direct。流已经输出文本后不会切换，避免拼接两次回答。
 
@@ -114,6 +120,6 @@ System Agent、命令 AI、记忆压缩、能力探测和插件 `ctx.ai.complete
 
 Web Agent 输入区还提供会话级“调用客户端”选择：
 
-- “跟随 Provider”使用每个 Provider 已保存的执行后端和身份。
-- 直连身份选项只覆盖当前会话后续请求，不修改 Provider；即使 Provider 默认走 Gateway，也可临时改用 Provider 直连。
-- “Codex Gateway”只展示并选择已经保存为 Gateway 执行后端、且可用于 Tools 的模型。没有可用 Gateway Provider 时选项会显示“未配置”；平台不会把任意 direct Provider 在 Agent 长任务中隐式改写为临时 Gateway Provider。
+- “跟随 Provider”使用每个 Provider 已保存的调用方式和身份。
+- 标准 API 直连身份选项只覆盖当前会话后续请求，不修改 Provider；即使 Provider 默认走 Gateway，也可临时改用标准 API 直连。
+- “Codex 客户端兼容模式”只展示并选择已经保存为 Gateway 调用方式、且可用于 Tools 的模型。没有可用 Gateway Provider 时选项会显示“未配置”；平台不会把任意 direct Provider 在 Agent 长任务中隐式改写为临时 Gateway Provider。

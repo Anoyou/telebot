@@ -202,6 +202,49 @@ async def test_quick_verify_auth_failure_is_not_misreported_as_model_problem(
     assert error["type"] == "error"
     assert error["requires_model"] is False
     assert "401" in str(error["error"])
+    assert error["status_code"] == 401
+    assert error["error_category"] == "auth_failed"
+
+
+@pytest.mark.asyncio
+async def test_quick_verify_preserves_real_upstream_error_facts(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        llm_quick_verify,
+        "discover_models",
+        AsyncMock(return_value=["gpt-upstream-test"]),
+    )
+
+    class FakeClient:
+        async def stream_complete(self, *_args, **_kwargs):
+            if False:
+                yield LLMStreamChunk()
+            raise LLMError(
+                "包装层返回 502",
+                status_code=502,
+                upstream_status_code=400,
+                upstream_error_message="Unsupported parameter: max_output_tokens",
+                upstream_error_detail='{"detail":"Unsupported parameter: max_output_tokens"}',
+                upstream_request_id="80a1f4a9-0e88-4a6e-bd97-310a1fb144a7",
+                client_request_id="53a17c9a-d53a-4df5-8509-13dc7ad36231",
+            )
+
+    monkeypatch.setattr(
+        llm_quick_verify,
+        "build_client_from_dto",
+        lambda _dto, **_kwargs: FakeClient(),
+    )
+
+    error = (await _collect_events())[-1]
+
+    assert error["status_code"] == 502
+    assert error["upstream_status_code"] == 400
+    assert error["error_category"] == "request_invalid"
+    assert error["upstream_error_message"] == "Unsupported parameter: max_output_tokens"
+    assert error["upstream_request_id"] == "80a1f4a9-0e88-4a6e-bd97-310a1fb144a7"
+    assert error["client_request_id"] == "53a17c9a-d53a-4df5-8509-13dc7ad36231"
+    assert "上游 HTTP 400" in str(error["error"])
 
 
 @pytest.mark.asyncio
@@ -675,7 +718,7 @@ async def test_gateway_quick_verify_setup_failure_returns_terminal_event(monkeyp
 
     assert event["type"] == "error"
     assert event["ok"] is False
-    assert "临时执行后端准备失败" in event["error"]
+    assert "临时调用方式准备失败" in event["error"]
 
 
 @pytest.mark.asyncio

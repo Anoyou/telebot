@@ -25,6 +25,22 @@ func TestRedactKnownSecret(t *testing.T) {
 	}
 }
 
+func TestRedactStructuredSecretsAndNetworkLocations(t *testing.T) {
+	input := `{"apiKey":"opaque-value","authorization":"Basic dXNlcjpwYXNz","endpoint":"https://tenant.example/private/v1","proxy":"socks5://user:pass@proxy.example:1080"}`
+	output := Redact(input)
+	for _, secret := range []string{
+		"opaque-value",
+		"dXNlcjpwYXNz",
+		"tenant.example",
+		"proxy.example",
+		"user:pass",
+	} {
+		if strings.Contains(output, secret) {
+			t.Fatalf("structured secret leaked: %s", output)
+		}
+	}
+}
+
 func TestStripInternalHeaders(t *testing.T) {
 	header := http.Header{"X-Telepilot-Provider-Id": {"42"}, "Content-Type": {"application/json"}}
 	StripInternalHeaders(header)

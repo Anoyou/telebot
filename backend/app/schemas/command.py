@@ -434,7 +434,7 @@ class LLMProviderCreate(BaseModel):
 
     models: list[ProviderModel] = Field(default_factory=list, max_length=200)
     """该 provider 下挂的候选模型清单。新建时通常留空；建完 provider 后用前端的
-    ``Fetch 模型列表`` 按钮自动拉取，再 toggle 启用要用的几个。"""
+    “获取模型列表”按钮自动拉取，再 toggle 启用要用的几个。"""
 
     request_headers: list[LLMRequestHeaderInput] = Field(default_factory=list)
     """Provider 专用兼容请求头；服务层校验名称、作用域、大小与系统保留字段。"""
@@ -456,7 +456,7 @@ class LLMProviderCreate(BaseModel):
     @model_validator(mode="after")
     def _validate_execution_backend(self) -> LLMProviderCreate:
         if self.execution_backend == "codex_gateway" and self.api_format != "responses":
-            raise ValueError("内置 Codex Gateway 仅支持 Responses API Format")
+            raise ValueError("Codex 客户端兼容模式（Gateway）仅支持 Responses API Format")
         return self
 
     @field_validator("tags")
@@ -581,7 +581,7 @@ class FetchModelsResponse(BaseModel):
 class FetchModelsPreviewRequest(BaseModel):
     """``POST /api/commands/llm-providers/fetch-models-preview`` 入参。
 
-    用于"未保存的 provider 也想 Fetch 模型列表"场景：
+    用于“未保存的 Provider 也想获取模型列表”场景：
     前端把当前编辑表单里的字段（provider / api_format / base_url / api_key / proxy_id）
     直接送过来，后端发一次 ``GET {base_url}/models`` 后**只返 ID 列表**，不落库，
     避免用户为了 Fetch 还得先保存。
@@ -605,7 +605,7 @@ class FetchModelsPreviewRequest(BaseModel):
     @model_validator(mode="after")
     def _validate_execution_backend(self) -> FetchModelsPreviewRequest:
         if self.execution_backend == "codex_gateway" and self.api_format != "responses":
-            raise ValueError("内置 Codex Gateway 仅支持 Responses API Format")
+            raise ValueError("Codex 客户端兼容模式（Gateway）仅支持 Responses API Format")
         return self
 
 
@@ -680,9 +680,9 @@ class QuickVerifyProviderRequest(BaseModel):
     def _validate_quick_verify_execution_backend(self) -> QuickVerifyProviderRequest:
         if self.execution_backend == "codex_gateway":
             if self.api_format != "responses":
-                raise ValueError("内置 Codex Gateway 仅支持 Responses API Format")
+                raise ValueError("Codex 客户端兼容模式（Gateway）仅支持 Responses API Format")
             if not self.model:
-                raise ValueError("使用内置 Codex Gateway 验证时必须指定模型 ID")
+                raise ValueError("使用 Codex 客户端兼容模式（Gateway）验证时必须指定模型 ID")
         return self
 
 
@@ -719,6 +719,12 @@ class ProtocolProbeResult(BaseModel):
     error_category: str | None = None
     # 面向用户的修复建议（脱敏）。
     suggestion: str | None = None
+    upstream_status_code: int | None = None
+    upstream_error_code: str | None = None
+    upstream_error_message: str | None = None
+    upstream_error_detail: str | None = None
+    upstream_request_id: str | None = None
+    client_request_id: str | None = None
 
 
 class ProtocolIdentityAttempt(BaseModel):
@@ -732,6 +738,12 @@ class ProtocolIdentityAttempt(BaseModel):
     error_category: str | None = None
     error: str | None = None
     suggestion: str | None = None
+    upstream_status_code: int | None = None
+    upstream_error_code: str | None = None
+    upstream_error_message: str | None = None
+    upstream_error_detail: str | None = None
+    upstream_request_id: str | None = None
+    client_request_id: str | None = None
 
 
 class DetectProviderProtocolsResponse(BaseModel):
@@ -770,6 +782,15 @@ class TestModelResponse(BaseModel):
     """返回 text 前 80 字符；用于让用户在 UI 一眼看出"这个模型确实回话了"。"""
     error: str | None = None
     """失败时的错误消息（已脱敏，不含 api_key）。"""
+    status_code: int | None = None
+    error_category: str | None = None
+    suggestion: str | None = None
+    upstream_status_code: int | None = None
+    upstream_error_code: str | None = None
+    upstream_error_message: str | None = None
+    upstream_error_detail: str | None = None
+    upstream_request_id: str | None = None
+    client_request_id: str | None = None
 
 
 class ChatTestTurn(BaseModel):
@@ -867,6 +888,14 @@ class ChatTestModelResult(BaseModel):
     empty_response: bool = False
     error: str | None = None
     status_code: int | None = None
+    error_category: str | None = None
+    suggestion: str | None = None
+    upstream_status_code: int | None = None
+    upstream_error_code: str | None = None
+    upstream_error_message: str | None = None
+    upstream_error_detail: str | None = None
+    upstream_request_id: str | None = None
+    client_request_id: str | None = None
     client_identity_profile: str | None = None
     effective_api_format: str | None = None
     execution_backend: str | None = None
@@ -1009,6 +1038,12 @@ class LivenessResultItem(BaseModel):
     status_code: int | None = None
     error_category: str | None = None
     suggestion: str | None = None
+    upstream_status_code: int | None = None
+    upstream_error_code: str | None = None
+    upstream_error_message: str | None = None
+    upstream_error_detail: str | None = None
+    upstream_request_id: str | None = None
+    client_request_id: str | None = None
     client_identity_profile: str | None = None
     effective_api_format: str | None = None
     execution_backend: str | None = None
