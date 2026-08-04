@@ -17,6 +17,7 @@ import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from redis.exceptions import TimeoutError as RedisTimeoutError
 from sqlalchemy import select, update
 from telethon import events
 from telethon.errors import (
@@ -106,6 +107,7 @@ log = logging.getLogger(__name__)
 
 _CONFIG_RECONCILE_SECONDS = max(30, int(app_settings.worker_reconcile_seconds or 180))
 _USERBOT_SESSION_EXPIRE_SCAN_SECONDS = 15
+_USERBOT_SESSION_EXPIRE_SCAN_RETRY_SECONDS = 0.5
 _RECENT_USER_MESSAGE_SEARCH_LIMIT = recent_message_anchor.DEFAULT_SEARCH_LIMIT
 _RECENT_USER_MESSAGE_SEARCH_LIMIT_MAX = recent_message_anchor.MAX_SEARCH_LIMIT
 _DEFAULT_REPLY_ANCHOR_MISSING_TEXT = "未找到对应用户（{user_id}）的近期消息。"
@@ -2359,7 +2361,13 @@ async def _periodic_userbot_session_expire_scan(redis, account_id: int) -> None:
         try:
             from .plugins.loader import scan_userbot_expired_sessions_once  # type: ignore
 
-            await scan_userbot_expired_sessions_once(account_id)
+            try:
+                await scan_userbot_expired_sessions_once(account_id)
+            except (TimeoutError, RedisTimeoutError):
+                # session_store 的 expiry claim 带租约和 revision CAS：
+                # 超时后重试只会接管尚未完成的 claim，不会重复派发已完成会话。
+                await asyncio.sleep(_USERBOT_SESSION_EXPIRE_SCAN_RETRY_SECONDS)
+                await scan_userbot_expired_sessions_once(account_id)
         except Exception as e:  # noqa: BLE001
             await _log(
                 redis, account_id, "warn", f"userbot session_expired 扫描失败: {type(e).__name__}: {e}"

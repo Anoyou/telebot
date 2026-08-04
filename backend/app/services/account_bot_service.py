@@ -92,6 +92,27 @@ class BotChatUnavailableError(RuntimeError):
     """Bot 已知无法访问目标会话，避免在缓存有效期内重复请求 Telegram。"""
 
 
+def is_expired_callback_error(value: BaseException | str) -> bool:
+    """判断 Telegram 是否只是在告知 callback query 已经不可回答。"""
+
+    text = str(value or "").casefold()
+    return any(
+        marker in text
+        for marker in (
+            "query is too old",
+            "response timeout expired",
+            "query id is invalid",
+        )
+    )
+
+
+def is_message_not_deletable_error(value: BaseException | str) -> bool:
+    """判断删除动作是否因 Telegram 的既定不可删除约束而无需重试。"""
+
+    text = str(value or "").casefold().replace("’", "'")
+    return "message can't be deleted" in text
+
+
 def _bot_token_fingerprint(token: str) -> str:
     return hashlib.sha256(str(token).encode("utf-8")).hexdigest()
 

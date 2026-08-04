@@ -1781,6 +1781,18 @@ class InteractionDeliveryExecutor:
             )
             self.incoming.callback_already_acked = True
         except Exception as exc:  # noqa: BLE001
+            if account_bot_service.is_expired_callback_error(exc):
+                self.incoming.callback_already_acked = True
+                await record_action(
+                    action.get("context"),
+                    action,
+                    TRACE_STATUS_SKIPPED,
+                    actual_send_via="interaction_bot",
+                    error_code="callback_query_expired",
+                    reason_code="callback_query_expired",
+                    error=str(exc),
+                )
+                return
             await record_action(
                 action.get("context"),
                 action,
@@ -1935,6 +1947,17 @@ class InteractionDeliveryExecutor:
                 await self._emit_action_tap(action, ACTION_EVENT_STATUS_OK, channel=send_via)
                 return
             except Exception as exc:  # noqa: BLE001
+                if account_bot_service.is_message_not_deletable_error(exc):
+                    await record_action(
+                        action.get("context"),
+                        action,
+                        TRACE_STATUS_SKIPPED,
+                        actual_send_via=send_via,
+                        error_code="message_not_deletable",
+                        reason_code="message_not_deletable",
+                        error=str(exc),
+                    )
+                    return
                 last_code = "telegram_api_error"
                 last_error = f"{type(exc).__name__}: {exc}"
                 continue

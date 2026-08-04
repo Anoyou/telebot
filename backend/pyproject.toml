@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "telepilot-backend"
-version = "0.93.0-beta.1"
+version = "0.93.0-beta.2"
 description = "TelePilot后端"
 requires-python = ">=3.12"
 license = {text = "MIT"}
@@ -29,7 +29,7 @@ dependencies = [
     "redis>=5.0.4",
 
     # Telegram 客户端：固定到含 Layer 228 Rich Message TL 定义的不可变提交。
-    "telethon @ https://codeberg.org/Lonami/Telethon/archive/9fac561eebab94c2452cf1fe0a25b4c04a33f8dd.tar.gz",
+    "telethon @ https://codeberg.org/Lonami/Telethon/archive/b7a6dfe815fef200da478524cc1a20350b531175.tar.gz",
     "Pillow>=10.0.0",
     "cryptg>=0.4.0",            # C 加速 AES-IGE（Telethon）
     "python-socks[asyncio]>=2.4.4",  # SOCKS5/HTTP/MTProxy 出口代理

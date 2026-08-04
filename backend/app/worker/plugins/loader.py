@@ -4585,6 +4585,17 @@ async def _apply_userbot_delete_message_action(state: _AccountState, event: Any,
                 )
                 return True
             except Exception as exc:  # noqa: BLE001
+                if account_bot_service.is_message_not_deletable_error(exc):
+                    await record_action(
+                        action.get("context"),
+                        action,
+                        TRACE_STATUS_SKIPPED,
+                        actual_send_via=send_via,
+                        error_code="message_not_deletable",
+                        reason_code="message_not_deletable",
+                        error=str(exc),
+                    )
+                    return True
                 last_code = "telegram_api_error"
                 last_error = f"{type(exc).__name__}: {exc}"
                 continue
@@ -4604,6 +4615,17 @@ async def _apply_userbot_delete_message_action(state: _AccountState, event: Any,
                 )
                 return True
             except Exception as exc:  # noqa: BLE001
+                if account_bot_service.is_message_not_deletable_error(exc):
+                    await record_action(
+                        action.get("context"),
+                        action,
+                        TRACE_STATUS_SKIPPED,
+                        actual_send_via=send_via,
+                        error_code="message_not_deletable",
+                        reason_code="message_not_deletable",
+                        error=str(exc),
+                    )
+                    return True
                 last_code = "telegram_api_error"
                 last_error = f"{type(exc).__name__}: {exc}"
                 continue
@@ -4727,6 +4749,17 @@ async def _apply_userbot_answer_callback_action(state: _AccountState, action: di
             show_alert=bool(action.get("show_alert")),
         )
     except Exception as exc:  # noqa: BLE001
+        if account_bot_service.is_expired_callback_error(exc):
+            await record_action(
+                action.get("context"),
+                action,
+                TRACE_STATUS_SKIPPED,
+                actual_send_via="interaction_bot",
+                error_code="callback_query_expired",
+                reason_code="callback_query_expired",
+                error=str(exc),
+            )
+            return True
         await record_action(action.get("context"), action, TRACE_STATUS_FAILED, error_code="telegram_api_error", error=f"{type(exc).__name__}: {exc}")
         await _emit_userbot_action_tap(
             state,

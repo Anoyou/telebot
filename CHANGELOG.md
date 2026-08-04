@@ -25,6 +25,19 @@
 
 ## [Unreleased]
 
+## [0.93.0-beta.2] - 2026-08-04 · patch（补丁预发布） · US 线上 Telegram 异常收口
+
+### 修复
+
+- 升级 Telethon 到包含 Community 与 CommunityForbidden peer 转换的上游提交，修复 US UserBot 遇到社区会话时无法转换 peer 的异常。
+- UserBot 会话过期扫描遇到 Python/Redis 瞬时超时时退避并仅安全重试一次，避免偶发扫描告警。
+- 过期 callback query 与 Telegram 明确不可删除的消息记录为 skipped，不再产生误导性失败告警，同时保持后续交互动作继续执行。
+- 清理 US 数据库中已不存在插件 `reply_anchor_test` 的残留启用项，避免持续产生插件加载告警。
+
+### 测试
+
+- 增加 Community/CommunityForbidden peer 契约、扫描超时重试、过期 callback、不可删除消息及 UserBot 动作回归测试。
+
 ## [0.93.0-beta.1] - 2026-08-04 · minor（次版本预发布） · Codex Gateway 契约维护与真实上游错误诊断
 
 ### 新增

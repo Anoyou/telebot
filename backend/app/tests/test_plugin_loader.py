@@ -6535,6 +6535,62 @@ async def test_userbot_send_message_degrades_buttons_and_synthetic_callback_is_s
 
 
 @pytest.mark.asyncio
+async def test_userbot_delete_undeletable_message_records_skipped_action(monkeypatch) -> None:
+    state = loader_mod._AccountState(account_id=80)
+    state.client = AsyncMock()
+    state.client.delete_messages = AsyncMock(
+        side_effect=RuntimeError("Bad Request: message can't be deleted")
+    )
+    record_action = AsyncMock()
+    monkeypatch.setattr(loader_mod, "record_action", record_action)
+
+    ok = await loader_mod._apply_userbot_delete_message_action(
+        state,
+        SimpleNamespace(chat_id=-100),
+        {
+            "type": "delete_message",
+            "send_via": "userbot_reply",
+            "message_id": 42,
+        },
+    )
+
+    assert ok is True
+    record_action.assert_awaited_once()
+    assert record_action.await_args.args[2] == loader_mod.TRACE_STATUS_SKIPPED
+    assert record_action.await_args.kwargs["error_code"] == "message_not_deletable"
+
+
+@pytest.mark.asyncio
+async def test_userbot_expired_callback_records_skipped_action(monkeypatch) -> None:
+    state = loader_mod._AccountState(account_id=80)
+    record_action = AsyncMock()
+    monkeypatch.setattr(loader_mod, "record_action", record_action)
+    monkeypatch.setattr(
+        loader_mod,
+        "_interaction_bot_token_for_account",
+        AsyncMock(return_value="123:token"),
+    )
+    monkeypatch.setattr(
+        loader_mod.account_bot_service,
+        "answer_callback",
+        AsyncMock(side_effect=RuntimeError("query is too old and response timeout expired")),
+    )
+
+    ok = await loader_mod._apply_userbot_answer_callback_action(
+        state,
+        {
+            "type": "answer_callback",
+            "callback_query_id": "cb-expired",
+        },
+    )
+
+    assert ok is True
+    record_action.assert_awaited_once()
+    assert record_action.await_args.args[2] == loader_mod.TRACE_STATUS_SKIPPED
+    assert record_action.await_args.kwargs["error_code"] == "callback_query_expired"
+
+
+@pytest.mark.asyncio
 async def test_scan_userbot_expired_sessions_invokes_entry_and_deletes(monkeypatch) -> None:
     redis = _FakeRedis()
     state = loader_mod._AccountState(account_id=81)
