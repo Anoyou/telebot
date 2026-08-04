@@ -359,6 +359,67 @@ async def test_missing_parent_trace_is_reported_without_invalid_child_insert(mon
     assert commits["count"] == 1
 
 
+@pytest.mark.asyncio
+async def test_parent_disappearing_before_child_write_is_filtered_in_transaction(monkeypatch) -> None:
+    """事务外检查后消失的父 Trace 也不能让子 Span 触发外键异常。"""
+
+    added: list[object] = []
+    child_commits = {"count": 0}
+
+    class _Scalars:
+        def __init__(self, values):
+            self._values = values
+
+        def all(self):
+            return list(self._values)
+
+    class _Result:
+        def __init__(self, values):
+            self._values = values
+
+        def scalars(self):
+            return _Scalars(self._values)
+
+    class _Session:
+        def __init__(self, values, *, child_write: bool = False):
+            self.values = values
+            self.child_write = child_write
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def execute(self, *_args, **_kwargs):
+            return _Result(self.values)
+
+        def add(self, row):
+            added.append(row)
+
+        async def commit(self):
+            if self.child_write:
+                child_commits["count"] += 1
+
+    sessions = [
+        _Session(["evt_disappeared"]),
+        _Session([], child_write=True),
+        _Session([]),
+    ]
+    monkeypatch.setattr(event_trace, "AsyncSessionLocal", lambda: sessions.pop(0))
+
+    span = SimpleNamespace(trace_id="evt_disappeared")
+    await event_trace._flush_trace_batch([event_trace._TraceWrite(kind="span", payload=span)])
+
+    assert span not in added
+    assert child_commits["count"] == 1
+    assert len(added) == 1
+    assert isinstance(added[0], RuntimeLog)
+    assert added[0].message == "event trace parent missing after wait"
+    assert added[0].detail["trace_id"] == "evt_disappeared"
+    assert sessions == []
+
+
 def test_clear_native_raw_snapshot_marks_expired() -> None:
     class _Row:
         payload_snapshot = {"message": {"text": "hello"}, "native_raw": {"message": {"text": "raw secret"}}}

@@ -700,6 +700,7 @@ async def _trace_writer_loop() -> None:
 async def _flush_trace_batch(batch: list[_TraceWrite], *, split_on_error: bool = True) -> None:
     if not batch:
         return
+    missing_parent_ids: set[str] = set()
     try:
         missing_parent_ids = await _wait_for_external_trace_parents(batch)
         ready_batch = [
@@ -715,13 +716,30 @@ async def _flush_trace_batch(batch: list[_TraceWrite], *, split_on_error: bool =
             async with AsyncSessionLocal() as db:
                 existing_trace_ids = await _existing_trace_ids(db, ready_batch)
                 new_trace_ids: set[str] = set()
+                new_trace_items: list[_TraceWrite] = []
+                for item in ready_batch:
+                    if item.kind != "trace":
+                        continue
+                    trace_id = _trace_write_trace_id(item)
+                    if not trace_id or trace_id in existing_trace_ids or trace_id in new_trace_ids:
+                        continue
+                    new_trace_ids.add(trace_id)
+                    new_trace_items.append(item)
+
+                locked_trace_ids = await _lock_existing_trace_parents(
+                    db,
+                    ready_batch,
+                    new_trace_ids=new_trace_ids,
+                )
+                allowed_trace_ids = new_trace_ids | locked_trace_ids
+                for item in new_trace_items:
+                    db.add(item.payload)
                 for item in ready_batch:
                     if item.kind == "trace":
-                        trace_id = _trace_write_trace_id(item)
-                        if not trace_id or trace_id in existing_trace_ids or trace_id in new_trace_ids:
-                            continue
-                        db.add(item.payload)
-                        new_trace_ids.add(trace_id)
+                        continue
+                    trace_id = _trace_write_trace_id(item)
+                    if trace_id and trace_id not in allowed_trace_ids:
+                        missing_parent_ids.add(trace_id)
                         continue
                     if item.kind in {"span", "action", "runtime_error"}:
                         db.add(item.payload)
@@ -757,6 +775,31 @@ async def _flush_trace_batch(batch: list[_TraceWrite], *, split_on_error: bool =
             phase=item.kind,
             action_type=_trace_write_action_type(item),
         )
+
+
+async def _lock_existing_trace_parents(
+    db: Any,
+    batch: list[_TraceWrite],
+    *,
+    new_trace_ids: set[str],
+) -> set[str]:
+    """在子记录写事务内锁定已存在的父 Trace，关闭检查与插入之间的竞态窗口。"""
+
+    required_trace_ids = {
+        trace_id
+        for item in batch
+        if item.kind != "trace"
+        and (trace_id := _trace_write_trace_id(item))
+        and trace_id not in new_trace_ids
+    }
+    if not required_trace_ids:
+        return set()
+    result = await db.execute(
+        select(EventTrace.trace_id)
+        .where(EventTrace.trace_id.in_(required_trace_ids))
+        .with_for_update(read=True, key_share=True)
+    )
+    return {str(value) for value in result.scalars().all() if value}
 
 
 async def _wait_for_external_trace_parents(batch: list[_TraceWrite]) -> set[str]:
