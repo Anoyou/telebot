@@ -285,6 +285,13 @@ async def delete_account(db: AsyncSession, aid: int) -> None:
         pass
 
     # 3. DELETE FROM account（cascade 会带走 humanize_config / account_feature / rule / 日志）
+    # SystemSetting 没有账号外键；显式清理交互 Bot 配置，避免删除后启动扫描反复
+    # 对不存在的账号调用 restart_interaction_bot 并触发 ACCOUNT_NOT_FOUND。
+    await db.execute(
+        delete(SystemSetting).where(
+            SystemSetting.key == f"account_bot_transfer_notice:{int(aid)}"
+        )
+    )
     await db.delete(acc)
     await db.commit()
 

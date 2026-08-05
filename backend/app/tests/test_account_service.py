@@ -87,6 +87,27 @@ async def test_update_account_not_found() -> None:
 
 
 @pytest.mark.asyncio
+async def test_delete_account_cleans_transfer_notice_setting(monkeypatch: pytest.MonkeyPatch) -> None:
+    """删除账号必须同步清理无外键约束的交互 Bot 配置。"""
+    acc = SimpleNamespace(id=7)
+    db = AsyncMock()
+    db.get = AsyncMock(return_value=acc)
+    db.execute = AsyncMock()
+    db.delete = AsyncMock()
+    db.commit = AsyncMock()
+    monkeypatch.setattr(account_service, "_publish", AsyncMock())
+    monkeypatch.setattr(account_service, "_logout_best_effort", AsyncMock())
+
+    await account_service.delete_account(db, 7)
+
+    db.execute.assert_awaited_once()
+    statement = db.execute.await_args.args[0]
+    assert next(iter(statement.compile().params.values())) == "account_bot_transfer_notice:7"
+    db.delete.assert_awaited_once_with(acc)
+    db.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_pause_stops_supervisor_worker(monkeypatch: pytest.MonkeyPatch) -> None:
     """暂停账号必须真正停止 supervisor 托管的 worker。"""
     acc = SimpleNamespace(id=3, status=account_service.ACCOUNT_STATUS_ACTIVE)

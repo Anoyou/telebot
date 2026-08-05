@@ -18,6 +18,7 @@ from app.api import account_bots
 from app.db.models.account import Account
 from app.db.models.account_bot import AccountBot
 from app.db.models.log import RuntimeLog
+from app.db.models.system import SystemSetting
 from app.schemas.account_bot import AccountBotConfigUpdate, AccountBotInteractionConfig, AccountBotTestRequest
 from app.services import account_bot_runtime, account_bot_service, audit, platform_capabilities
 from app.services.interaction import contracts as interaction_contracts
@@ -16701,6 +16702,68 @@ async def test_stop_interaction_bot_manager_does_not_stop_management_tasks() -> 
         account_bot_runtime._INTERACTION_TASKS.clear()
         management_task.cancel()
         await asyncio.gather(management_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_start_interaction_bot_manager_skips_and_cleans_orphan_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """启动扫描遇到已删除账号的残留配置时必须收敛，不得抛 ACCOUNT_NOT_FOUND。"""
+
+    class _Result:
+        def __init__(self, values: list[Any]) -> None:
+            self._values = values
+
+        def scalars(self) -> _Result:
+            return self
+
+        def all(self) -> list[Any]:
+            return self._values
+
+    class _DB:
+        def __init__(self) -> None:
+            self.execute_calls = 0
+            self.commits = 0
+
+        async def __aenter__(self) -> _DB:
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def get(self, model: Any, key: Any) -> None:
+            return None
+
+        async def execute(self, statement: Any) -> _Result:
+            self.execute_calls += 1
+            if self.execute_calls == 1:
+                return _Result(
+                    [
+                        SystemSetting(
+                            key="account_bot_transfer_notice:404",
+                            value={
+                                "enabled": True,
+                                "interaction_bot_token_enc": "orphan-token",
+                            },
+                        )
+                    ]
+                )
+            if self.execute_calls == 2:
+                return _Result([])
+            return _Result([])
+
+        async def commit(self) -> None:
+            self.commits += 1
+
+    db = _DB()
+    restart = AsyncMock()
+    monkeypatch.setattr(account_bot_runtime, "AsyncSessionLocal", lambda: db)
+    monkeypatch.setattr(account_bot_runtime, "_interaction_bot_capability_enabled", AsyncMock(return_value=True))
+    monkeypatch.setattr(account_bot_runtime, "restart_interaction_bot", restart)
+
+    assert await account_bot_runtime.start_interaction_bot_manager() == 0
+    restart.assert_not_awaited()
+    assert db.commits == 1
 
 
 def test_confirm_redis_key_uses_hash_not_plain_token() -> None:

@@ -13,7 +13,7 @@ import unicodedata
 from dataclasses import asdict, dataclass, replace
 from typing import Any
 
-from sqlalchemy import desc, select
+from sqlalchemy import delete, desc, select
 
 from ..account_bot_defaults import (
     DEFAULT_DEBIT_NOTICE_TEMPLATE,
@@ -1211,16 +1211,43 @@ async def start_interaction_bot_manager() -> int:
                 )
             )
         ).scalars().all()
+        account_ids = {
+            int(aid)
+            for aid in (
+                await db.execute(select(Account.id))
+            ).scalars().all()
+        }
     count = 0
+    orphan_keys: list[str] = []
     for row in rows:
         try:
             aid = int(str(row.key).removeprefix(account_bot_service.TRANSFER_NOTICE_SETTING_PREFIX))
         except ValueError:
             continue
+        if aid not in account_ids:
+            orphan_keys.append(str(row.key))
+            continue
         cfg = account_bot_service.normalize_transfer_notice_config(row.value)
         if cfg.get("enabled") and (cfg.get("interaction_bot_token_enc") or cfg.get("transfer_bot_token_enc")):
-            await restart_interaction_bot(aid)
+            try:
+                await restart_interaction_bot(aid)
+            except Exception as exc:  # noqa: BLE001
+                detail = getattr(exc, "detail", None)
+                if not isinstance(detail, dict) or detail.get("code") != "ACCOUNT_NOT_FOUND":
+                    raise
+                # 账号可能在启动扫描与重启之间被删除；把这个竞态按孤儿配置处理，
+                # 避免上层 runtime retry 因永久 ACCOUNT_NOT_FOUND 无限重试。
+                orphan_keys.append(str(row.key))
+                log.warning("跳过已删除账号的交互 Bot 配置并准备清理 aid=%s", aid)
+                continue
             count += 1
+    if orphan_keys:
+        async with AsyncSessionLocal() as db:
+            await db.execute(
+                delete(SystemSetting).where(SystemSetting.key.in_(orphan_keys))
+            )
+            await db.commit()
+        log.warning("启动时清理 %d 条不存在账号的交互 Bot 配置", len(orphan_keys))
     return count
 
 
