@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import logging
+import subprocess
+import sys
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -97,6 +100,30 @@ def test_redactor_masks_quoted_env_repr_and_cookie_values() -> None:
         redacted = redact_text(sample)
         assert secret not in redacted
         assert "***" in redacted
+
+
+@pytest.mark.parametrize(
+    "text",
+    (
+        ("a-" * 30) + "token:",
+        ("a-" * 30) + "authorization:",
+    ),
+)
+def test_redactor_handles_pathological_key_prefix_quickly(text: str) -> None:
+    """未匹配的长键前缀不能让正则回溯卡住 worker。"""
+    script = (
+        "import sys\n"
+        "from app.services.redactor import redact_text\n"
+        "value = sys.argv[1]\n"
+        "result = redact_text(value)\n"
+        "assert result == value\n"
+    )
+    subprocess.run(
+        [sys.executable, "-c", script, text],
+        cwd=Path(__file__).parents[2],
+        check=True,
+        timeout=1,
+    )
 
 
 def test_log_filter_redacts_telegram_bot_url_args() -> None:

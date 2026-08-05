@@ -40,7 +40,7 @@ _AUTHORIZATION_KV_RE = re.compile(
     r"""(?ix)
     (?P<prefix>
         (?P<key_quote>["']?)
-        (?P<key>(?:[a-z0-9.-]+[_-])*authorization)
+        (?P<key>(?>(?:[a-z0-9.-]+[_-]))*authorization)
         (?P=key_quote)
         \s*[:=]\s*
     )
@@ -65,7 +65,7 @@ _KV_SECRET_RE = re.compile(
     (?P<prefix>
         (?P<key_quote>["']?)
         (?P<key>
-            (?:[a-z0-9.-]+[_-])*
+            (?>(?:[a-z0-9.-]+[_-]))*
             (?:
                 api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|
                 bearer[_-]?token|bot[_-]?token|token|password|secret(?:[_-]?key)?|
