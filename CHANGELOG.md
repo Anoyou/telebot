@@ -25,6 +25,18 @@
 
 ## [Unreleased]
 
+## [0.93.0-beta.7] - 2026-08-05 · patch（补丁预发布） · 修复 Telethon 事件方向兼容性
+
+### 修复
+
+- 修复插件 `owner_only` 门禁依赖 Telethon 旧版 `event.outgoing` 的兼容性问题；现在优先使用 loader 已确认的消息方向，并兼容 Telethon 1.44 的 `message.out` 字段。
+- 增强事件 `sender_id` 提取的原生字段回退，避免事件代理对象缺少 sender 实体时误判权限。
+
+### 文档与测试
+
+- 更新插件基类、API 参考和安全清单中的事件方向示例，明确 Telethon 1.44 的正确字段。
+- 增加 outgoing/incoming 及旧属性残留场景的 owner_only 门禁回归测试。
+
 ## [0.93.0-beta.6] - 2026-08-05 · patch（补丁预发布） · 清理交互 Bot 孤儿配置
 
 ### 修复

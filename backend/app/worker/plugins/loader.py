@@ -1801,7 +1801,7 @@ async def _dispatch_userbot_direct_passthrough(
         if handler is None or getattr(type(inst), handler_name, None) is getattr(Plugin, handler_name, None):
             continue
         if getattr(inst, "owner_only", True):
-            allowed = await _event_allowed_for_owner_only(state, event)
+            allowed = await _event_allowed_for_owner_only(state, event, direction=direction)
             if not allowed:
                 continue
         priority = _plugin_direct_passthrough_priority(ctx)
@@ -6234,10 +6234,24 @@ class _InteractionEntryMessageOps(BufferedMessageOps):
 
 
 async def _event_sender_id(event: Any) -> int | None:
+    """读取事件发送者 ID，优先使用 Telethon 原生的 sender_id 字段。"""
+    message = getattr(event, "message", event)
+    for candidate in (
+        getattr(event, "sender_id", None),
+        getattr(message, "sender_id", None),
+    ):
+        if candidate is not None:
+            try:
+                return int(candidate)
+            except (TypeError, ValueError):
+                pass
     sender = getattr(event, "sender", None)
     sender_id = getattr(sender, "id", None)
     if sender_id is not None:
-        return int(sender_id)
+        try:
+            return int(sender_id)
+        except (TypeError, ValueError):
+            pass
     try:
         sender = await event.get_sender()
         sender_id = getattr(sender, "id", None)
@@ -6246,10 +6260,21 @@ async def _event_sender_id(event: Any) -> int | None:
         return None
 
 
-async def _event_allowed_for_owner_only(state: _AccountState, event: Any) -> bool:
+async def _event_allowed_for_owner_only(
+    state: _AccountState,
+    event: Any,
+    *,
+    direction: str | None = None,
+) -> bool:
     """owner_only 插件的统一消息门禁：账号本人或授权 sudo 用户才可触发。"""
-    if bool(getattr(event, "outgoing", False)):
+    # 派发器已经依据 events.NewMessage(incoming/outgoing) 明确知道方向；
+    # 不要读取 Telethon 0.x 的 event.outgoing（Telethon 1.44 不再提供该别名）。
+    if direction == "outgoing":
         return True
+    if direction is None:
+        message = getattr(event, "message", event)
+        if bool(getattr(message, "out", False)):
+            return True
     sender_id = await _event_sender_id(event)
     if sender_id is None:
         return False
@@ -7275,7 +7300,7 @@ async def load_plugins_for_account(
                 if direction not in inst.message_channels:
                     continue
                 if getattr(inst, "owner_only", True):
-                    allowed = await _event_allowed_for_owner_only(state, event)
+                    allowed = await _event_allowed_for_owner_only(state, event, direction=direction)
                     if not allowed:
                         continue
                 ctx = state.contexts.get(fkey)

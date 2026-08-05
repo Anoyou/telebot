@@ -1902,9 +1902,9 @@ class MyPlugin(Plugin):
 
     async def on_message(self, ctx: PluginContext, event) -> None:
         """监听所有匹配方向的消息。"""
-        # 兼容 NewMessage.Event 与裸 Message；不要直接 event.outgoing。
+        # 兼容 NewMessage.Event 与裸 Message；Telethon 1.44 的方向字段是 message.out。
         msg = getattr(event, "message", event)
-        if bool(getattr(event, "outgoing", getattr(msg, "out", False))):
+        if bool(getattr(msg, "out", False)):
             return  # 忽略自己发的
         # 处理逻辑
 ```
@@ -1920,7 +1920,7 @@ class MyPlugin(Plugin):
 
 ### 事件对象兼容写法
 
-插件收到的对象通常表现为 Telegram 消息事件，但在测试、热重载、代理属性等场景里，也可能表现得更像裸 `Message`。因此建议用 `getattr` 做兼容，不要直接假设 `event.outgoing`、`event.message.id` 一定存在：
+插件收到的对象通常表现为 Telegram 消息事件，但在测试、热重载、代理属性等场景里，也可能表现得更像裸 `Message`。Telethon 1.44 的 `NewMessage.Event` 不提供 `event.outgoing`；方向应从事件的 `message.out`（或裸 `Message` 的 `out`）读取。因此建议用 `getattr` 做兼容，不要直接假设 `event.message.id` 一定存在：
 
 ```python
 def event_message(event):
@@ -1932,7 +1932,7 @@ def event_text(event) -> str:
 
 def is_outgoing(event) -> bool:
     msg = event_message(event)
-    return bool(getattr(event, "outgoing", getattr(msg, "out", False)))
+    return bool(getattr(msg, "out", False))
 ```
 
 这样可以避免类似 `'Message' object has no attribute 'outgoing'` 的运行时错误。

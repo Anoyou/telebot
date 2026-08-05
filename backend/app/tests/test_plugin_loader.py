@@ -148,6 +148,49 @@ def test_direct_passthrough_account_opt_in_requires_strict_true(value: object, e
     assert loader_mod._plugin_direct_passthrough_enabled(ctx) is expected  # noqa: SLF001
 
 
+@pytest.mark.asyncio
+async def test_owner_only_gate_uses_direction_or_message_out_not_event_outgoing() -> None:
+    state = loader_mod._AccountState(account_id=901)
+    state.owner_tg_user_id = 123
+
+    # Telethon 1.44 NewMessage.Event：没有 outgoing 属性，原生方向在 message.out。
+    native_outgoing = SimpleNamespace(
+        sender_id=999,
+        message=SimpleNamespace(out=True, sender_id=999),
+        chat_id=-1001,
+    )
+    assert await loader_mod._event_allowed_for_owner_only(state, native_outgoing) is True
+    assert await loader_mod._event_allowed_for_owner_only(
+        state,
+        native_outgoing,
+        direction="outgoing",
+    ) is True
+
+    # incoming 事件不能因为旧版/自定义对象残留 outgoing=True 就越过 owner gate。
+    misleading_incoming = SimpleNamespace(
+        outgoing=True,
+        sender_id=999,
+        message=SimpleNamespace(out=False, sender_id=999),
+        chat_id=-1001,
+    )
+    assert await loader_mod._event_allowed_for_owner_only(
+        state,
+        misleading_incoming,
+        direction="incoming",
+    ) is False
+
+    owner_incoming = SimpleNamespace(
+        sender_id=123,
+        message=SimpleNamespace(out=False, sender_id=123),
+        chat_id=-1001,
+    )
+    assert await loader_mod._event_allowed_for_owner_only(
+        state,
+        owner_incoming,
+        direction="incoming",
+    ) is True
+
+
 @pytest.mark.parametrize(
     ("result", "expected"),
     [

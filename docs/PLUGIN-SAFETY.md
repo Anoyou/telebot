@@ -595,7 +595,7 @@ await ctx.log(
 - [ ] 指令能触发，指令名改配置后能热重载生效。
 - [ ] 指令冲突时只由一个插件处理，`on_command` 正确返回 `True/False`。
 - [ ] 群聊、私聊、频道/匿名频道场景下不崩溃。
-- [ ] `event` 兼容裸 `Message`：不直接假设 `event.outgoing`、`event.message.id` 存在。
+- [ ] `event` 兼容裸 `Message`：方向读取 `event.message.out`（或裸 `Message.out`），不使用 Telethon 1.44 不存在的 `event.outgoing`；也不直接假设 `event.message.id` 存在。
 - [ ] 重复开局/重复创建规则会给出明确提示。
 - [ ] 抢答并发：两个答对消息同时到达只奖励一次。
 - [ ] 超时任务和答题消息同时发生时，只结束一次。
