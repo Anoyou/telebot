@@ -25,6 +25,13 @@
 
 ## [Unreleased]
 
+## [0.93.0-beta.8] - 2026-08-07 · patch（补丁预发布） · 恢复预构建镜像发布
+
+### 修复
+
+- 将 Telethon 的不可变提交依赖切换到可稳定访问的 GitHub 同步源，避免 Codeberg 读取超时导致后端与 API 契约 CI 失败、预构建镜像发布被跳过。
+- 保持 Telethon 1.44、Layer 228、Community 与 CommunityForbidden 协议能力不变；切换前已对全新安装包与当前依赖进行逐文件校验。
+
 ## [0.93.0-beta.7] - 2026-08-05 · patch（补丁预发布） · 修复 Telethon 事件方向兼容性
 
 ### 修复
