@@ -24,7 +24,6 @@ from telethon.tl.types import PeerUser
 
 from app.db.models.feature import (
     FEATURE_FORWARD,
-    FEATURE_SCHEDULER,
 )
 from app.services.interaction.dedupe import interaction_message_claim_key
 from app.worker.plugins import loader as loader_mod
@@ -33,7 +32,6 @@ from app.worker.plugins.events import TelePilotEvent
 from app.worker.plugins.loader import (
     _BUILTIN_MODULES,
     _clear_installed_module_cache,
-    _import_builtins,
     _load_dir,
     _manifest_compatible,
     _missing_plugin_error,
@@ -368,21 +366,6 @@ class _FakeScalars:
 @asynccontextmanager
 async def _fake_session_factory(db: _FakeDB):
     yield db
-
-
-# ─────────────────────────────────────────────────────
-# 用例 1：核心内置 plugin 都能被注册
-# ─────────────────────────────────────────────────────
-def test_import_builtins_registers_all_three() -> None:
-    _import_builtins()
-    from app.worker.plugins.base import all_plugins
-
-    reg = all_plugins()
-    for key in (
-        FEATURE_FORWARD,
-        FEATURE_SCHEDULER,
-    ):
-        assert key in reg, f"plugin {key} 未注册"
 
 
 def test_builtin_modules_constant_is_complete() -> None:
@@ -1547,6 +1530,17 @@ def test_manifest_min_telepilot_version_is_preferred() -> None:
     assert "当前 TelePilot 版本太旧" in reason
     assert "插件至少需要 999.0.0" in reason
     assert "请先更新 TelePilot，再重新启用插件" in reason
+
+
+def test_manifest_accepts_legacy_install_hook_without_storing_it() -> None:
+    manifest = Manifest(
+        key="_test_manifest_contract",
+        display_name="Manifest contract",
+        on_install="legacy.install_hook",
+    )
+
+    assert "on_install" not in manifest.__dict__
+    assert "on_install" not in manifest.to_dict()
 
 
 def test_manifest_min_telebot_version_kept_as_legacy_alias() -> None:

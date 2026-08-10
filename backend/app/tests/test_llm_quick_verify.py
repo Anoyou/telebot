@@ -535,6 +535,41 @@ async def test_fetch_models_preview_direct_disables_env_proxy_and_bounds_results
 
 
 @pytest.mark.asyncio
+async def test_fetch_models_preview_maps_invalid_proxy_to_422_before_network(
+    monkeypatch,
+) -> None:
+    from app.services import llm_proxy_service
+    from app.util.proxy import ProxyConfigError
+
+    monkeypatch.setattr(commands_api, "_require_ai_enabled", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        llm_proxy_service,
+        "resolve_proxy_url",
+        AsyncMock(side_effect=ProxyConfigError("代理 #7 不存在，拒绝回落直连")),
+    )
+    network_client = AsyncMock(side_effect=AssertionError("代理无效时不得创建网络客户端"))
+    monkeypatch.setattr(commands_api.httpx, "AsyncClient", network_client)
+
+    with pytest.raises(HTTPException) as raised:
+        await commands_api.fetch_models_preview(
+            payload=FetchModelsPreviewRequest(
+                provider="openai",
+                api_format="responses",
+                base_url="https://api.example.test/v1",
+                api_key="sk-preview",
+                proxy_id=7,
+            ),
+            db=AsyncMock(),
+            user=AsyncMock(id=1),
+        )
+
+    assert raised.value.status_code == 422
+    assert raised.value.detail["code"] == "LLM_PROXY_INVALID"
+    assert "拒绝回落直连" in raised.value.detail["message"]
+    network_client.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_fetch_models_preview_gateway_uses_saved_gateway_transport(monkeypatch) -> None:
     from contextlib import asynccontextmanager
 

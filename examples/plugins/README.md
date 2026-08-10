@@ -15,6 +15,4 @@
 - `with_ai_components`：AI 玩法组件示例，演示用 `QuizMaker` + `AnswerJudge` 组件跑一个最小问答局，并展示无可用 AI 时的题库降级与 `unsure` 保守分支。组件 API 见 `docs/PLUGIN-AI.md`。
 - `with_interaction`：旧交互入口迁移桥，演示原命令与交互 Bot 入口并存时如何补齐 Event Bus 字段，并修正历史 `payload["message"]` 字段冲突。
 
-## 暂不纳入 CI 的示例
-
-- `translate`：历史示例，仍直接复用后端私有 LLM 链路。它保留作迁移参考，但不是新的第三方插件模板。
+历史 `translate` 示例直接依赖后端私有 LLM 链路，已从当前示例集移除。如需考古只查看 Git 历史；新 AI 插件从 `with_ai` 或 `with_ai_components` 开始。

@@ -261,8 +261,14 @@ System Agent 在自己的运行入口注册 LLM usage 持久化回调，路由�
 | 命令 | 行为 |
 | --- | --- |
 | `/agent` | 进入助手模式并显示帮助 |
+| `/agent help` / `/agent status` / `/agent ?` | 显示同一份当前帮助、角色、可用工具与 Redis 确认状态 |
 | `/agent <自然语言>` | 直接提问 |
+| `/agent pending` | 列出当前待确认 Action |
 | `/agent new` | 新建会话（归档旧 active） |
+| `/agent stop` | 停止当前任务，并暂停后续队列 |
+| `/agent resume` | 恢复当前会话已暂停的排队任务 |
+| `/agent approve` | 批准当前等待的工具调用 |
+| `/agent reject` | 拒绝当前等待的工具调用，后续队列保持暂停 |
 | `/agent clear` | 删除当前会话 |
 | `/agent exit` | 退出助手模式（保留历史） |
 

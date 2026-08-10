@@ -1660,11 +1660,15 @@ class TestPluginRepoInstallFlow:
         assert not (tmp_path / "installed" / "local_demo.installing").exists()
 
     @pytest.mark.asyncio
-    async def test_install_official_plugin_ignores_local_bundled_source(self, monkeypatch, tmp_path):
+    async def test_install_official_plugin_requires_remote_repo_entry(self, monkeypatch, tmp_path):
         monkeypatch.setattr(repo_svc.settings, "plugins_installed_dir", str(tmp_path / "installed"))
-        official_root = tmp_path / "official"
-        _write_runtime_plugin(official_root / "official_demo", key="official_demo", version="4.0.0")
-        monkeypatch.setattr(repo_svc, "_official_plugin_root", lambda: official_root)
+        remote_root = tmp_path / "remote-official"
+        remote_root.mkdir()
+
+        async def _remote_root(*, force_refresh: bool = False):  # noqa: ARG001
+            return remote_root
+
+        monkeypatch.setattr(repo_svc, "_official_remote_plugin_root", _remote_root)
         db = _FakePluginRepoDB()
 
         with pytest.raises(repo_svc.PluginNotInRepo):
@@ -1675,7 +1679,6 @@ class TestPluginRepoInstallFlow:
 
     @pytest.mark.asyncio
     async def test_remote_official_repo_lists_only_official_tagged_plugins(self, monkeypatch, tmp_path):
-        monkeypatch.setattr(repo_svc, "_official_plugin_root", lambda: tmp_path / "empty-official")
         remote_root = tmp_path / "remote-official"
         _write_runtime_plugin(remote_root / "official_remote", key="official_remote", version="4.1.0")
         _write_runtime_plugin(remote_root / "community_remote", key="community_remote", version="1.0.0")
@@ -1697,7 +1700,6 @@ class TestPluginRepoInstallFlow:
     async def test_install_remote_official_plugin_writes_repo_record(self, monkeypatch, tmp_path):
         monkeypatch.setattr(repo_svc.settings, "plugins_installed_dir", str(tmp_path / "installed"))
         monkeypatch.setattr(repo_svc.settings, "official_plugin_repo_url", "https://github.com/Anoyou/telebot-plugins")
-        monkeypatch.setattr(repo_svc, "_official_plugin_root", lambda: tmp_path / "empty-official")
         remote_root = tmp_path / "remote-official"
         _write_runtime_plugin(remote_root / "official_remote", key="official_remote", version="4.1.0")
         (remote_root / "official_remote" / "plugin.json").write_text(
@@ -1727,7 +1729,6 @@ class TestPluginRepoInstallFlow:
     async def test_install_remote_official_plugin_updates_existing_version(self, monkeypatch, tmp_path):
         monkeypatch.setattr(repo_svc.settings, "plugins_installed_dir", str(tmp_path / "installed"))
         monkeypatch.setattr(repo_svc.settings, "official_plugin_repo_url", "https://github.com/Anoyou/telebot-plugins")
-        monkeypatch.setattr(repo_svc, "_official_plugin_root", lambda: tmp_path / "empty-official")
         remote_root = tmp_path / "remote-official"
         _write_runtime_plugin(remote_root / "official_remote", key="official_remote", version="4.1.0")
         (remote_root / "official_remote" / "plugin.json").write_text(
@@ -1763,7 +1764,6 @@ class TestPluginRepoInstallFlow:
     @pytest.mark.asyncio
     async def test_official_update_link_failure_restores_previous_directory(self, monkeypatch, tmp_path):
         monkeypatch.setattr(repo_svc.settings, "plugins_installed_dir", str(tmp_path / "installed"))
-        monkeypatch.setattr(repo_svc, "_official_plugin_root", lambda: tmp_path / "empty-official")
         remote_root = tmp_path / "remote-official"
         _write_runtime_plugin(remote_root / "official_retry", key="official_retry", version="2.0.0")
         (remote_root / "official_retry" / "plugin.json").write_text(

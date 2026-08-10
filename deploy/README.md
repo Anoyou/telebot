@@ -65,7 +65,7 @@ docker compose logs -f web
 - `deploy/backup.sh`：备份数据库、sessions、已安装插件和插件仓库缓存，并生成 SHA-256 校验文件
 - 默认写入 `/var/backups/telepilot`；`BACKUP_RETENTION_COUNT` 默认保留最近 7 个完整备份组，`BACKUP_RETENTION_DAYS` 继续作为最长保留天数。
 - `deploy/backup-keys.sh`：备份 `.env` 中关键密钥
-- `deploy/restore.sh`：恢复备份
+- `deploy/restore.sh`：恢复数据库并按需恢复历史 sessions、已安装插件和仓库缓存卷；当前账号 session 恢复只依赖数据库与原 `MASTER_KEY`
 
 `MASTER_KEY` 必须离线备份，并且不要和数据库备份放在同一个位置。丢失它会导致已加密的 Telegram session、api_id、api_hash、TOTP secret 和 Bot Token 无法解密。
 
@@ -134,6 +134,6 @@ cd /opt/telepilot
 make prod-up PROD_UP_ARGS=--source-build
 ```
 
-如果更新执行了数据库迁移，切回旧代码并不能还原 schema，必须从迁移前备份恢复数据库。先确认 `.env` 里的 `MASTER_KEY` 与备份时一致，再执行 `deploy/restore.sh`；恢复脚本还可一并恢复插件卷。
+如果更新执行了数据库迁移，切回旧代码并不能还原 schema，必须从迁移前备份恢复数据库。先确认 `.env` 里的 `MASTER_KEY` 与备份时一致，再执行 `deploy/restore.sh <db.sql>`；历史 sessions 卷和插件卷可按需追加，跳过 sessions 但恢复插件卷时第二个参数传 `-`。
 
 部分 Docker 默认值、数据库默认名和 volume 名仍保留 `telebot` 历史兼容命名，不影响对外产品名 TelePilot。

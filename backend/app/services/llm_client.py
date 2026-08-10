@@ -1393,10 +1393,6 @@ def _unsupported_parameter_name(resp: Any) -> str | None:
     return None
 
 
-def _is_unsupported_parameter(resp: Any, parameter: str) -> bool:
-    return _unsupported_parameter_name(resp) == parameter.lower()
-
-
 def _remove_unsupported_parameter(body: dict[str, Any], parameter: str) -> str | None:
     parameter = parameter.strip().lower()
     key = _RESPONSES_REMOVABLE_PARAMETERS.get(parameter)

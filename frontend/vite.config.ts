@@ -92,10 +92,9 @@ export default defineConfig({
       ? [visualizer({ filename: "dist/build-report.html", template: "treemap", gzipSize: true, brotliSize: true, open: false })]
       : []),
     VitePWA({
-      // 自动更新：新 SW 安装好后下次启动自动激活；前端再监听 needRefresh 提示用户刷新
+      // 自动更新：skipWaiting/clientsClaim 使新 SW 激活后自动刷新当前页面。
       registerType: "autoUpdate",
-      // 我们在 src/pwa.ts 里手动 import 'virtual:pwa-register' 注册并接管更新提示，
-      // 所以关掉插件的自动注入，避免双重注册。
+      // src/pwa.ts 手动注册并预热离线壳；关掉自动注入以避免双重注册。
       injectRegister: null,
       // dev 模式默认 **不启 SW**：之前一旦启用，浏览器里安装的 SW 会缓存住 dist/
       // 让 vite dev 改的源码看不见（症状：刷新后页面还是旧版本，"以为代码没生效"）。
@@ -204,7 +203,13 @@ export default defineConfig({
   // - react-markdown + remark-gfm：~200KB（同 Extensions 页）
   // - radix-ui 系列：复用率高，单独成块利于 long-term cache
   build: {
+    // gzip 体积只用于终端报告，会在低内存 Docker builder 中额外保留所有 chunk；
+    // 产物压缩与 nginx 传输不依赖这项统计。
+    reportCompressedSize: false,
     rollupOptions: {
+      // Rollup 默认可并行打开大量模块；在约 1 GiB 的 Docker 构建器中会与
+      // esbuild/V8 同时推高常驻内存。20 足以保持吞吐，也避免低内存环境换页。
+      maxParallelFileOps: 20,
       output: {
         manualChunks: {
           echarts: ["echarts/core", "echarts/charts", "echarts/components", "echarts/renderers"],

@@ -58,6 +58,7 @@ from ..services.payout_limit import PayoutLimitExceeded
 from ..services.payout_limit import check_and_consume as _check_payout_limit
 from ..services.redactor import redact_value
 from ..settings import settings as app_settings
+from ..util.proxy import ProxyConfigError
 from .command import (
     CommandContext,
     make_command_handler,
@@ -228,10 +229,14 @@ def _should_defer_interaction_entry_error_log(plugin_key: str, error: str | None
     return plugin_key == "math10" and "模块未加载或未启用" in str(error or "")
 
 
-def _httpx_proxy_url_from_proxy(proxy: Proxy | None) -> str | None:
+def _resolve_httpx_account_proxy(proxy: Proxy | None) -> tuple[str | None, str | None]:
     """把账号 Telegram 代理转换成 httpx 可用的 HTTP/SOCKS 出口。
 
-    MTProxy 只能给 Telethon 使用，ChatGPT/CPA/sub2api 这类 HTTP 请求不能复用。
+    返回 ``(proxy_url, unavailable_reason)``。SOCKS4 可继续供 Telethon 使用，
+    但 httpx 不支持；这种情况不能暂停整个账号，也不能让插件回落直连，而是
+    把不可用原因传入 PluginHTTP，由 ``account_proxy`` 请求在发网前 fail-closed。
+
+    历史 MTProxy/未知类型连 Telegram 运行链路也不受支持，仍抛配置错误并暂停账号。
     """
 
     from ..util.proxy import parse_proxy_url
@@ -239,24 +244,44 @@ def _httpx_proxy_url_from_proxy(proxy: Proxy | None) -> str | None:
     if proxy is None:
         parsed_default = parse_proxy_url(app_settings.tg_default_proxy)
         if parsed_default is None:
-            return None
+            return None, None
         ptype, host, port, _rdns, username, password = parsed_default
-        return _build_proxy_url(ptype, host, port, username, password or "")
+        if str(ptype).lower() == "socks4":
+            return None, "账号使用 SOCKS4 Telegram 代理，插件 HTTP 不支持该代理类型"
+        return _build_proxy_url(ptype, host, port, username, password or ""), None
 
-    password = decrypt_str(proxy.password_enc) if proxy.password_enc else ""
+    proxy_type = str(proxy.type or "").lower()
+    if proxy_type == "socks4":
+        return None, "账号使用 SOCKS4 Telegram 代理，插件 HTTP 不支持该代理类型"
+    if proxy_type not in {"socks5", "http", "https"}:
+        raise ProxyConfigError(f"代理类型 {proxy.type!r} 不能用于插件 HTTP，拒绝回落直连")
+
+    try:
+        password = decrypt_str(proxy.password_enc) if proxy.password_enc else ""
+    except Exception as exc:  # noqa: BLE001 - 不把坏凭据误报成登录 session 故障
+        raise ProxyConfigError("代理凭据无法解密，请重新保存或更换代理") from exc
     if "://" in proxy.host:
         parsed = parse_proxy_url(proxy.host)
-        if parsed is None:
-            return None
         ptype, host, port, _rdns, parsed_user, parsed_password = parsed
-        return _build_proxy_url(
-            ptype,
-            host,
-            port,
-            proxy.username or parsed_user,
-            password or parsed_password or "",
+        if str(ptype).lower() == "socks4":
+            return None, "账号使用 SOCKS4 Telegram 代理，插件 HTTP 不支持该代理类型"
+        return (
+            _build_proxy_url(
+                ptype,
+                host,
+                port,
+                proxy.username or parsed_user,
+                password or parsed_password or "",
+            ),
+            None,
         )
-    return _build_proxy_url(proxy.type, proxy.host, proxy.port, proxy.username, password)
+    return _build_proxy_url(proxy.type, proxy.host, proxy.port, proxy.username, password), None
+
+
+def _httpx_proxy_url_from_proxy(proxy: Proxy | None) -> str | None:
+    """兼容测试与内部调用的 URL 投影；不可用于 HTTP 的 SOCKS4 返回 None。"""
+
+    return _resolve_httpx_account_proxy(proxy)[0]
 
 
 def _normalize_tg_username(value: str | None) -> str | None:
@@ -493,18 +518,25 @@ async def run_worker(account_id: int) -> None:
     except Exception:  # noqa: BLE001
         log.debug("LLM usage callback 注册失败", exc_info=True)
 
-    # 启动时一次性读取账号 + 代理 + 设备伪装 profile
-    async with AsyncSessionLocal() as db:
-        account = (await db.execute(select(Account).where(Account.id == account_id))).scalar_one_or_none()
-        if not account:
-            await _log(redis, account_id, "error", f"账号 {account_id} 不存在")
-            return
-        proxy = await db.get(Proxy, account.proxy_id) if account.proxy_id else None
-        account_proxy_url = _httpx_proxy_url_from_proxy(proxy)
-        # 解析设备伪装：账号绑定 → 系统默认 → 硬编码兜底
-        from ..services.device_profile import resolve_for_account
+    # 启动时一次性读取账号 + 代理 + 设备伪装 profile。显式代理配置错误必须
+    # 在任何网络连接前收敛为 paused，避免 supervisor 把确定性错误重试到 dead。
+    try:
+        async with AsyncSessionLocal() as db:
+            account = (await db.execute(select(Account).where(Account.id == account_id))).scalar_one_or_none()
+            if not account:
+                await _log(redis, account_id, "error", f"账号 {account_id} 不存在")
+                return
+            proxy = await db.get(Proxy, account.proxy_id) if account.proxy_id else None
+            if account.proxy_id is not None and proxy is None:
+                raise ProxyConfigError(f"账号绑定的代理 #{account.proxy_id} 不存在，拒绝回落直连")
+            account_proxy_url, account_proxy_error = _resolve_httpx_account_proxy(proxy)
+            # 解析设备伪装：账号绑定 → 系统默认 → 硬编码兜底
+            from ..services.device_profile import resolve_for_account
 
-        device_profile = await resolve_for_account(db, account)
+            device_profile = await resolve_for_account(db, account)
+    except ProxyConfigError as exc:
+        await _handle_proxy_configuration_error(redis, account_id, exc)
+        return
 
     # 所有插件、命令 handler 与 scheduler 都依赖平台能力快照。冷启动读取失败时
     # 直接退出并交给 supervisor 重试，避免任何受控入口以默认值 fail-open。
@@ -518,6 +550,9 @@ async def run_worker(account_id: int) -> None:
 
     try:
         client = build_client(account, proxy, device_profile)
+    except ProxyConfigError as exc:
+        await _handle_proxy_configuration_error(redis, account_id, exc)
+        return
     except ValueError as exc:
         await _mark_login_required(account_id)
         await _log(
@@ -572,6 +607,7 @@ async def run_worker(account_id: int) -> None:
                 redis,
                 scheduler=platform_scheduler,
                 account_proxy_url=account_proxy_url,
+                account_proxy_error=account_proxy_error,
             )
         except ImportError:
             await _log(redis, account_id, "warn", "插件系统尚未就绪（D Agent 待完成）")
@@ -2448,6 +2484,40 @@ async def _mark_login_required(account_id: int) -> None:
         log.exception("账号状态收敛为 login_required 失败: account_id=%s", account_id)
 
 
+async def _mark_proxy_configuration_paused(account_id: int) -> None:
+    """确定性代理配置错误时暂停账号，阻止 supervisor 无意义重启。"""
+
+    from ..db.models.account import ACCOUNT_STATUS_PAUSED
+
+    try:
+        async with AsyncSessionLocal() as db:
+            account = await db.get(Account, account_id)
+            if account is not None:
+                account.status = ACCOUNT_STATUS_PAUSED
+                await db.commit()
+    except Exception:  # noqa: BLE001
+        log.exception("账号代理配置错误状态收敛失败: account_id=%s", account_id)
+
+
+async def _handle_proxy_configuration_error(redis, account_id: int, error: Exception) -> None:  # noqa: ANN001
+    """持久化暂停状态并发布可操作提示；数据库与 Redis 任一路径失败不阻断另一条。"""
+
+    message = f"账号代理配置无效，worker 已暂停；请迁移或修正代理后再启动：{error}"
+    await _mark_proxy_configuration_paused(account_id)
+    try:
+        await _log(redis, account_id, "error", message)
+    except Exception:  # noqa: BLE001
+        log.warning("写入代理配置错误日志失败: account_id=%s", account_id, exc_info=True)
+    try:
+        await _publish(redis, account_id, EVT_STATUS, status="paused", reason="proxy_configuration_error")
+    except Exception:  # noqa: BLE001
+        log.warning(
+            "发布代理配置错误状态失败，但数据库状态已尝试收敛: account_id=%s",
+            account_id,
+            exc_info=True,
+        )
+
+
 async def _handle_login_required(redis, account_id: int, **payload) -> None:  # noqa: ANN001, ANN003
     """独立执行 DB 收敛和事件通知，任一路径故障都不阻断另一条。"""
 
@@ -2462,13 +2532,13 @@ async def _handle_login_required(redis, account_id: int, **payload) -> None:  # 
         )
 
 
-def _build_proxy_url(ptype: str, host: str, port: int, username: str | None, password: str) -> str | None:
+def _build_proxy_url(ptype: str, host: str, port: int, username: str | None, password: str) -> str:
     """把 Proxy ORM 字段拼成 httpx 接受的 URL。
 
     支持的类型映射（与 ``app.util.proxy._VALID_TYPES`` 对齐 + httpx 实际支持）：
     - ``socks5``        →  ``socks5://``    需 socksio（``httpx[socks]``）
     - ``http`` / ``https``  →  ``http://``  HTTP CONNECT 代理
-    - ``mtproxy`` / 其它   →  None          httpx 不支持，调用方应已经过滤
+    - 历史 ``mtproxy`` / 其它 → 抛错        httpx 不支持，禁止回落直连
 
     用户名密码用 ``urllib.parse.quote`` 转义；空字符串视为不设。
     """
@@ -2480,8 +2550,7 @@ def _build_proxy_url(ptype: str, host: str, port: int, username: str | None, pas
     elif t in ("http", "https"):
         scheme = "http"
     else:
-        # mtproxy / unknown → 不能给 httpx 用
-        return None
+        raise ProxyConfigError(f"代理类型 {ptype!r} 不能用于 HTTP，拒绝回落直连")
 
     auth = ""
     if username:
@@ -2490,6 +2559,19 @@ def _build_proxy_url(ptype: str, host: str, port: int, username: str | None, pas
             auth = f"{auth}:{quote(password, safe='')}"
         auth = f"{auth}@"
     return f"{scheme}://{auth}{host}:{int(port)}"
+
+
+def _llm_provider_proxy_url(proxy: Proxy) -> str:
+    """把受支持的 Provider 代理投影为 URL；坏凭据必须排除 Provider。"""
+
+    proxy_type = str(proxy.type or "").lower()
+    if proxy_type not in {"socks5", "http", "https"}:
+        raise ProxyConfigError(f"代理类型 {proxy.type!r} 不能用于 LLM，拒绝回落直连")
+    try:
+        password = decrypt_str(proxy.password_enc) if proxy.password_enc else ""
+    except Exception as exc:  # noqa: BLE001 - 不把坏凭据降级为空密码继续路由
+        raise ProxyConfigError("LLM Provider 代理凭据无法解密，请重新保存或更换代理") from exc
+    return _build_proxy_url(proxy.type, proxy.host, proxy.port, proxy.username, password)
 
 
 def _provider_runtime_payload(row: LLMProvider, proxy_url: str | None) -> dict[str, Any]:
@@ -2655,18 +2737,24 @@ async def _refresh_command_context(account_id: int) -> None:
                 proxy_url: str | None = None
                 if p.proxy_id is not None:
                     pr = proxy_rows.get(p.proxy_id)
-                    if pr is not None and (pr.type or "").lower() != "mtproxy":
-                        # 主进程在这里就把 password 解密 + 拼成 httpx 接受的 URL；
-                        # 比把 password_enc 下发到 worker 让它再解密少一次往返，明文也只在
-                        # ctx 内存里活到 LLM 调用结束（worker 进程私有，不进 Redis / 日志）
-                        pwd = ""
-                        if pr.password_enc:
-                            try:
-                                pwd = decrypt_str(pr.password_enc)
-                            except Exception:  # noqa: BLE001
-                                # 密码解密失败时退化为无认证连接，避免一条坏 proxy 把所有 ai 命令打死
-                                pwd = ""
-                        proxy_url = _build_proxy_url(pr.type, pr.host, pr.port, pr.username, pwd)
+                    if pr is None:
+                        log.error(
+                            "LLM Provider %s 引用了缺失的代理 %s，已从 worker 路由排除",
+                            p.id,
+                            p.proxy_id,
+                        )
+                        continue
+                    try:
+                        # 明文只在 worker 进程内存里保留到上下文刷新，不进入 Redis 或日志。
+                        proxy_url = _llm_provider_proxy_url(pr)
+                    except ProxyConfigError as exc:
+                        log.error(
+                            "LLM Provider %s 的代理 %s 不可用，已从 worker 路由排除：%s",
+                            p.id,
+                            p.proxy_id,
+                            exc,
+                        )
+                        continue
                 providers[p.id] = _provider_runtime_payload(p, proxy_url)
 
         # 3) 命令别名

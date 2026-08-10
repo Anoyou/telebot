@@ -343,15 +343,15 @@ async def _validate_proxy_for_llm(db: AsyncSession, proxy_id: int) -> Proxy:
 
     拒绝条件：
     - 不存在 → 404
-    - type=mtproxy → 422（HTTP 客户端不支持 Telegram MTProto）
+    - 非 socks5/http/https 类型 → 422（当前运行链路不支持，且不能静默回落直连）
     """
     p = await db.get(Proxy, proxy_id)
     if p is None:
         raise _err("PROXY_NOT_FOUND", f"proxy_id={proxy_id} 不存在", 404)
-    if (p.type or "").lower() == "mtproxy":
+    if (p.type or "").lower() not in {"socks5", "http", "https"}:
         raise _err(
             "PROXY_KIND_NOT_SUPPORTED",
-            "mtproxy 仅支持 Telegram，不能用于 LLM 调用；请选 socks5/http/https 类型的代理",
+            f"代理类型 {p.type!r} 当前不受支持，不能用于 LLM 调用；请改用 socks5/http/https",
             422,
         )
     return p

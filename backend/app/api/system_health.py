@@ -180,7 +180,7 @@ class ProvidersStatus(BaseModel):
 class ProxiesStatus(BaseModel):
     total: int = 0
     by_type: dict[str, int] = Field(default_factory=dict)
-    """如 ``{"socks5":2,"http":1}``。mtproxy 也算在内；前端展示"可用于 LLM 的"由前端过滤。"""
+    """按数据库记录类型统计；可能包含已停止支持、仅供迁移识别的历史类型。"""
     used_by_llm: int = 0
     """被某个 LLMProvider.proxy_id 引用的代理数量（去重）。"""
 

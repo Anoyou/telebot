@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
@@ -51,6 +52,9 @@ from ...services.llm_invoke import (
 )
 from ...services.llm_protocol import MessageRole, ModelMessage, ModelRequest, ModelUsage
 from ...settings import settings
+from ...util.proxy import ProxyConfigError
+
+log = logging.getLogger(__name__)
 
 ProviderLoader = Callable[[], Awaitable[Mapping[int, LLMProviderDTO]]]
 
@@ -718,7 +722,16 @@ async def load_llm_providers() -> dict[int, LLMProviderDTO]:
         dto = LLMProviderDTO.from_orm_row(row)
         proxy_id = getattr(row, "proxy_id", None)
         if proxy_id is not None:
-            dto.proxy_url = _proxy_url_from_row(proxies.get(int(proxy_id)))
+            try:
+                dto.proxy_url = _proxy_url_from_row(proxies.get(int(proxy_id)))
+            except ProxyConfigError as exc:
+                log.error(
+                    "PluginAI Provider %s 引用了缺失或不受支持的代理 %s，已从路由排除: %s",
+                    dto.id,
+                    proxy_id,
+                    exc,
+                )
+                continue
         providers[int(dto.id)] = dto
     return providers
 
@@ -1016,23 +1029,25 @@ def _positive_int(value: Any, default: int) -> int:
     return parsed if parsed > 0 else int(default)
 
 
-def _proxy_url_from_row(proxy: Proxy | None) -> str | None:
+def _proxy_url_from_row(proxy: Proxy | None) -> str:
     if proxy is None:
-        return None
+        raise ProxyConfigError("Provider 引用的代理不存在，拒绝回落直连")
     ptype = str(proxy.type or "").lower()
     if ptype == "socks5":
         scheme = "socks5"
     elif ptype in {"http", "https"}:
         scheme = "http"
     else:
-        return None
+        raise ProxyConfigError(f"代理类型 {proxy.type!r} 不能用于 LLM，拒绝回落直连")
 
     password = ""
     if proxy.password_enc:
         try:
             password = decrypt_str(proxy.password_enc)
-        except Exception:  # noqa: BLE001
-            password = ""
+        except Exception as exc:  # noqa: BLE001 - 坏凭据不能被降级为空密码继续路由
+            raise ProxyConfigError(
+                "PluginAI Provider 代理凭据无法解密，请重新保存或更换代理"
+            ) from exc
 
     from urllib.parse import quote
 

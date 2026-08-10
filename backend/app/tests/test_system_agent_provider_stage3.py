@@ -495,6 +495,46 @@ async def test_existing_provider_verify_uses_encrypted_compatibility_headers(mon
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("args", [{"proxy_id": 7}, {"id": 7}])
+async def test_provider_verify_keeps_action_pending_for_invalid_proxy(
+    monkeypatch,
+    args,
+) -> None:
+    from app.services import llm_proxy_service
+    from app.services.system_agent import provider_verify
+    from app.services.system_agent.registry import ActionKeepPendingError
+    from app.util.proxy import ProxyConfigError
+
+    row = SimpleNamespace(
+        provider="openai",
+        base_url="https://api.example/v1",
+        default_model="model",
+        api_format="responses",
+        api_key_enc=None,
+        request_headers_enc=None,
+        protocol_profile="standard",
+        client_identity_profile="auto",
+        proxy_id=7,
+    )
+
+    class _Db:
+        async def get(self, _model, _provider_id):  # noqa: ANN001
+            return row
+
+    monkeypatch.setattr(
+        llm_proxy_service,
+        "resolve_proxy_url",
+        AsyncMock(side_effect=ProxyConfigError("代理 #7 不存在，拒绝回落直连")),
+    )
+
+    with pytest.raises(ActionKeepPendingError) as raised:
+        await provider_verify.resolve_provider_verify_args(_Db(), args)
+
+    assert raised.value.code == "PROXY_CONFIG_INVALID"
+    assert "拒绝回落直连" in raised.value.message
+
+
+@pytest.mark.asyncio
 async def test_run_quick_verify_forwards_compatibility_headers(monkeypatch) -> None:
     from app.services.system_agent import provider_verify
 

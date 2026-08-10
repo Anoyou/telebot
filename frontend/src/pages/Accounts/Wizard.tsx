@@ -27,6 +27,12 @@ import {
 } from "@/api/accounts";
 import { listProxies } from "@/api/proxies";
 import { getErrCode, getErrMsg } from "@/lib/api";
+import {
+  isSupportedProxyType,
+  proxySelectionNeedsLoadedList,
+  proxySelectionIssue,
+  visibleProxyOptions,
+} from "@/lib/proxySupport";
 import { cn } from "@/lib/utils";
 
 // 中文错误码翻译表（PRD 列出的几种）
@@ -39,6 +45,8 @@ const ERR_MAP: Record<string, string> = {
   SESSION_EXPIRED: "登录会话已过期，请重新开始",
   ACCOUNT_PHONE_MISMATCH: "重登手机号必须与当前账号一致",
   ACCOUNT_IDENTITY_MISMATCH: "登录到的 Telegram 用户与当前账号不一致，已拒绝覆盖",
+  PROXY_NOT_FOUND: "所选代理已不存在，请重新选择",
+  PROXY_TYPE_UNSUPPORTED: "所选代理已停止支持，请更换代理",
 };
 function readableError(err: unknown): string {
   const code = getErrCode(err);
@@ -85,6 +93,16 @@ export function AccountWizard() {
     queryFn: listProxies,
     enabled: step === 1,
   });
+  const proxies = proxiesQ.data || [];
+  const selectedProxyIssue = proxiesQ.isSuccess
+    ? proxySelectionIssue(proxies, proxyId)
+    : null;
+  const proxyListRequired = proxySelectionNeedsLoadedList(proxyId, proxiesQ.isSuccess);
+  const proxySelectionBlocked = proxyListRequired || selectedProxyIssue !== null;
+  const proxyOptions = useMemo(
+    () => visibleProxyOptions(proxies, proxyId),
+    [proxies, proxyId],
+  );
 
   // 复制其他账号配置（可选）
   const accountsQ = useQuery({
@@ -282,16 +300,38 @@ export function AccountWizard() {
                 onChange={(e) => setProxyId(e.target.value)}
               >
                 <option value="">直连（不走代理）</option>
-                {proxiesQ.data?.map((p) => (
-                  <option key={p.id} value={String(p.id)}>
+                {selectedProxyIssue === "missing" ? (
+                  <option value={proxyId} disabled>
+                    代理 #{proxyId} 已不存在，请重新选择
+                  </option>
+                ) : null}
+                {proxyOptions.map((p) => (
+                  <option
+                    key={p.id}
+                    value={String(p.id)}
+                    disabled={!isSupportedProxyType(p.type)}
+                  >
                     [{p.type}] {p.host}:{p.port}
                     {p.username ? ` @${p.username}` : ""}
+                    {!isSupportedProxyType(p.type) ? "（已停止支持，请更换）" : ""}
                   </option>
                 ))}
               </Select>
-              <p className="text-xs text-muted-foreground">
-                若代理列表为空，先到「系统设置 → 代理与标识」创建
-              </p>
+              {proxyListRequired ? (
+                <p className="text-xs text-destructive">
+                  {proxiesQ.isError
+                    ? "代理列表加载失败，无法核对当前绑定。请重试或改选直连后继续。"
+                    : "正在核对当前代理，请稍候。"}
+                </p>
+              ) : selectedProxyIssue ? (
+                <p className="text-xs text-destructive">
+                  当前代理{selectedProxyIssue === "missing" ? "已不存在" : "已停止支持"}，请选择 DIRECT 或受支持代理后继续。
+                </p>
+              ) : (
+                <p className="text-xs text-muted-foreground">
+                  若代理列表为空，先到「系统设置 → 代理与标识」创建
+                </p>
+              )}
             </div>
             <div className="sm:col-span-2 flex justify-end">
               <Button
@@ -300,9 +340,13 @@ export function AccountWizard() {
                     toast.error("请填写 API ID/Hash 与手机号");
                     return;
                   }
+                  if (proxySelectionBlocked) {
+                    toast.error("请先确认或更换当前代理");
+                    return;
+                  }
                   startMut.mutate();
                 }}
-                disabled={startMut.isPending}
+                disabled={startMut.isPending || proxySelectionBlocked}
               >
                 {startMut.isPending ? "发送中…" : isRelogin ? "发送重登验证码" : "下一步"}
               </Button>

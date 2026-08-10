@@ -462,13 +462,6 @@ async def cleanup_event_traces(
     }
 
 
-def _payload_has_clearable_native_raw(snapshot: Any) -> bool:
-    if not isinstance(snapshot, dict) or "native_raw" not in snapshot:
-        return False
-    value = snapshot.get("native_raw")
-    return value is not None and value not in ("[omitted]", "[expired]")
-
-
 async def _cleanup_native_raw_snapshots_batched(*, cutoff: datetime, batch_size: int) -> int:
     """Expire stored native_raw blobs in small ORM batches.
 

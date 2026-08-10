@@ -72,7 +72,7 @@ def _ensure_builtin_or_501(plugin_key: str) -> None:
             status_code=501,
             detail={
                 "code": "NOT_IMPLEMENTED",
-                "message": f"非内置插件管理将在后续版本支持: {plugin_key}",
+                "message": f"该旧入口仅支持内置插件: {plugin_key}",
             },
         )
 

@@ -260,3 +260,61 @@ async def test_policy_error_for_blocked_literal_includes_plugin_key() -> None:
         await http.get("http://127.0.0.1/")
 
     assert "demo_plugin" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_unavailable_account_proxy_fails_before_dns_or_transport() -> None:
+    resolved = 0
+    requested = 0
+
+    async def _resolver(_host: str, _port: int) -> list[str]:
+        nonlocal resolved
+        resolved += 1
+        return ["93.184.216.34"]
+
+    async def _handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal requested
+        requested += 1
+        return httpx.Response(200)
+
+    http = PluginHTTP(
+        allowed_hosts=["api.example.com"],
+        account_proxy_error="账号使用 SOCKS4 Telegram 代理",
+        resolver=_resolver,
+        transport=httpx.MockTransport(_handler),
+    )
+
+    with pytest.raises(PluginHTTPPolicyError, match="拒绝回落直连"):
+        await http.get("https://api.example.com/v1")
+
+    assert resolved == 0
+    assert requested == 0
+
+
+@pytest.mark.asyncio
+async def test_manifest_opted_direct_mode_can_ignore_account_proxy_http_limitation() -> None:
+    requested = 0
+
+    async def _handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal requested
+        requested += 1
+        return httpx.Response(200, content=b"ok")
+
+    ctx = SimpleNamespace(
+        feature_key="direct_demo",
+        account_proxy_url=None,
+        account_proxy_error="账号使用 SOCKS4 Telegram 代理",
+        config={"http": {"network_mode": "direct"}},
+    )
+    http = PluginHTTP.from_context(
+        ctx,
+        allowed_hosts=["api.example.com"],
+        manifest_http={"allow_direct": True},
+        resolver=_public_resolver,
+        transport=httpx.MockTransport(_handler),
+    )
+
+    response = await http.get("https://api.example.com/v1")
+
+    assert response.status_code == 200
+    assert requested == 1

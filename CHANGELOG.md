@@ -25,6 +25,31 @@
 
 ## [Unreleased]
 
+## [0.93.0-beta.9] - 2026-08-10 · patch（补丁预发布） · 代理兼容与发布安全收口
+
+### 修复
+
+- 升级 Axios、React Router 与 ECharts 到已修复安全版本，清除生产依赖审计中的请求处理、跳转与图表 XSS 漏洞。
+- 统一运营统计与资金台账的默认 30 天查询窗口，避免未指定时间范围时混用全部历史动作和近期资金数据。
+- 停止声明未完整实现的 MTProxy 支持；新建、编辑、账号绑定和 System Agent 均只接受 SOCKS5/HTTP/HTTPS。登录、Telegram worker/注销、direct/Gateway/插件 LLM 与插件 HTTP 对缺失、已停用或非空无效代理统一 fail-closed，不再静默降级为直连；纯本地插件配置动作不受无关代理状态阻断。
+- 完善旧代理迁移：账号向导和 LLM Provider 会保留当前旧绑定的禁用提示并阻止保存/测活，代理库跨协议迁移由前后端共同保证默认清空旧凭据；worker 遇到确定性代理配置错误时暂停账号并提示迁移，不再重试到 `dead`。
+- 明确 SOCKS4 仅保留为 Telegram 全局默认代理与旧账号绑定的运行时兼容；代理库不允许新建、更新或重新绑定，插件 HTTP、LLM 与 Gateway 不支持该类型。
+- 允许灾备脚本仅凭数据库备份和原 `MASTER_KEY` 恢复当前账号 Session；历史 sessions 卷改为可选兼容归档，卷内容先校验并暂存后再替换，交换中途失败会按阶段保留或恢复全部旧数据，并同步部署说明。
+- 修正插件仓库安装状态、旧插件管理入口和插件依赖校验的注释与错误文案，使生成 API 契约跟随当前 `installed_plugin` 与 loader 行为。
+- 限制移动端侧栏更新日志菜单的可视高度，长 `Unreleased` 内容保持在视口内滚动。
+
+### 清理
+
+- 删除已断路的 Forward 专属配置页、旧账号/别名/模板入口、旧桌宠预览、无调用的前端组件与兼容 helper，并开启 TypeScript 未使用符号检查。
+- 删除无消费者的插件安装钩子运行时字段、旧交互 schema、后端私有僵尸 helper、废弃自动命令派发与不可达 AI 流式分支；旧插件传入 `on_install` 时仅保留无状态构造兼容，不执行也不序列化。
+- 删除旧品牌占位图标生成脚本、历史 translate 插件示例，以及未使用的 React Hook Form、resolver 与 Zod 前端依赖。
+
+### 文档与测试
+
+- 为最小插件示例补齐 installed loader 必需的 `plugin.json`，同步规则配置页、System Agent Bot 命令、Session 存储和插件示例维护口径。
+- 明确插件 HTTP DNS 预解析无法独立防御 DNS rebinding，并补充可信域名与网络层隔离建议。
+- 增加运营统计默认窗口、全链路代理 fail-closed、旧代理迁移、数据库单独恢复、Manifest 契约和旧插件 API 文案回归测试。
+
 ## [0.93.0-beta.8] - 2026-08-07 · patch（补丁预发布） · 恢复预构建镜像发布
 
 ### 修复

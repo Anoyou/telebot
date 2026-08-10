@@ -314,6 +314,8 @@ def test_production_defaults_to_prebuilt_images_with_explicit_source_fallback() 
     assert "org.opencontainers.image.revision=${{ needs.scope.outputs.revision }}" in workflow
     assert "uses: ./.github/workflows/publish-images.yml" in ci_workflow
     assert "github.event_name == 'push'" in ci_workflow
+    assert 'tags: ["v*"]' in ci_workflow
+    assert "ref_type: ${{ github.ref_type }}" in ci_workflow
 
 
 def test_legacy_alpine_updater_bootstraps_github_cli(tmp_path: Path) -> None:

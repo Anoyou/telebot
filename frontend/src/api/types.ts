@@ -38,7 +38,7 @@ export type AccountStatus =
 
 export interface ProxySummary {
   id: number;
-  /** socks5 / http / mtproxy */
+  /** socks5 / http / https；历史未知值按原字符串展示。 */
   type: string;
   host: string;
   port: number;
@@ -638,11 +638,12 @@ export interface TemplateOut {
 }
 
 // ===================== 代理 =====================
-export type ProxyType = "socks5" | "http" | "https" | "mtproxy";
+export type ProxyType = "socks5" | "http" | "https";
 
 export interface ProxyOut {
   id: number;
-  type: ProxyType;
+  /** 服务端可能返回已停用的历史类型，读取时保留原值。 */
+  type: string;
   host: string;
   port: number;
   username: string | null;
@@ -1135,7 +1136,7 @@ export interface ProvidersHealthStatus {
 
 export interface ProxiesHealthStatus {
   total: number;
-  /** {type: count}，如 {"socks5":2,"http":1,"mtproxy":1} */
+  /** {type: count}，如 {"socks5":2,"http":1} */
   by_type: Record<string, number>;
   /** 被任意 LLMProvider.proxy_id 引用的代理数量（去重） */
   used_by_llm: number;

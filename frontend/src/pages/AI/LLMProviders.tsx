@@ -6,12 +6,11 @@
 // 一条 ,ai 指令该把请求送给哪个 provider；详见 backend/services/llm_router.py
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 import { ArrowLeft, Plus, Trash2, KeyRound, Edit3, Download, Check, CheckCircle2, XCircle, Star, ChevronDown, ChevronRight, Eye, EyeOff, Filter, X, Package, Save, Activity, ArrowUpDown, GripVertical, ServerCog, RefreshCw } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { CommandBadge } from "@/components/CommandBadge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
@@ -19,7 +18,7 @@ import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { MetaBadge } from "@/components/ui/meta-badge";
 import { Spinner } from "@/components/ui/misc";
-import { SectionHeader, SignalPill } from "@/components/ui/status";
+import { SignalPill } from "@/components/ui/status";
 import {
   Card,
   CardContent,
@@ -59,6 +58,12 @@ import { listProxies } from "@/api/proxies";
 import { getHealthOverview, getSystemSettings, patchSystemSettings } from "@/api/system";
 import type { ChatTestModelResult, ClientIdentityHeaderItem, ClientIdentityRequestProfile, ClientIdentityVersionDetectItem, ClientIdentityVersionItem, DetectProviderProtocolsResponse, LLMApiFormat, LLMClientIdentityProfile, LLMExecutionBackend, LLMModality, LLMProtocolProfile, LLMProviderKind, LLMProviderOut, LLMRequestHeaderInput, LLMRequestHeaderScope, LLMTag, LLMWebSearchApiFormat, ProviderModel, ProtocolProbeResult, ProxyOut } from "@/api/types";
 import { getErrMsg } from "@/lib/api";
+import {
+  isSupportedProxyType,
+  proxySelectionNeedsLoadedList,
+  proxySelectionIssue,
+  visibleProxyOptions,
+} from "@/lib/proxySupport";
 import { cn } from "@/lib/utils";
 import { confirmDiscardChanges, useUnsavedChanges } from "@/lib/unsavedChanges";
 import { applyExecutionBackend, executionBackendLabel, isGatewayBackend } from "@/lib/providerExecutionBackend";
@@ -974,6 +979,26 @@ export function LLMProviders({
 
   const saveEditing = () => {
     if (!editing) return;
+    if (proxySelectionNeedsLoadedList(editing.proxy_id, proxiesListQ.isSuccess)) {
+      toast.error(
+        proxiesListQ.isError
+          ? "代理列表加载失败，无法核对当前绑定，请重试或改选 DIRECT"
+          : "代理列表仍在加载，请稍后再保存",
+      );
+      return;
+    }
+    const selectedProxyIssue = proxySelectionIssue(
+      proxiesListQ.data || [],
+      editing.proxy_id,
+    );
+    if (selectedProxyIssue) {
+      toast.error(
+        selectedProxyIssue === "missing"
+          ? "当前绑定的代理已不存在，请选择 DIRECT 或受支持代理"
+          : "当前绑定的代理已停止支持，请选择 DIRECT 或受支持代理",
+      );
+      return;
+    }
     if (!editing.name.trim()) {
       toast.error("名称必填");
       return;
@@ -1451,6 +1476,8 @@ function ProviderCreateWorkspace({
   onStageChange,
   proxies,
   proxiesLoading,
+  proxiesLoaded,
+  proxiesLoadError,
   protocolDetection,
   detectingProtocol,
   onDetectProtocol,
@@ -1467,6 +1494,8 @@ function ProviderCreateWorkspace({
   onStageChange: (stage: ProviderCreateStage) => void;
   proxies: ProxyOut[];
   proxiesLoading: boolean;
+  proxiesLoaded: boolean;
+  proxiesLoadError: boolean;
   protocolDetection: DetectProviderProtocolsResponse | null;
   detectingProtocol: boolean;
   onDetectProtocol: () => void;
@@ -1499,6 +1528,12 @@ function ProviderCreateWorkspace({
     gatewayHealthQ.isError ||
     !gatewayHasApiKey
   );
+  const proxyListRequired = proxySelectionNeedsLoadedList(form.proxy_id, proxiesLoaded);
+  const selectedProxyIssue = proxiesLoaded
+    ? proxySelectionIssue(proxies, form.proxy_id)
+    : null;
+  const proxySelectionBlocked = proxyListRequired || selectedProxyIssue !== null;
+  const proxyOptions = visibleProxyOptions(proxies, form.proxy_id);
 
   useEffect(() => {
     const root = document.querySelector<HTMLElement>("[data-app-main]");
@@ -1777,7 +1812,7 @@ function ProviderCreateWorkspace({
                 variant="outline"
                 size="sm"
                 loading={detectingProtocol}
-                disabled={gatewayMode || connectionLocked || (!form.api_key.trim() && !form.hasApiKey && form.provider !== "ollama")}
+                disabled={gatewayMode || connectionLocked || proxySelectionBlocked || (!form.api_key.trim() && !form.hasApiKey && form.provider !== "ollama")}
                 onClick={onDetectProtocol}
               >
                 {!detectingProtocol ? <Download className="mr-1 h-4 w-4" /> : null}
@@ -1791,7 +1826,17 @@ function ProviderCreateWorkspace({
           </section>
 
           <div ref={verifySectionRef}>
-            {isEdit ? (
+            {proxySelectionBlocked ? (
+              <div className="border-t py-6">
+                <div className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+                  {proxyListRequired
+                    ? proxiesLoadError
+                      ? "代理列表加载失败，无法核对当前绑定。请重试或改选 DIRECT 后继续。"
+                      : "正在核对当前代理，请稍候。"
+                    : `当前代理${selectedProxyIssue === "missing" ? "已不存在" : "已停止支持"}。请选择 DIRECT 或受支持代理后，才能读取模型、测活或保存。`}
+                </div>
+              </div>
+            ) : isEdit ? (
               <section className="border-t pt-6" aria-labelledby="provider-model-management-title">
                 <div className="mb-4">
                   <h2 id="provider-model-management-title" className="text-base font-semibold">模型管理</h2>
@@ -1903,11 +1948,32 @@ function ProviderCreateWorkspace({
                   ) : (
                     <Select disabled={connectionLocked} value={form.proxy_id} onChange={(event) => setField("proxy_id", event.target.value)}>
                       <option value="">DIRECT，不走代理</option>
-                      {proxies.map((proxy) => (
-                        <option key={proxy.id} value={String(proxy.id)}>#{proxy.id} · {proxy.type} · {proxy.host}:{proxy.port}</option>
+                      {selectedProxyIssue === "missing" ? (
+                        <option value={form.proxy_id} disabled>代理 #{form.proxy_id} 已不存在，请重新选择</option>
+                      ) : null}
+                      {proxyOptions.map((proxy) => (
+                        <option
+                          key={proxy.id}
+                          value={String(proxy.id)}
+                          disabled={!isSupportedProxyType(proxy.type)}
+                        >
+                          #{proxy.id} · {proxy.type} · {proxy.host}:{proxy.port}
+                          {!isSupportedProxyType(proxy.type) ? " · 已停止支持" : ""}
+                        </option>
                       ))}
                     </Select>
                   )}
+                  {proxyListRequired ? (
+                    <p className="text-xs leading-5 text-destructive">
+                      {proxiesLoadError
+                        ? "代理列表加载失败，无法核对当前绑定。请重试或改选 DIRECT。"
+                        : "正在核对当前代理，请稍候。"}
+                    </p>
+                  ) : selectedProxyIssue ? (
+                    <p className="text-xs leading-5 text-destructive">
+                      当前绑定不可用，请显式切换为 DIRECT 或受支持代理。
+                    </p>
+                  ) : null}
                 </div>
                 <div className="space-y-1.5">
                   <Label>联网搜索协议</Label>
@@ -1993,7 +2059,7 @@ function ProviderCreateWorkspace({
             <Button
               type="button"
               loading={saving}
-              disabled={!form.name.trim() || !form.default_model.trim() || gatewayBlocked}
+              disabled={!form.name.trim() || !form.default_model.trim() || gatewayBlocked || proxySelectionBlocked}
               onClick={() => {
                 if (!isEdit && !verified && !window.confirm("当前 Provider 尚未通过真实模型验证。仍要保存吗？保存后建议立即进入模型测活确认可用性。")) return;
                 onSave();
@@ -2048,18 +2114,10 @@ function ProviderEditDialog({
     if (saving || !confirmDiscardChanges(dirty)) return;
     onCancel();
   };
-  const setField = <K extends keyof FormState>(k: K, v: FormState[K]) =>
-    onChange({ ...form, [k]: v });
-
-  // 列出所有代理；mtproxy 不能给 LLM 用，前端做硬过滤；
-  // 后端 service 层有同样的拒绝逻辑兜底
   const proxiesQ = useQuery({
     queryKey: ["proxies-for-llm"],
     queryFn: listProxies,
   });
-  const llmUsableProxies: ProxyOut[] = (proxiesQ.data || []).filter(
-    (p) => (p.type || "").toLowerCase() !== "mtproxy",
-  );
   const settingsQ = useQuery({
     queryKey: ["system", "settings"],
     queryFn: getSystemSettings,
@@ -2123,8 +2181,10 @@ function ProviderEditDialog({
       onVerificationChange={setCreateVerified}
       stage={createStage}
       onStageChange={setCreateStage}
-      proxies={llmUsableProxies}
+      proxies={proxiesQ.data || []}
       proxiesLoading={proxiesQ.isLoading}
+      proxiesLoaded={proxiesQ.isSuccess}
+      proxiesLoadError={proxiesQ.isError}
       protocolDetection={protocolDetection}
       detectingProtocol={detectProtocolsMut.isPending}
       onDetectProtocol={() => detectProtocolsMut.mutate()}

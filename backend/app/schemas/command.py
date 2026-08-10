@@ -429,8 +429,8 @@ class LLMProviderCreate(BaseModel):
     """运维备注；路由不读。"""
 
     proxy_id: int | None = Field(default=None, ge=1)
-    """出口代理 id（指向 proxy 表）；None = 直连（DIRECT）。mtproxy 类型的 proxy 不能给
-    LLM 调用用——HTTP 客户端不支持 MTProto；service 层在校验时拒绝。"""
+    """出口代理 id（指向 proxy 表）；None = 直连（DIRECT）。历史 mtproxy 行不受当前
+    运行链路支持，service 层在校验时拒绝。"""
 
     models: list[ProviderModel] = Field(default_factory=list, max_length=200)
     """该 provider 下挂的候选模型清单。新建时通常留空；建完 provider 后用前端的

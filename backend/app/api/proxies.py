@@ -14,7 +14,6 @@
 from __future__ import annotations
 
 import asyncio
-import socket
 import time as _time
 from urllib.parse import unquote, urlsplit
 
@@ -49,7 +48,7 @@ class ProxyOut(BaseModel):
 
 
 class ProxyCreate(BaseModel):
-    type: str          # socks5 | http | mtproxy
+    type: str          # socks5 | http | https
     host: str
     port: int
     username: str | None = None
@@ -87,7 +86,7 @@ def _to_out(p: Proxy) -> ProxyOut:
     )
 
 
-_VALID_TYPES = {"socks5", "http", "https", "mtproxy"}
+_VALID_TYPES = {"socks5", "http", "https"}
 
 
 def _validate_type(t: str) -> None:
@@ -175,7 +174,6 @@ async def patch_proxy(pid: int, payload: ProxyUpdate, db: DBSession, user: Curre
     from ..services.gateway_runtime import (
         gateway_configuration_transaction,
         gateway_provider_uses_proxy,
-        llm_provider_uses_proxy,
         reconcile_gateway_runtime_from_session,
         rollback_and_restore_gateway,
     )
@@ -188,8 +186,26 @@ async def patch_proxy(pid: int, payload: ProxyUpdate, db: DBSession, user: Curre
                 raise _err("NOT_FOUND", "代理不存在", 404)
             await db.refresh(p)
             gateway_changed = await gateway_provider_uses_proxy(db, pid)
-            llm_referenced = await llm_provider_uses_proxy(db, pid)
             parsed = _parse_proxy_url(payload.host) if payload.host is not None else None
+            source_type = str(p.type or "").lower()
+            if source_type in _VALID_TYPES:
+                # 兼容早期写入的 SOCKS5 / HTTPS 等大小写变体；修改任意字段时
+                # 顺手收敛为当前 schema 使用的小写规范值。
+                p.type = source_type
+            target_type = (
+                str(parsed["type"])
+                if parsed is not None and "type" in parsed
+                else payload.type or source_type
+            )
+            if (
+                source_type not in _VALID_TYPES
+                and target_type in _VALID_TYPES
+                and target_type != source_type
+            ):
+                # 历史协议的用户名/secret 不能被误当成新协议凭据继续发送。
+                # 先清空，再允许本次 payload 或粘贴 URL 显式写入新凭据。
+                p.username = None
+                p.password_enc = None
             if parsed is not None:
                 p.type = str(parsed.get("type", p.type))
                 p.host = str(parsed["host"])
@@ -210,16 +226,11 @@ async def patch_proxy(pid: int, payload: ProxyUpdate, db: DBSession, user: Curre
                 p.port = payload.port
             if payload.username is not None:
                 p.username = payload.username or None
-            if payload.clear_password:
+            if payload.clear_password or payload.password == "":
                 p.password_enc = None
             elif payload.password is not None and payload.password != "":
                 p.password_enc = encrypt_str(payload.password)
-            if llm_referenced and p.type == "mtproxy":
-                raise _err(
-                    "LLM_PROXY_TYPE_INVALID",
-                    "被 LLM Provider 引用的代理不能改为 MTProxy；请先解除引用或使用 HTTP/SOCKS5",
-                    409,
-                )
+            _validate_type(p.type)
             await db.flush()
             await audit.write(db, user.id, "update_proxy", target=str(pid))
             if gateway_changed:
@@ -352,8 +363,17 @@ async def test_proxy(pid: int, db: DBSession, _user: CurrentUser) -> ProxyTestRe
     p = await db.get(Proxy, pid)
     if not p:
         raise _err("NOT_FOUND", "代理不存在", 404)
+    proxy_type = str(p.type or "").lower()
+    if proxy_type not in _VALID_TYPES:
+        return ProxyTestResult(
+            ok=False,
+            error=f"代理类型 {p.type!r} 当前不受支持，请编辑为 SOCKS5、HTTP 或 HTTPS",
+        )
 
-    pwd = decrypt_str(p.password_enc) if p.password_enc else None
+    try:
+        pwd = decrypt_str(p.password_enc) if p.password_enc else None
+    except Exception:  # noqa: BLE001 - 测试入口应返回可操作结果，而不是 500
+        return ProxyTestResult(ok=False, error="代理凭据无法解密，请重新保存或更换代理")
 
     # 第一步：try TCP connect 到 Telegram DC2:443，记录延迟
     t0 = _time.monotonic()
@@ -361,9 +381,9 @@ async def test_proxy(pid: int, db: DBSession, _user: CurrentUser) -> ProxyTestRe
         endpoint_error = await _probe_proxy_endpoint(p.host, p.port)
         if endpoint_error:
             return ProxyTestResult(ok=False, error=endpoint_error)
-        if p.type in ("socks5", "http", "https"):
+        if proxy_type in ("socks5", "http", "https"):
             ptype = {"socks5": ProxyType.SOCKS5, "http": ProxyType.HTTP,
-                     "https": ProxyType.HTTP}[p.type]
+                     "https": ProxyType.HTTP}[proxy_type]
             proxy_obj = AsyncProxy(
                 proxy_type=ptype, host=p.host, port=p.port,
                 username=p.username or None, password=pwd or None,
@@ -373,16 +393,6 @@ async def test_proxy(pid: int, db: DBSession, _user: CurrentUser) -> ProxyTestRe
                 timeout=8.0,
             )
             sock.close()
-        elif p.type == "mtproxy":
-            # MTProxy 不走 python-socks；这里只做 TCP 探活到代理端口
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(5.0)
-            await asyncio.get_event_loop().run_in_executor(
-                None, sock.connect, (p.host, p.port)
-            )
-            sock.close()
-        else:
-            return ProxyTestResult(ok=False, error=f"不支持的代理类型: {p.type}")
     except ProxyConnectionError as e:
         return ProxyTestResult(ok=False, error=f"代理连接失败: {e}")
     except ProxyError as e:
@@ -396,16 +406,15 @@ async def test_proxy(pid: int, db: DBSession, _user: CurrentUser) -> ProxyTestRe
 
     # 第二步：通过该代理访问 ipinfo.io 拿出口 IP
     def _make_client():
-        if p.type in ("http", "https"):
+        if proxy_type in ("http", "https"):
             url = f"http://{p.username + ':' + pwd + '@' if p.username else ''}{p.host}:{p.port}"
             return httpx.AsyncClient(proxy=url)
-        if p.type == "socks5":
+        if proxy_type == "socks5":
             scheme = "socks5"
             auth = f"{p.username}:{pwd}@" if p.username else ""
             url = f"{scheme}://{auth}{p.host}:{p.port}"
             return httpx.AsyncClient(proxy=url)
-        # MTProxy 不能拿 IP
-        return httpx.AsyncClient()
+        raise ValueError(f"不支持的代理类型: {p.type}")
 
     geo = await _resolve_country(_make_client)
     result = ProxyTestResult(

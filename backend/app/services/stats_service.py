@@ -131,7 +131,12 @@ async def summarize_operational_stats(
     """按日和按群聚合运营指标，净盈亏复用资金台账口径。"""
 
     active = _normalize_filters(filters)
-    ledger_summary = await ledger_service.summarize_ledger(db, _ledger_filters(active))
+    ledger_filters = ledger_service.resolve_summary_filters(_ledger_filters(active))
+    # 运营动作与资金台账必须复用同一个已解析时间窗口，避免默认查询时
+    # 出现“全部历史动作 + 最近 30 天资金”的混合口径。
+    active.since = ledger_filters.since
+    active.until = ledger_filters.until
+    ledger_summary = await ledger_service.summarize_ledger(db, ledger_filters)
     rows = await _load_action_rows(db, active)
 
     total_acc = _StatsAccumulator(key="total", label="全部")

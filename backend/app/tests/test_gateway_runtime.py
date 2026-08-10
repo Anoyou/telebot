@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock
 
@@ -11,6 +12,7 @@ from app.services.gateway_runtime import (
     GatewayRuntimeStatus,
     acquire_gateway_configuration_db_lock,
     restore_committed_gateway_snapshot,
+    rollback_and_restore_gateway,
     temporary_gateway_provider,
 )
 from app.services.llm_dto import LLMProviderDTO
@@ -191,6 +193,36 @@ async def test_proxy_resolution_refreshes_session_identity_map() -> None:
 
 
 @pytest.mark.asyncio
+async def test_proxy_resolution_rejects_legacy_mtproxy_instead_of_direct() -> None:
+    proxy = SimpleNamespace(
+        type="mtproxy",
+        host="proxy.example",
+        port=443,
+        username=None,
+        password_enc=None,
+    )
+    db = SimpleNamespace(get=AsyncMock(return_value=proxy))
+
+    with pytest.raises(ValueError, match="拒绝回落直连"):
+        await resolve_proxy_url(db, 8)
+
+
+@pytest.mark.asyncio
+async def test_proxy_resolution_rejects_legacy_type_even_with_supported_url_host() -> None:
+    proxy = SimpleNamespace(
+        type="mtproxy",
+        host="http://proxy.example:8080",
+        port=443,
+        username=None,
+        password_enc=None,
+    )
+    db = SimpleNamespace(get=AsyncMock(return_value=proxy))
+
+    with pytest.raises(ValueError, match="拒绝回落直连"):
+        await resolve_proxy_url(db, 8)
+
+
+@pytest.mark.asyncio
 async def test_compensation_reacquires_db_lock_before_reading_committed_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -225,6 +257,106 @@ async def test_compensation_reacquires_db_lock_before_reading_committed_snapshot
 
     assert status.state == "ready"
     assert events == ["lock", "reconcile", "commit"]
+
+
+@pytest.mark.asyncio
+async def test_compensation_restores_snapshot_even_when_transaction_rollback_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import gateway_runtime
+
+    db = SimpleNamespace(rollback=AsyncMock(side_effect=RuntimeError("rollback failed")))
+    restore = AsyncMock(
+        return_value=GatewayRuntimeStatus("ready", True, 3, 1, version="test")
+    )
+    monkeypatch.setattr(gateway_runtime, "restore_committed_gateway_snapshot", restore)
+
+    restored = await rollback_and_restore_gateway(db)
+
+    assert restored is False
+    restore.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_compensation_finishes_before_propagating_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import gateway_runtime
+
+    restore_started = asyncio.Event()
+    allow_restore = asyncio.Event()
+    restored = False
+
+    async def restore() -> GatewayRuntimeStatus:
+        nonlocal restored
+        restore_started.set()
+        await allow_restore.wait()
+        restored = True
+        return GatewayRuntimeStatus("ready", True, 3, 1, version="test")
+
+    monkeypatch.setattr(gateway_runtime, "restore_committed_gateway_snapshot", restore)
+    task = asyncio.create_task(
+        rollback_and_restore_gateway(SimpleNamespace(rollback=AsyncMock()))
+    )
+    await restore_started.wait()
+
+    task.cancel()
+    allow_restore.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert restored is True
+
+
+@pytest.mark.asyncio
+async def test_compensation_task_cancellation_marks_gateway_degraded_without_looping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import gateway_runtime
+
+    async def restore() -> GatewayRuntimeStatus:
+        raise asyncio.CancelledError
+
+    degraded = AsyncMock()
+    monkeypatch.setattr(gateway_runtime, "restore_committed_gateway_snapshot", restore)
+    monkeypatch.setattr(
+        gateway_runtime.gateway_runtime_manager,
+        "mark_control_plane_degraded",
+        degraded,
+    )
+
+    restored = await asyncio.wait_for(
+        rollback_and_restore_gateway(SimpleNamespace(rollback=AsyncMock())),
+        timeout=1,
+    )
+
+    assert restored is False
+    degraded.assert_awaited_once()
+    assert "补偿任务被取消" in str(degraded.await_args.args[0])
+
+
+@pytest.mark.asyncio
+async def test_compensation_degraded_marker_failure_does_not_mask_restore_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import gateway_runtime
+
+    monkeypatch.setattr(
+        gateway_runtime,
+        "restore_committed_gateway_snapshot",
+        AsyncMock(side_effect=RuntimeError("restore failed")),
+    )
+    monkeypatch.setattr(
+        gateway_runtime.gateway_runtime_manager,
+        "mark_control_plane_degraded",
+        AsyncMock(side_effect=RuntimeError("degraded marker failed")),
+    )
+
+    restored = await rollback_and_restore_gateway(
+        SimpleNamespace(rollback=AsyncMock())
+    )
+
+    assert restored is False
 
 
 @pytest.mark.asyncio
@@ -263,6 +395,112 @@ async def test_temporary_gateway_provider_restores_committed_snapshot(
     first_snapshot = reconcile.await_args_list[0].args[0]
     assert [provider.id for provider in first_snapshot] == [7, TEMPORARY_GATEWAY_PROVIDER_ID]
     assert reconcile.await_args_list[1].args[0] == [committed]
+
+
+@pytest.mark.asyncio
+async def test_temporary_gateway_provider_waits_for_restore_before_propagating_cancel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import gateway_runtime
+
+    committed = _provider()
+    draft = _provider()
+    rows_result = SimpleNamespace(
+        scalars=lambda: SimpleNamespace(all=lambda: [SimpleNamespace(id=7)]),
+    )
+    db = SimpleNamespace(
+        execute=AsyncMock(return_value=rows_result),
+        get_bind=lambda: SimpleNamespace(dialect=SimpleNamespace(name="sqlite")),
+    )
+    monkeypatch.setattr(
+        gateway_runtime.gateway_runtime_manager,
+        "_provider_dtos",
+        AsyncMock(return_value=[committed]),
+    )
+    restore_started = asyncio.Event()
+    allow_restore = asyncio.Event()
+    calls = 0
+
+    async def reconcile(_providers, **_kwargs):  # noqa: ANN001
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return GatewayRuntimeStatus("ready", True, 2, 2, version="test")
+        restore_started.set()
+        await allow_restore.wait()
+        return GatewayRuntimeStatus("ready", True, 3, 1, version="test")
+
+    monkeypatch.setattr(
+        gateway_runtime.gateway_runtime_manager,
+        "reconcile",
+        reconcile,
+    )
+    entered = asyncio.Event()
+    hold_request = asyncio.Event()
+
+    async def use_temporary_provider() -> None:
+        async with temporary_gateway_provider(db, draft):
+            entered.set()
+            await hold_request.wait()
+
+    task = asyncio.create_task(use_temporary_provider())
+    await entered.wait()
+    task.cancel()
+    await restore_started.wait()
+
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
+    assert gateway_runtime.gateway_provider_transaction_lock.locked()
+
+    allow_restore.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert calls == 2
+    assert not gateway_runtime.gateway_provider_transaction_lock.locked()
+
+
+@pytest.mark.asyncio
+async def test_temporary_gateway_provider_marks_degraded_when_restore_task_is_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import gateway_runtime
+
+    rows_result = SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: []))
+    db = SimpleNamespace(
+        execute=AsyncMock(return_value=rows_result),
+        get_bind=lambda: SimpleNamespace(dialect=SimpleNamespace(name="sqlite")),
+    )
+    monkeypatch.setattr(
+        gateway_runtime.gateway_runtime_manager,
+        "_provider_dtos",
+        AsyncMock(return_value=[]),
+    )
+    reconcile = AsyncMock(
+        side_effect=[
+            GatewayRuntimeStatus("ready", True, 1, 1, version="test"),
+            asyncio.CancelledError(),
+        ],
+    )
+    degraded = AsyncMock()
+    monkeypatch.setattr(
+        gateway_runtime.gateway_runtime_manager,
+        "reconcile",
+        reconcile,
+    )
+    monkeypatch.setattr(
+        gateway_runtime.gateway_runtime_manager,
+        "mark_control_plane_degraded",
+        degraded,
+    )
+
+    with pytest.raises(RuntimeError, match="补偿任务被取消"):
+        async with temporary_gateway_provider(db, _provider()):
+            pass
+
+    degraded.assert_awaited_once()
+    assert not gateway_runtime.gateway_provider_transaction_lock.locked()
 
 
 @pytest.mark.asyncio

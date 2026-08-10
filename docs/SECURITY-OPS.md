@@ -33,7 +33,7 @@
 
 ```bash
 chmod 600 .env                 # 任何用户可读 .env = 全量泄露
-chmod 700 sessions/            # session string 落盘目录（如启用）
+chmod 700 sessions/            # 历史兼容目录；当前加密 StringSession 存入 DB，不依赖此目录
 chmod 700 data/avatars/        # 头像缓存（不算敏感，但顺手收紧）
 ```
 
@@ -53,7 +53,7 @@ bash deploy/backup-keys.sh           # 默认 gpg 对称加密，输出 keys-bac
 - **HTTPS**：前端必须走 https。任意可拿到 LAN/中间环节的人都能拿到 cookie 里的 JWT。
 - **CSP**：默认前端 Nginx 已下发 CSP；若使用自定义反代或 CDN，保持 `default-src 'self'` 起步并按需放行。
 - **CORS**：`CORS_ORIGINS` 只放真实前端域名，不要 `*`。
-- **TG 出口代理**：要么 VPS 在能直连 TG 的网络，要么走自有可信代理；不要用公开 SOCKS5。
+- **TG 出口代理**：要么 VPS 在能直连 TG 的网络，要么走自有可信代理；不要用公开 SOCKS5。管理代理库只允许新建或更新 SOCKS5/HTTP/HTTPS；SOCKS4 仅作为 `TG_DEFAULT_PROXY` 和旧账号绑定的 Telegram 运行兼容，插件 HTTP、LLM 与 Gateway 均不会使用。
 
 ---
 
@@ -352,6 +352,8 @@ bash deploy/restore.sh \
 ```
 
 脚本会校验同时间戳 checksum，并要求输入 `yes` 确认覆盖。完成后检查 `docker compose ps`、容器内 `/readyz`、账号登录状态、已安装插件和仓库列表；只有这些均可读取，才算本次演练成功。
+
+当前账号 StringSession 加密存于数据库，仅恢复账号时可执行 `bash deploy/restore.sh "$BACKUP_DIR/db-$STAMP.sql"`。上面的完整命令保留 `sessions` 归档用于旧部署兼容；跳过它但恢复插件卷时，第二个参数传 `-`。
 
 ---
 

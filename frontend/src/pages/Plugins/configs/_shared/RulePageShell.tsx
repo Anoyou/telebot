@@ -8,7 +8,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 
-/** 顶部"返回 + 标题"行，4 个 feature page 共用。 */
+/** 规则配置页共用的顶部“返回 + 标题”行。 */
 export function RulePageHeader({
   title,
   backLabel = "返回账号",
@@ -31,7 +31,7 @@ export function RulePageHeader({
   );
 }
 
-/** "功能总开关" Card，AutoReply/Autorepeat/Forward 共用。 */
+/** AutoReply 与 Autorepeat 共用的“功能总开关” Card。 */
 export function RuleFeatureToggleCard({
   enabled,
   onToggle,

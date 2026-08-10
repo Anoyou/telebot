@@ -11495,7 +11495,7 @@
         "type": "object"
       },
       "PluginRepoPlugin": {
-        "description": "仓库内单个插件的描述（仅来自 plugin.json 静态解析，无执行）。\n\n``installed`` 由服务层根据 ``remote_plugin.name`` 是否已存在来填，便于\n前端给出“已安装/可安装”按钮状态。",
+        "description": "仓库内单个插件的描述（仅来自 plugin.json 静态解析，无执行）。\n\n``installed`` 由服务层根据 ``installed_plugin.key`` 是否已存在来填，便于\n前端给出“已安装/可安装”按钮状态。",
         "properties": {
           "author": {
             "default": "",
@@ -17636,7 +17636,7 @@
   },
   "info": {
     "title": "TelePilot",
-    "version": "0.93.0-beta.8"
+    "version": "0.93.0-beta.9"
   },
   "openapi": "3.1.0",
   "paths": {

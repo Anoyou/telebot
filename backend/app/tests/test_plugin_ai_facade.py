@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -10,6 +11,7 @@ from app.services.llm_agent import AgentResult
 from app.services.llm_client import LLMCallFailed, LLMError, LLMResult, LLMStreamChunk
 from app.services.llm_dto import LLMProviderDTO
 from app.services.llm_protocol import ModelResponse, ModelUsage, StopReason, TextContent
+from app.util.proxy import ProxyConfigError
 from app.worker.plugins import ai_facade
 from app.worker.plugins.ai_facade import AIQuotaError, AIUnavailableError, PluginAI
 
@@ -80,6 +82,89 @@ async def test_list_providers_redacts_sensitive_metadata() -> None:
     assert "secret-base" not in encoded
     assert "user:pass" not in encoded
     assert "model-secret" not in encoded
+
+
+@pytest.mark.asyncio
+async def test_legacy_proxy_provider_is_excluded_before_plugin_ai_client_build(
+    monkeypatch,
+) -> None:  # noqa: ANN001
+    provider_row = SimpleNamespace(proxy_id=8)
+    legacy_proxy = SimpleNamespace(
+        id=8,
+        type="mtproxy",
+        host="proxy.example",
+        port=443,
+        username=None,
+        password_enc=None,
+    )
+
+    class _Result:
+        def __init__(self, rows) -> None:  # noqa: ANN001
+            self._rows = rows
+
+        def scalars(self):  # noqa: ANN201
+            return self
+
+        def all(self):  # noqa: ANN201
+            return self._rows
+
+    class _Session:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def __aenter__(self):  # noqa: ANN204
+            return self
+
+        async def __aexit__(self, *_args) -> None:  # noqa: ANN002
+            return None
+
+        async def execute(self, _query):  # noqa: ANN001, ANN201
+            self.calls += 1
+            return _Result([provider_row] if self.calls == 1 else [legacy_proxy])
+
+    monkeypatch.setattr(ai_facade, "AsyncSessionLocal", _Session)
+    monkeypatch.setattr(
+        ai_facade.LLMProviderDTO,
+        "from_orm_row",
+        staticmethod(lambda _row: _provider(1)),
+    )
+    client_built = False
+
+    def _build_client(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        nonlocal client_built
+        client_built = True
+        raise AssertionError("旧代理 Provider 不得进入 LLM 客户端")
+
+    monkeypatch.setattr(ai_facade, "build_llm_client", _build_client)
+    facade = PluginAI(account_id=7, plugin_key="demo")
+
+    with pytest.raises(AIUnavailableError, match="没有可用的 LLM provider"):
+        await facade.complete("sys", "hello")
+
+    assert client_built is False
+
+
+def test_proxy_url_projection_rejects_missing_proxy() -> None:
+    with pytest.raises(ProxyConfigError, match="代理不存在"):
+        ai_facade._proxy_url_from_row(None)
+
+
+def test_proxy_url_projection_rejects_broken_proxy_credentials(monkeypatch) -> None:
+    proxy = SimpleNamespace(
+        type="socks5",
+        host="proxy.example",
+        port=1080,
+        username="alice",
+        password_enc=b"broken",
+    )
+    monkeypatch.setattr(
+        ai_facade,
+        "decrypt_str",
+        lambda _value: (_ for _ in ()).throw(ValueError("bad master key")),
+    )
+
+    with pytest.raises(ProxyConfigError, match="凭据无法解密"):
+        ai_facade._proxy_url_from_row(proxy)
 
 
 @pytest.mark.asyncio

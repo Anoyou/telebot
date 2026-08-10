@@ -55,7 +55,7 @@ http://服务器IP:端口
 - Caddy：监听服务器 `80/443`，自动申请 TLS
 - TelePilot frontend 容器：只发布到本机 `127.0.0.1:8080`
 - TelePilot web 容器：仅在 Docker 网络内提供 `web:8000`
-- PostgreSQL / Redis / sessions / 远程插件目录：Docker volume 持久化
+- PostgreSQL / Redis / 远程插件目录：Docker volume 持久化；`sessions` 卷仅为旧部署和备份布局兼容保留
 
 ## 3. 带 HTTPS 的安装方式
 
@@ -296,7 +296,7 @@ make prod-up
 
 如果恢复点没有完整三张镜像，且已确认本次没有执行数据库迁移，可在目标旧 commit 使用 `make prod-up PROD_UP_ARGS=--source-build` 本地构建救援。它是维护者兜底，不等价于常规回滚，也不绕过备份要求。
 
-包含迁移的更新会在拉取代码前自动运行备份；一旦新版 Web 可能已经执行迁移，健康失败也不会自动切回旧代码，而会保留 pending 状态要求按恢复流程处理。切回旧 commit 或旧镜像不会撤销 schema，必须先恢复迁移前数据库备份，再恢复 sessions 与插件卷。恢复前确认 `.env` 中的 `MASTER_KEY` 与备份时一致，并按 `deploy/restore.sh <db.sql> <sessions.tgz> [plugins-installed.tgz] [plugin-repos.tgz]` 传入同一时间戳的完整备份组。
+包含迁移的更新会在拉取代码前自动运行备份；一旦新版 Web 可能已经执行迁移，健康失败也不会自动切回旧代码，而会保留 pending 状态要求按恢复流程处理。切回旧 commit 或旧镜像不会撤销 schema，必须先恢复迁移前数据库备份，再按需恢复插件卷。恢复前确认 `.env` 中的 `MASTER_KEY` 与备份时一致。当前账号凭据存于数据库，`deploy/restore.sh <db.sql>` 可以只恢复数据库；恢复旧部署布局或完整备份组时使用 `deploy/restore.sh <db.sql> <sessions.tgz> [plugins-installed.tgz] [plugin-repos.tgz]`。需要跳过 sessions 但恢复后续卷时，第二个参数传 `-`。
 
 回滚到不认识 `execution_backend` 字段的 TelePilot 版本前，先在当前版本把所有 Gateway Provider 切回 direct。Gateway 跟随 Web 镜像回滚，不应在服务器另装、另起或保留一个外置 Gateway。
 
@@ -306,7 +306,9 @@ make prod-up
 
 - PostgreSQL 数据库
 - `.env`，尤其 `MASTER_KEY`
-- Docker volumes：`sessions`、`plugins_installed`、`plugin_repos`
+- Docker volumes：`plugins_installed`、`plugin_repos`
+
+备份脚本仍会生成 `sessions-*.tgz` 以兼容旧部署，但当前 Telethon StringSession 加密存于 PostgreSQL，账号恢复不依赖该卷。
 
 仓库已有脚本可参考：
 

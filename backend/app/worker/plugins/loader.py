@@ -5208,26 +5208,6 @@ def _missing_plugin_error(feature_key: str) -> tuple[str, str]:
     return ("plugin not found", f"feature {feature_key} 已启用但未找到插件实现")
 
 
-def _import_builtins() -> None:
-    """import 内置插件包，触发各模块的 ``@register`` 装饰器写入注册表。
-
-    模块化重构后此函数等价于"调 ``discover_plugins()`` + 跳过返回值"——
-    保留是因为现有调用方（runtime / 测试）仍以这个名字为入口；
-    返回值忽略，单纯靠副作用（``@register`` + ``_manifest`` 注入）来工作。
-    任意单个插件失败仅记日志，不影响其它插件加载。
-    """
-    try:
-        from . import builtin  # noqa: F401  builtin/__init__.py 也会 re-export
-    except Exception:  # noqa: BLE001
-        log.exception("import plugins.builtin 失败")
-    try:
-        # 只扫描 builtin。第三方 installed 插件必须等 DB 双开关检查通过后
-        # 再按需加载，避免 worker 启动/配置刷新时执行未启用插件代码。
-        discover_plugins()
-    except Exception:  # noqa: BLE001
-        log.exception("discover_plugins 失败")
-
-
 def _installed_module_name(plugin_key: str) -> str:
     return f"_telepilot_installed_plugin_{plugin_key}"
 
@@ -5972,6 +5952,7 @@ class _AccountState:
         # 启动 / reload_config 时同步。命令派发、插件错误、业务事件不受影响。
         self.log_incoming_messages: bool = False
         self.account_proxy_url: str | None = None
+        self.account_proxy_error: str | None = None
         self.interaction_text_guard_rules: tuple[_InteractionTextGuardRule, ...] = ()
         self.interaction_bot_sender_ids: frozenset[int] = frozenset()
         self.userbot_session_chats: set[int] = set()
@@ -6287,25 +6268,6 @@ async def _event_allowed_for_owner_only(
     if not sudo_chat_allowed(allowed_chats, getattr(event, "chat_id", None)):
         return False
     return True
-
-
-def _rule_chat_matches_for_interaction_guard(rule: dict[str, Any], chat_id: int | None) -> bool:
-    if chat_id is None:
-        return False
-    chat_ids = rule.get("chat_ids")
-    if isinstance(chat_ids, list) and chat_ids:
-        try:
-            return int(chat_id) in {int(item) for item in chat_ids}
-        except (TypeError, ValueError):
-            return False
-    return True
-
-
-def _text_equals_any(text: str, values: Any) -> bool:
-    if not isinstance(values, list):
-        return False
-    clean = str(text or "").strip()
-    return bool(clean and any(clean == str(item or "").strip() for item in values if str(item or "").strip()))
 
 
 def _normalize_guard_texts(*values: Any) -> frozenset[str]:
@@ -7131,6 +7093,7 @@ async def load_plugins_for_account(
     redis: Any,
     scheduler: Any | None = None,
     account_proxy_url: str | None = None,
+    account_proxy_error: str | None = None,
 ) -> None:
     """runtime 在 ``client.connect()`` 之前调一次。
 
@@ -7146,6 +7109,7 @@ async def load_plugins_for_account(
     state.redis = redis
     state.scheduler = scheduler
     state.account_proxy_url = account_proxy_url
+    state.account_proxy_error = account_proxy_error
     state.log_incoming_messages = await _load_log_incoming_messages_setting()
     _STATES[account_id] = state
 
@@ -7633,6 +7597,7 @@ async def _activate(db, state: _AccountState, af: AccountFeature, redis: Any) ->
                     feature_key=af.feature_key,
                     config=effective_config,
                     account_proxy_url=state.account_proxy_url,
+                    account_proxy_error=state.account_proxy_error,
                 ),
                 allowed_hosts=allowed_hosts,
                 manifest_http=getattr(plugin_manifest, "http", None),
@@ -7716,6 +7681,7 @@ async def _activate(db, state: _AccountState, af: AccountFeature, redis: Any) ->
         ),
         generation=state.generation,
         account_proxy_url=state.account_proxy_url,
+        account_proxy_error=state.account_proxy_error,
     )
     # storage 始终基于原始 redis + 自己的前缀，不经过 facade 双重前缀。
     ctx.storage = PluginStorage(

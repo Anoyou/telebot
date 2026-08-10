@@ -13,7 +13,7 @@ from ..db.models.account import Account, Proxy
 from ..db.models.feature import Feature
 from ..db.models.plugin import InstalledPlugin
 from ..settings import settings as app_settings
-from ..util.proxy import parse_proxy_url
+from ..util.proxy import ProxyConfigError, parse_proxy_url
 from ..worker.plugins.base import Plugin, PluginContext, get_plugin
 from ..worker.plugins.http_facade import PluginHTTP
 
@@ -78,6 +78,10 @@ async def run_plugin_config_action(
 
     runtime_config = _merge_current_config(effective_config, current_config)
     manifest = _plugin_manifest_dict(plugin_cls, feature)
+    account_proxy_url: str | None = None
+    account_proxy_error: str | None = None
+    if _manifest_uses_http_facade(manifest):
+        account_proxy_url, account_proxy_error = await _account_proxy_resolution(db, account)
     from ..worker.plugins import loader as plugin_loader
 
     ctx = PluginContext(
@@ -86,9 +90,17 @@ async def run_plugin_config_action(
         config=runtime_config,
         data_dir=plugin_loader._plugin_data_dir(feature.key),  # noqa: SLF001 - shared plugin runtime contract
         log=log,
-        http=await _build_http_facade(db, account, feature.key, manifest, runtime_config),
+        http=_build_http_facade(
+            account.id,
+            feature.key,
+            manifest,
+            runtime_config,
+            account_proxy_url=account_proxy_url,
+            account_proxy_error=account_proxy_error,
+        ),
         ai=_build_ai_facade(account.id, feature.key, manifest),
-        account_proxy_url=await _account_proxy_url(db, account),
+        account_proxy_url=account_proxy_url,
+        account_proxy_error=account_proxy_error,
     )
     plugin = plugin_cls()
     payload = {
@@ -223,30 +235,36 @@ def _is_sensitive_config_key(key: str) -> bool:
     return bool(re.search(r"(^|_)(api_key|access_token|auth_token|bot_token|token|tokens|secret|password|passwd|pwd)$", key, re.I))
 
 
-async def _build_http_facade(
-    db: AsyncSession,
-    account: Account,
+def _build_http_facade(
+    account_id: int,
     plugin_key: str,
     manifest: Mapping[str, Any],
     config: Mapping[str, Any],
+    *,
+    account_proxy_url: str | None,
+    account_proxy_error: str | None,
 ) -> Any:
-    permissions = {str(item) for item in manifest.get("permissions") or []}
-    if "external_http" not in permissions:
+    if not _manifest_uses_http_facade(manifest):
         return None
     allowed_hosts = [str(item).strip() for item in manifest.get("allowed_hosts") or [] if str(item).strip()]
-    if not allowed_hosts:
-        return None
-    proxy_url = await _account_proxy_url(db, account)
     return PluginHTTP.from_context(
         PluginContext(
-            account_id=account.id,
+            account_id=account_id,
             feature_key=plugin_key,
             config=dict(config),
-            account_proxy_url=proxy_url,
+            account_proxy_url=account_proxy_url,
+            account_proxy_error=account_proxy_error,
         ),
         allowed_hosts=allowed_hosts,
         manifest_http=manifest.get("http") if isinstance(manifest.get("http"), Mapping) else None,
     )
+
+
+def _manifest_uses_http_facade(manifest: Mapping[str, Any]) -> bool:
+    permissions = {str(item) for item in manifest.get("permissions") or []}
+    if "external_http" not in permissions:
+        return False
+    return any(str(item).strip() for item in manifest.get("allowed_hosts") or [])
 
 
 def _build_ai_facade(account_id: int, plugin_key: str, manifest: Mapping[str, Any]) -> Any:
@@ -262,34 +280,77 @@ def _build_ai_facade(account_id: int, plugin_key: str, manifest: Mapping[str, An
     return PluginAI(account_id=account_id, plugin_key=plugin_key)
 
 
-async def _account_proxy_url(db: AsyncSession, account: Account) -> str | None:
-    proxy = await db.get(Proxy, account.proxy_id) if getattr(account, "proxy_id", None) else None
+async def _account_proxy_resolution(
+    db: AsyncSession,
+    account: Account,
+) -> tuple[str | None, str | None]:
+    """解析配置动作的插件 HTTP 出口，并保留显式 direct 模式。
+
+    缺失、历史、不受支持或损坏的账号代理会投影为错误状态。默认
+    ``account_proxy`` 请求由 ``PluginHTTP`` 在 DNS/transport 前拒绝；只有
+    manifest 与账号配置共同明确选择 direct 时才会忽略该代理错误。
+    """
+
+    proxy_id = getattr(account, "proxy_id", None)
+    proxy = await db.get(Proxy, proxy_id) if proxy_id else None
+    if proxy_id is not None and proxy is None:
+        return None, f"账号绑定的代理 #{proxy_id} 不存在"
     if proxy is None:
-        parsed_default = parse_proxy_url(app_settings.tg_default_proxy)
+        try:
+            parsed_default = parse_proxy_url(app_settings.tg_default_proxy)
+        except ProxyConfigError as exc:
+            return None, f"全局默认代理配置无效：{exc}"
         if parsed_default is None:
-            return None
+            return None, None
         ptype, host, port, _rdns, username, password = parsed_default
-        return _build_proxy_url(ptype, host, port, username, password or "")
-    password = decrypt_str(proxy.password_enc) if proxy.password_enc else ""
+        return _http_proxy_resolution(ptype, host, port, username, password or "")
+
+    proxy_type = str(proxy.type or "").lower()
+    if proxy_type == "socks4":
+        return None, "账号使用 SOCKS4 Telegram 代理，插件 HTTP 不支持该代理类型"
+    if proxy_type not in {"socks5", "http", "https"}:
+        return None, f"账号代理类型 {proxy.type!r} 不能用于插件 HTTP"
+
+    try:
+        password = decrypt_str(proxy.password_enc) if proxy.password_enc else ""
+    except Exception as exc:  # noqa: BLE001 - 坏代理凭据不能被解释为直连
+        del exc
+        return None, "账号代理凭据无法解密，请重新保存或更换代理"
     if "://" in proxy.host:
-        parsed = parse_proxy_url(proxy.host)
-        if parsed is None:
-            return None
+        try:
+            parsed = parse_proxy_url(proxy.host)
+        except ProxyConfigError as exc:
+            return None, f"账号代理地址无效：{exc}"
         ptype, host, port, _rdns, parsed_user, parsed_password = parsed
-        return _build_proxy_url(
+        return _http_proxy_resolution(
             ptype,
             host,
             port,
             proxy.username or parsed_user,
             password or parsed_password or "",
         )
-    return _build_proxy_url(proxy.type, proxy.host, proxy.port, proxy.username, password)
+    return _http_proxy_resolution(proxy.type, proxy.host, proxy.port, proxy.username, password)
 
 
-def _build_proxy_url(ptype: str, host: str, port: int, username: str | None, password: str) -> str | None:
+def _http_proxy_resolution(
+    ptype: str,
+    host: str,
+    port: int,
+    username: str | None,
+    password: str,
+) -> tuple[str | None, str | None]:
+    if str(ptype or "").lower() == "socks4":
+        return None, "账号使用 SOCKS4 Telegram 代理，插件 HTTP 不支持该代理类型"
+    try:
+        return _build_proxy_url(ptype, host, port, username, password), None
+    except ProxyConfigError as exc:
+        return None, str(exc)
+
+
+def _build_proxy_url(ptype: str, host: str, port: int, username: str | None, password: str) -> str:
     scheme = "socks5" if str(ptype or "").lower() == "socks5" else "http" if str(ptype or "").lower() in {"http", "https"} else ""
     if not scheme:
-        return None
+        raise ProxyConfigError(f"代理类型 {ptype!r} 不能用于插件 HTTP，拒绝回落直连")
     auth = ""
     if username:
         auth = quote(username, safe="")

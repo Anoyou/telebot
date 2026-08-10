@@ -3685,6 +3685,63 @@ async def test_gateway_create_sync_failure_rolls_back_and_restores_committed_sna
 
 
 @pytest.mark.asyncio
+async def test_gateway_create_invalid_proxy_maps_422_and_restores_committed_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import gateway_runtime
+    from app.services.gateway_runtime import GatewayRuntimeStatus
+    from app.util.proxy import ProxyConfigError
+
+    db = SimpleNamespace(commit=AsyncMock(), rollback=AsyncMock())
+    out = SimpleNamespace(
+        id=92,
+        name="gateway-invalid-proxy",
+        provider="openai",
+        default_model="gpt-x",
+    )
+    monkeypatch.setattr(commands_api, "_require_ai_enabled", AsyncMock(return_value=None))
+    monkeypatch.setattr(command_service, "create_provider", AsyncMock(return_value=out))
+    monkeypatch.setattr(commands_api.audit, "write", AsyncMock(return_value=None))
+    monkeypatch.setattr(gateway_runtime, "gateway_provider_transaction_lock", asyncio.Lock())
+    monkeypatch.setattr(
+        gateway_runtime,
+        "reconcile_gateway_runtime_from_session",
+        AsyncMock(
+            side_effect=ProxyConfigError(
+                "代理 #7 不存在，拒绝回落直连"
+            )
+        ),
+    )
+    restore = AsyncMock(
+        return_value=GatewayRuntimeStatus("ready", True, 2, 1, version="test")
+    )
+    monkeypatch.setattr(gateway_runtime, "restore_committed_gateway_snapshot", restore)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await commands_api.create_provider(
+            LLMProviderCreate(
+                name="gateway-invalid-proxy",
+                provider="openai",
+                api_key="sk-test",
+                default_model="gpt-x",
+                api_format="responses",
+                execution_backend="codex_gateway",
+                proxy_id=7,
+            ),
+            db,
+            SimpleNamespace(id=1),
+        )
+
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.detail["code"] == "LLM_PROXY_INVALID"
+    assert "拒绝回落直连" in exc_info.value.detail["message"]
+    db.commit.assert_not_awaited()
+    db.rollback.assert_awaited_once()
+    restore.assert_awaited_once()
+    assert gateway_runtime.gateway_provider_transaction_lock.locked() is False
+
+
+@pytest.mark.asyncio
 async def test_update_provider_waits_for_gateway_lock_before_first_provider_read(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

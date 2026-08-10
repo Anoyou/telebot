@@ -41,5 +41,5 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
   </React.StrictMode>,
 );
 
-// 注册 Service Worker（生产构建会预缓存静态资源；开发环境也启用便于真机测试）
+// 注册 Service Worker；开发模式由 Vite 配置关闭，生产构建负责预缓存静态资源。
 registerPWA();

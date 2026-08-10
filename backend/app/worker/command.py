@@ -2454,39 +2454,6 @@ async def _dispatch_command_inner(
         pass
 
 
-async def dispatch_auto_command_text(
-    client: TelegramClient,
-    event,
-    text: str,
-    *,
-    account_id: int,
-    prefix: str | None = None,
-) -> bool:
-    """直接派发自动动作生成的命令文本。
-
-    自动回复 / scheduler 这类代码路径自己调用 ``send_message`` 时，不应依赖
-    Telegram 再把本账号发出的消息回流成 outgoing update；这里直接复用命令派发。
-    返回 True 表示 ``text`` 是一条可解析命令并已进入派发逻辑。
-    """
-
-    effective_prefix = prefix if prefix is not None else current_command_prefix()
-    cmd = parse_command_key_from_text(text, effective_prefix)
-    if cmd is None or not _looks_like_command_name(cmd, prefix=effective_prefix):
-        return False
-    rest = str(text or "").strip()[len(effective_prefix):].lstrip()
-    parts = rest.split(None, 1)
-    args_raw = parts[1].strip() if len(parts) > 1 else ""
-    await _dispatch_command(
-        client,
-        event,
-        cmd,
-        args_raw,
-        account_id=account_id,
-        help_prefix=effective_prefix,
-    )
-    return True
-
-
 def make_command_handler(client: TelegramClient, account_id: int, prefix: str | None = None):
     """创建并注册 TG 命令派发 handler。
 

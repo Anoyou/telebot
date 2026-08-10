@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "telepilot-backend"
-version = "0.93.0-beta.8"
+version = "0.93.0-beta.9"
 description = "TelePilot后端"
 requires-python = ">=3.12"
 license = {text = "MIT"}
@@ -33,7 +33,7 @@ dependencies = [
     "telethon @ https://github.com/LonamiWebs/Telethon/archive/b7a6dfe815fef200da478524cc1a20350b531175.tar.gz",
     "Pillow>=10.0.0",
     "cryptg>=0.4.0",            # C 加速 AES-IGE（Telethon）
-    "python-socks[asyncio]>=2.4.4",  # SOCKS5/HTTP/MTProxy 出口代理
+    "python-socks[asyncio]>=2.4.4",  # SOCKS5/HTTP 出口代理
 
     # 加密 / 认证
     "cryptography>=42.0.7",

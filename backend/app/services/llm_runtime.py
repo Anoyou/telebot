@@ -1407,23 +1407,6 @@ async def stream_model_with_fallback(
     )
 
 
-def _pick_compatible_model(provider: LLMProviderDTO, request: ModelRequest) -> str | None:
-    """为 fallback 选择真正兼容当前请求的已启用模型。"""
-
-    candidates = provider.enabled_model_ids()
-    if not candidates:
-        fallback = provider.pick_enabled_model()
-        candidates = [fallback] if fallback else []
-    default_model = str(provider.default_model or "").strip()
-    if default_model in candidates:
-        candidates = [default_model, *(item for item in candidates if item != default_model)]
-    for model in candidates:
-        candidate_request = replace(request, model=model)
-        if not provider.capabilities_for_model(model).validation_errors(candidate_request):
-            return model
-    return None
-
-
 def _structured_model_candidates(
     provider: LLMProviderDTO,
     request: ModelRequest,

@@ -353,7 +353,7 @@ class LLMProvider(Base):
     # 运维备注（仅给自己看；路由不读）
     notes: Mapped[str | None] = mapped_column(String(500), nullable=True)
     # 出口代理（指向 proxy 表）；NULL = 直连（DIRECT），即不走任何代理。
-    # mtproxy 类型仅给 Telegram 用，HTTP 客户端不支持——schema 层会拒绝。
+    # 历史 mtproxy 行不受当前运行链路支持；HTTP 客户端也会拒绝。
     proxy_id: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("proxy.id", ondelete="SET NULL"), nullable=True
     )

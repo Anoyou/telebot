@@ -235,8 +235,16 @@ test("PWA 待机居中且完整动作自动切换全身模式", async ({ page })
     await expect(button).toBeVisible();
     await expectCanvasReady(canvas);
 
-    const buttonBox = await button.boundingBox();
-    const spriteBox = await sprite.boundingBox();
+    const { buttonBox, spriteBox } = await sprite.evaluate((element) => {
+      const buttonElement = element.closest("[data-assistant-mobile-button]");
+      if (!buttonElement) throw new Error("找不到 PWA 助手按钮");
+      const buttonRect = buttonElement.getBoundingClientRect();
+      const spriteRect = element.getBoundingClientRect();
+      return {
+        buttonBox: { x: buttonRect.x, width: buttonRect.width },
+        spriteBox: { x: spriteRect.x, width: spriteRect.width },
+      };
+    });
     // 不同 macOS / Chromium Runner 对动画变换后的盒模型会产生不到
     // 1 个 CSS 像素的子像素取整差异；超过 1px 仍视为真实偏移。
     expect(Math.abs(
@@ -261,7 +269,11 @@ test("PWA 待机居中且完整动作自动切换全身模式", async ({ page })
         await page.waitForTimeout(24);
         hashes.add((await canvasMetrics(canvas)).hash);
       }
-      expect(hashes.size).toBe(6);
+      // 完成动作本身有 5 帧；若采样跨过 1.74 秒的三轮动画边界，
+      // 还会读到回落后的待机帧。前一个生产组件测试已严格验证 5 个
+      // 跳跃帧，这里只校验 PWA 全身模式没有静止或丢失主要动作。
+      expect(hashes.size).toBeGreaterThanOrEqual(5);
+      expect(hashes.size).toBeLessThanOrEqual(6);
     }
   }
 });

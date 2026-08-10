@@ -51,6 +51,10 @@
 5. 用中文把 `CHANGELOG.md` 的 `Unreleased` 移到 beta 或稳定版本段落，只记录实际落地内容。
 6. Commit、PR、release 标题和正文使用中文。
 7. 发 tag 或 release 前，确认 tag 指向正确提交，不能指向旧 HEAD。
+8. Beta push 必须保留 prerelease 版本；面向 `main` 的 PR 和 `main` push
+   必须先切换为稳定版本，并在 `CHANGELOG.md` 中存在当前精确版本段。
+9. 等待 `CI Gate` 成功后再核对镜像；Web、Frontend、Updater 的发布标签都
+   必须来自代码版本校验，且清单同时包含 `linux/amd64` 与 `linux/arm64`。
 
 推荐验证：
 

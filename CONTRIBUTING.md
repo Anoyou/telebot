@@ -120,7 +120,7 @@ FastAPI 进程同时承载 Web API、System Agent、Worker Supervisor、Account 
 | `frontend/src/api/` | API client、手写类型与 OpenAPI 生成类型 |
 | `frontend/src/lib/` | 导航、版本、流式协议和纯逻辑工具 |
 | `frontend/tests/` | Playwright 视觉与无障碍测试 |
-| `examples/plugins/` | 受 CI 维护的插件示例 |
+| `examples/plugins/` | 插件示例；其中纳入 `validate-plugin-examples.py` 的稳定公开 API 示例由 CI 维护 |
 | `docs/` | 架构、部署、安全、插件和 Agent 文档 |
 | `deploy/` | 备份、恢复、Caddy 示例和内网 Updater |
 | `scripts/` | 本地启动、生产更新和插件示例校验 |
@@ -321,7 +321,7 @@ SemVer 判断：破坏兼容为 MAJOR，用户可感知的新能力或主入口�
 
 - 有复现和回归测试的 Bug 修复。
 - 文档、示例和测试补充。
-- 维护在 `examples/plugins/` 的示例插件。
+- 维护在 `examples/plugins/` 且已纳入 `validate-plugin-examples.py` 稳定公开 API gate 的示例插件。
 - 边界清楚、依赖不变的小功能和小幅 UX 调整。
 
 先开 issue：

@@ -69,6 +69,9 @@ async def on_event(self, ctx, payload):
 
 响应体会流式计数，超过 `max_response_bytes` 会抛出 `PluginHTTPResponseTooLarge`，不会等完整 body 读完后才拒绝。
 
+DNS 检查是连接前的预解析，当前不会 pin 解析结果，也无法在连接建立后复核最终 socket peer。因此它不能完全防御恶意 DNS 服务器在预检与建连之间发生的 DNS rebinding。管理员应只放行运营方可信、DNS 控制权明确的精确 host，避免把用户可控子域或过宽的 `**.` 域名作为安全边界；对高风险出口还应在网络层限制容器访问内网和元数据地址。
+
 ## 代理与 direct mode
 
 默认网络模式是 `account_proxy`，会使用账号代理。只有 Manifest 显式声明 `http={"allow_direct": true}`，并且账号配置请求 `network_mode="direct"` 时，插件才可以直连；否则 direct 会被拒绝。
+账号显式绑定的代理若已删除、类型不受支持或配置无效，默认 `account_proxy` 下的 `ctx.http` 会在发出请求前报错，不会把该状态解释成 DIRECT。只有 Manifest 和账号配置共同明确选择 direct 时才会绕过账号代理，这属于显式授权，不是代理失败后的自动回落。Web 进程执行 `on_config_action` 与账号 worker 使用同一 fail-closed 语义；未声明 `external_http` 或没有 `allowed_hosts` 的纯本地配置动作不会查询代理，也不受账号代理状态影响。

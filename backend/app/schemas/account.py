@@ -62,7 +62,7 @@ class ProxySummary(BaseModel):
     """
 
     id: int
-    type: str          # socks5 / http / mtproxy
+    type: str          # socks5 / http / https
     host: str
     port: int
     label: str | None = None  # 友好名字；后端可能给 host:port 兜底

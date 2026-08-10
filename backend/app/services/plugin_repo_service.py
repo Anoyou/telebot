@@ -98,7 +98,6 @@ class _OfficialPluginSource:
     plugin_dir: Path
     meta: PluginMetadata
     source_url: str
-    remote: bool = False
 
 
 async def git_env_for_source_url(db: AsyncSession, source_url: str) -> dict[str, str] | None:
@@ -156,17 +155,6 @@ def _local_import_root() -> Path:
     root = settings.resolve_project_path("./plugins/local_imports")
     root.mkdir(parents=True, exist_ok=True)
     return root
-
-
-def _official_plugin_root() -> Path:
-    """历史随包推荐插件目录。
-
-    当前 TelePilot 本体不再从这里分发普通插件；推荐入口只读取
-    ``settings.official_plugin_repo_url`` 指向的插件库。保留函数名是为了兼容
-    旧测试和迁移代码里对该路径的 monkeypatch。
-    """
-
-    return Path(__file__).resolve().parents[1] / "worker" / "plugins" / "official"
 
 
 def _official_plugin_repo_url() -> str:
@@ -1144,12 +1132,6 @@ def _plugin_meta_has_official_tag(meta: PluginMetadata) -> bool:
     return "official" in {str(tag or "").strip().lower() for tag in (meta.tags or [])}
 
 
-def _iter_local_official_sources() -> list[_OfficialPluginSource]:
-    """不再从 TelePilot 随包目录提供推荐插件。"""
-
-    return []
-
-
 async def _iter_remote_official_sources(*, force_refresh: bool = False) -> list[_OfficialPluginSource]:
     url = _official_plugin_repo_url()
     async with _repo_cache_lock(url):
@@ -1172,7 +1154,6 @@ def _remote_official_sources_from_root(root: Path, source_url: str) -> list[_Off
                 plugin_dir=plugin_dir,
                 meta=meta,
                 source_url=source_url,
-                remote=True,
             )
         )
     return out
@@ -1207,7 +1188,6 @@ async def official_plugin_source_snapshot(plugin_name: str) -> AsyncIterator[_Of
             plugin_dir=snapshot_dir,
             meta=snapshot_meta,
             source_url=source.source_url,
-            remote=True,
         )
     finally:
         shutil.rmtree(snapshot_root, ignore_errors=True)
@@ -1224,9 +1204,6 @@ async def copy_official_plugin_source(plugin_name: str, destination: Path) -> st
 
 
 async def _find_official_plugin_source(plugin_name: str) -> _OfficialPluginSource | None:
-    for source in _iter_local_official_sources():
-        if source.meta.name == plugin_name:
-            return source
     for source in await _iter_remote_official_sources():
         if source.meta.name == plugin_name:
             return source
@@ -1234,18 +1211,9 @@ async def _find_official_plugin_source(plugin_name: str) -> _OfficialPluginSourc
 
 
 def _manifest_json_for_official_source(source: _OfficialPluginSource) -> dict[str, Any]:
-    if source.remote:
-        data = _manifest_json_from_remote_meta(source.meta)
-        data["source_url"] = source.source_url
-        return data
-    manifest_obj = None
-    try:
-        from ..feature_registry import _load_manifest_file  # noqa: PLC0415
-
-        manifest_obj = _load_manifest_file(source.plugin_dir / "manifest.py")
-    except Exception:  # noqa: BLE001
-        manifest_obj = None
-    return _manifest_json_from_manifest_object(manifest_obj, source.meta)
+    data = _manifest_json_from_remote_meta(source.meta)
+    data["source_url"] = source.source_url
+    return data
 
 
 async def list_official_plugins(db: AsyncSession) -> list[PluginRepoPlugin]:
@@ -1255,8 +1223,7 @@ async def list_official_plugins(db: AsyncSession) -> list[PluginRepoPlugin]:
     installed_versions = {str(name): str(version or "") for name, version in installed_rows}
     out: list[PluginRepoPlugin] = []
     seen: set[str] = set()
-    sources = _iter_local_official_sources()
-    sources.extend(await _iter_remote_official_sources())
+    sources = await _iter_remote_official_sources()
     for source in sources:
         meta = source.meta
         if meta.name in seen:
@@ -1416,32 +1383,6 @@ async def install_local_plugin(
     return remote_plugin_view_from_installed(installed_row)
 
 
-def _manifest_json_from_manifest_object(
-    manifest: object | None,
-    fallback: PluginMetadata,
-) -> dict[str, Any]:
-    """用历史本地源的 ``manifest.py`` 补齐插件运行元数据。
-
-    当前推荐入口只读取插件库远程源；本函数仅服务旧测试与历史本地源兼容。
-    远程插件仍只依赖静态 ``plugin.json``，不执行 Python。
-    """
-
-    to_dict = getattr(manifest, "to_dict", None)
-    if callable(to_dict):
-        data = dict(to_dict())
-    else:
-        data = _manifest_json_from_remote_meta(fallback)
-    data["name"] = str(data.get("key") or data.get("name") or fallback.name)
-    data.setdefault("display_name", fallback.display_name or fallback.name)
-    data.setdefault("description", fallback.description)
-    data.setdefault("author", fallback.author or "TelePilot Official")
-    data.setdefault("version", fallback.version)
-    data.setdefault("entry", fallback.entry)
-    if fallback.tags and not data.get("tags"):
-        data["tags"] = list(fallback.tags)
-    return data
-
-
 def _feature_manifest_from_manifest_json(manifest_json: dict[str, Any]) -> dict[str, Any] | None:
     manifest: dict[str, Any] = {}
     cfg_schema = manifest_json.get("config_schema")
@@ -1547,7 +1488,6 @@ async def _install_official_plugin_from_snapshot(
                 plugin_dir=staging,
                 meta=staged_meta,
                 source_url=source.source_url,
-                remote=source.remote,
             )
         )
         lint_warnings = lint_plugin_metadata_files(staging)

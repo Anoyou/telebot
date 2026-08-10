@@ -189,13 +189,9 @@ async def list_ledger_entries(db: AsyncSession, filters: LedgerFilters | None = 
 async def summarize_ledger(db: AsyncSession, filters: LedgerFilters | None = None) -> LedgerSummary:
     """按日和按群汇总真实资金净盈亏。"""
 
-    active = _normalize_filters(filters)
+    active = resolve_summary_filters(filters)
     if active.status is not None and active.status not in LEDGER_SUMMARY_STATUSES:
         return _empty_summary()
-    if active.status is None:
-        active.statuses = LEDGER_SUMMARY_STATUSES
-    _apply_default_summary_window(active)
-    active.limit = None
     entries = await list_ledger_entries(db, active)
 
     income = Decimal("0")
@@ -429,6 +425,17 @@ def _apply_default_summary_window(filters: LedgerFilters) -> None:
         return
     window_end = filters.until or datetime.now(UTC)
     filters.since = window_end - timedelta(days=DEFAULT_LEDGER_SUMMARY_WINDOW_DAYS)
+
+
+def resolve_summary_filters(filters: LedgerFilters | None = None) -> LedgerFilters:
+    """解析台账汇总的完整过滤条件，供组合统计复用同一时间窗口。"""
+
+    active = _normalize_filters(filters)
+    if active.status is None:
+        active.statuses = LEDGER_SUMMARY_STATUSES
+    _apply_default_summary_window(active)
+    active.limit = None
+    return active
 
 
 def _empty_summary() -> LedgerSummary:
@@ -821,6 +828,7 @@ __all__ = [
     "list_ledger_entries",
     "mark_compensation_manual_paid",
     "reset_ledger_data",
+    "resolve_summary_filters",
     "summarize_ledger",
     "today",
 ]

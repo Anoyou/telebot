@@ -296,13 +296,7 @@ async def _call_llm_provider(
     temperature: float | None,
     reasoning_effort: str | None,
     timeout_seconds: int | None,
-    stream: bool = False,
 ) -> _LLMCallOutcome | None:
-    # B2 will replace this non-streaming call path; B1 keeps invoke's external
-    # contract unchanged and always reaches this helper with stream=False.
-    if stream:
-        raise NotImplementedError("worker ai_runtime.invoke does not stream yet")
-
     from ..services.llm_client import LLMCallFailed, LLMError
     from ..services.llm_invoke import invoke as invoke_ai_runtime
     from .command import _humanize_llm_error
@@ -1185,7 +1179,6 @@ async def invoke(
         temperature=request_settings.temperature,
         reasoning_effort=request_settings.reasoning_effort,
         timeout_seconds=request_settings.timeout_seconds,
-        stream=False,
     )
     if outcome is None:
         return

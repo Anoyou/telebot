@@ -1,7 +1,6 @@
-// PWA Service Worker 注册 + 更新提示。
+// PWA Service Worker 注册与离线壳预热。
 // vite-plugin-pwa 在构建时把 `virtual:pwa-register` 解析为真正的注册代码；
 // 类型声明在 src/vite-env.d.ts 里通过 `vite-plugin-pwa/client` 引入。
-let pwaRegistration: ServiceWorkerRegistration | undefined;
 const HTML_CACHE_NAME = "html";
 
 async function warmOfflineShell(): Promise<void> {
@@ -13,37 +12,6 @@ async function warmOfflineShell(): Promise<void> {
   await cache.put(shellUrl, response);
 }
 
-export async function checkFrontendUpdate(): Promise<"updating" | "up_to_date" | "unsupported" | "error"> {
-  if (
-    typeof window === "undefined" ||
-    !("serviceWorker" in navigator) ||
-    !navigator.serviceWorker.controller ||
-    !pwaRegistration
-  ) {
-    return "unsupported";
-  }
-
-  try {
-    if (pwaRegistration.waiting || pwaRegistration.installing) return "updating";
-    let updateFound = false;
-    const onUpdateFound = () => {
-      updateFound = true;
-    };
-    pwaRegistration.addEventListener("updatefound", onUpdateFound);
-    try {
-      await pwaRegistration.update();
-    } finally {
-      pwaRegistration.removeEventListener("updatefound", onUpdateFound);
-    }
-    if (updateFound || pwaRegistration.installing || pwaRegistration.waiting) {
-      return "updating";
-    }
-    return "up_to_date";
-  } catch {
-    return "error";
-  }
-}
-
 export function registerPWA() {
   // 服务端渲染 / 测试环境跳过
   if (typeof window === "undefined") return;
@@ -53,8 +21,7 @@ export function registerPWA() {
     .then(({ registerSW }) => {
       registerSW({
         // autoUpdate 模式不会调用 onNeedRefresh，新 SW 激活后会自动刷新页面。
-        onRegisteredSW(_swUrl, registration) {
-          pwaRegistration = registration;
+        onRegisteredSW() {
           void warmOfflineShell().catch(() => {
             // 在线预热失败不影响当前页；下次在线启动会再试。
           });

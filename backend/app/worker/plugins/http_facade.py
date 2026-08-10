@@ -26,6 +26,8 @@ import ipaddress
 import json
 import socket
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -36,6 +38,10 @@ Resolver = Callable[[str, int], Awaitable[Sequence[str]] | Sequence[str]]
 
 DEFAULT_TIMEOUT_SECONDS = 15.0
 DEFAULT_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+_REQUEST_BLOCK_REASON: ContextVar[str | None] = ContextVar(
+    "plugin_http_request_block_reason",
+    default=None,
+)
 _FAKE_IP_NETWORKS = (
     ipaddress.ip_network("198.18.0.0/15"),
 )
@@ -237,6 +243,7 @@ class PluginHTTP:
         allowed_hosts: Sequence[str],
         plugin_key: str = "?",
         account_proxy_url: str | None = None,
+        account_proxy_error: str | None = None,
         network_mode: NetworkMode = "account_proxy",
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
@@ -255,6 +262,7 @@ class PluginHTTP:
         self._plugin_key = str(plugin_key or "?")
         self.allowed_hosts = tuple(allowed_hosts)
         self.account_proxy_url = account_proxy_url
+        self.account_proxy_error = str(account_proxy_error or "").strip() or None
         self.network_mode = network_mode
         self.timeout_seconds = float(timeout_seconds)
         self.max_response_bytes = int(max_response_bytes)
@@ -288,6 +296,7 @@ class PluginHTTP:
             allowed_hosts=allowed_hosts,
             plugin_key=plugin_key,
             account_proxy_url=getattr(ctx, "account_proxy_url", None),
+            account_proxy_error=getattr(ctx, "account_proxy_error", None),
             network_mode=network_mode,
             timeout_seconds=timeout_seconds,
             max_response_bytes=max_response_bytes,
@@ -318,6 +327,13 @@ class PluginHTTP:
         return self._plugin_key
 
     async def _request(self, method: str, url: str, **kwargs: Any) -> PluginHTTPResponse:
+        blocked_reason = _REQUEST_BLOCK_REASON.get()
+        if blocked_reason:
+            raise self._policy_error(blocked_reason)
+        if self.network_mode == "account_proxy" and self.account_proxy_error:
+            raise self._policy_error(
+                f"账号代理不能用于插件 HTTP，拒绝回落直连：{self.account_proxy_error}"
+            )
         try:
             parsed = httpx.URL(url)
         except httpx.InvalidURL as exc:
@@ -413,9 +429,21 @@ def _policy_message(plugin_key: str, message: str) -> str:
 SafeHTTP = PluginHTTP
 
 
+@contextmanager
+def block_plugin_http_requests(reason: str):
+    """只在当前异步任务上下文中禁止插件 HTTP，并由子任务继承。"""
+
+    token: Token[str | None] = _REQUEST_BLOCK_REASON.set(str(reason))
+    try:
+        yield
+    finally:
+        _REQUEST_BLOCK_REASON.reset(token)
+
+
 __all__ = [
     "DEFAULT_MAX_RESPONSE_BYTES",
     "DEFAULT_TIMEOUT_SECONDS",
+    "block_plugin_http_requests",
     "PluginHTTP",
     "PluginHTTPError",
     "PluginHTTPPolicyError",

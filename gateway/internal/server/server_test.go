@@ -5,13 +5,14 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
 )
 
 func TestUnixSocketHealthAndPermissions(t *testing.T) {
-	socket := filepath.Join(t.TempDir(), "gateway.sock")
+	socket := shortSocketPath(t)
 	srv := New(socket, 2, func() bool { return true }, nil)
 	done := make(chan error, 1)
 	go func() { done <- srv.Serve() }()
@@ -38,7 +39,7 @@ func TestUnixSocketHealthAndPermissions(t *testing.T) {
 }
 
 func TestReadyRequiresSnapshot(t *testing.T) {
-	socket := filepath.Join(t.TempDir(), "gateway.sock")
+	socket := shortSocketPath(t)
 	srv := New(socket, 1, func() bool { return false }, nil)
 	done := make(chan error, 1)
 	go func() { done <- srv.Serve() }()
@@ -58,7 +59,7 @@ func TestReadyRequiresSnapshot(t *testing.T) {
 }
 
 func TestControlPlaneRemainsAvailableWhenDataPlaneIsSaturated(t *testing.T) {
-	socket := filepath.Join(t.TempDir(), "gateway.sock")
+	socket := shortSocketPath(t)
 	started := make(chan struct{})
 	release := make(chan struct{})
 	data := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -113,6 +114,16 @@ func unixClient(socket string) *http.Client {
 		return (&net.Dialer{}).DialContext(ctx, "unix", socket)
 	}}
 	return &http.Client{Transport: transport, Timeout: 2 * time.Second}
+}
+
+func shortSocketPath(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "tpgw-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return filepath.Join(dir, "gateway.sock")
 }
 
 func waitForSocket(t *testing.T, socket string) {

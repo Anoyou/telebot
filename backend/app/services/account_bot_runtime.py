@@ -94,7 +94,6 @@ from .interaction.delivery import (
 )
 from .interaction.delivery import (
     InteractionDeliveryExecutor,
-    action_save_message_id_key,
     delivery_message_id,
     read_action_reply_target,
 )
@@ -2813,10 +2812,6 @@ def _plain_callback_text(text: str, *, limit: int = 180) -> str:
     return plain[:limit]
 
 
-def _interaction_action_save_message_id_key(raw: Any) -> str | None:
-    return action_save_message_id_key(raw)
-
-
 def _render_transfer_bot_notice_with_error(
     template: str,
     payer_name: str,
@@ -2878,16 +2873,6 @@ def _render_transfer_bot_notice(
         escape_html=escape_html,
     )
     return rendered
-
-
-def _interaction_chat_matches(cfg: dict[str, Any], chat_id: int) -> bool:
-    raw_chat_ids = cfg.get("chat_ids")
-    if isinstance(raw_chat_ids, list) and raw_chat_ids:
-        try:
-            return int(chat_id) in {int(item) for item in raw_chat_ids}
-        except (TypeError, ValueError):
-            return False
-    return cfg.get("chat_id") is None or int(cfg["chat_id"]) == int(chat_id)
 
 
 def _interaction_triggers(cfg: dict[str, Any]) -> list[str]:
@@ -3402,24 +3387,6 @@ def _interaction_rule_limit_label(rule: dict[str, Any]) -> str:
     if rule.get("daily_limit_per_user") is not None:
         parts.append(f"每用户日上限 <code>{account_bot_service.html_text(rule.get('daily_limit_per_user'))}</code>")
     return "；".join(parts) if parts else "无限制"
-
-
-def _interaction_rule_trigger_labels(rule: dict[str, Any]) -> list[str]:
-    labels = [f"方式：{_interaction_trigger_mode_label(rule)}"]
-    if _rule_trigger_mode_allows(rule, "keyword"):
-        keywords = _rule_keyword_list(rule, "module_start_keywords")
-        if keywords:
-            labels.append("关键词：" + " / ".join(f"<code>{account_bot_service.html_text(item)}</code>" for item in keywords[:5]))
-        else:
-            labels.append("关键词：未配置")
-    if _rule_trigger_mode_allows(rule, "payment"):
-        triggers = _rule_triggers(rule)
-        labels.append("转账通知：" + " / ".join(f"<code>{account_bot_service.html_text(item)}</code>" for item in triggers[:5]))
-        amount_label = _interaction_amount_condition_label(rule)
-        if amount_label:
-            labels.append(amount_label)
-        labels.append(_interaction_receiver_condition_label(rule))
-    return labels
 
 
 def _interaction_rule_query_trigger_label(rule: dict[str, Any]) -> str:

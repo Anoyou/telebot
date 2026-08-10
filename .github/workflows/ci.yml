@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [main, Beta]
+    tags: ["v*"]
   pull_request:
     branches: [main]
 
@@ -188,6 +189,26 @@ jobs:
         working-directory: backend
         run: pytest -q app/tests/test_openapi_contract.py
 
+  gateway:
+    name: Gateway
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install Go
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5
+        with:
+          go-version: "1.23"
+          cache-dependency-path: gateway/go.sum
+
+      - name: Test Gateway
+        working-directory: gateway
+        run: go test ./...
+
+      - name: Vet Gateway
+        working-directory: gateway
+        run: go vet ./...
+
   version-sync:
     name: 版本同步
     needs: change-scope
@@ -222,41 +243,52 @@ jobs:
           if len(unique) != 1:
               raise SystemExit(f"版本号不一致: {versions}")
           version = unique.pop()
-          if f"## [{version}]" not in changelog and "## [Unreleased]" not in changelog:
-              raise SystemExit(f"CHANGELOG.md 缺少版本 {version} 或 Unreleased 段")
+          if f"## [{version}]" not in changelog:
+              raise SystemExit(f"CHANGELOG.md 缺少当前精确版本段：## [{version}]")
           print(f"version sync ok: {version}")
           PY
 
-      - name: Prevent non-main stable release version bumps
-        if: github.event_name == 'push' && github.ref_name != 'main'
+      - name: Check branch release channel
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          BASE_REF: ${{ github.base_ref }}
         run: |
-          git fetch origin main --depth=1
           python - <<'PY'
+          import os
           import re
-          import subprocess
           from pathlib import Path
 
           current_text = Path("backend/app/__init__.py").read_text()
           current = re.search(r'__version__ = "([^"]+)"', current_text).group(1)
-          main_text = subprocess.check_output(
-              ["git", "show", "origin/main:backend/app/__init__.py"],
-              text=True,
-          )
-          main = re.search(r'__version__ = "([^"]+)"', main_text).group(1)
+          stable = re.fullmatch(r"\d+\.\d+\.\d+", current)
           prerelease = re.fullmatch(r"\d+\.\d+\.\d+-(?:alpha|beta|rc)\.\d+", current)
-          if current != main and not prerelease:
+          if not stable and not prerelease:
+              raise SystemExit(f"版本格式不符合发布约定：{current}")
+
+          event = os.environ["EVENT_NAME"]
+          ref_name = os.environ["REF_NAME"]
+          base_ref = os.environ.get("BASE_REF", "")
+          targets_main = (event == "pull_request" and base_ref == "main") or (
+              event == "push" and ref_name == "main"
+          )
+          if targets_main and prerelease:
               raise SystemExit(
-                  f"非 main 分支不得独立发布正式版本：当前 {current}，main {main}。"
-                  "请先合入 main，再由 main 统一迭代正式版本；开发分支仅允许 alpha/beta/rc 预发布版本。"
+                  f"main 发布线只允许稳定版本，当前为 {current}。"
+                  "请在发布准备分支去掉 prerelease 后缀后再创建或更新 PR。"
               )
-          channel = "预发布" if prerelease else "与 main 一致"
-          print(f"non-main version guard ok: {current} ({channel})")
+          if event == "push" and ref_name == "Beta" and not prerelease:
+              raise SystemExit(
+                  f"Beta 发布线只允许 alpha/beta/rc 预发布版本，当前为 {current}。"
+              )
+          channel = "预发布" if prerelease else "稳定版"
+          print(f"release channel guard ok: {current} ({channel})")
           PY
 
   ci-gate:
     name: CI Gate
     if: always()
-    needs: [change-scope, backend, frontend, frontend-browser, api-contract, version-sync]
+    needs: [change-scope, backend, frontend, frontend-browser, api-contract, gateway, version-sync]
     runs-on: ubuntu-latest
     steps:
       - name: 汇总条件任务结果
@@ -266,9 +298,10 @@ jobs:
           FRONTEND: ${{ needs.frontend.result }}
           BROWSER: ${{ needs.frontend-browser.result }}
           API_CONTRACT: ${{ needs.api-contract.result }}
+          GATEWAY: ${{ needs.gateway.result }}
           VERSION_SYNC: ${{ needs.version-sync.result }}
         run: |
-          for result in "$CHANGE_SCOPE" "$BACKEND" "$FRONTEND" "$BROWSER" "$API_CONTRACT" "$VERSION_SYNC"; do
+          for result in "$CHANGE_SCOPE" "$BACKEND" "$FRONTEND" "$BROWSER" "$API_CONTRACT" "$GATEWAY" "$VERSION_SYNC"; do
             if [[ "$result" != "success" && "$result" != "skipped" ]]; then
               echo "CI 子任务失败或取消：$result" >&2
               exit 1
@@ -285,7 +318,7 @@ jobs:
       revision: ${{ github.sha }}
       base_revision: ${{ github.event.before }}
       ref_name: ${{ github.ref_name }}
-      ref_type: branch
+      ref_type: ${{ github.ref_type }}
     permissions:
       contents: read
       packages: write

@@ -80,6 +80,7 @@ class Settings(BaseSettings):
     # 群聊抽奖防误触：自己发出的"纯命令"若在前 N 条消息内出现过相同的他人消息，
     # 视为参与抽奖/接龙等回声，不触发命令。0 表示关闭。
     command_echo_guard_previous_messages: int = 8
+    # 已废弃且无业务消费者；保留字段只为旧环境变量继续通过 Settings 解析。
     session_dir: str = "./sessions"
     # 头像本地缓存目录；主进程通过 IPC 让 worker 写盘 ``{aid}.jpg``
     # 24h TTL，worker 离线时返 404 → 前端首字母 fallback
@@ -110,8 +111,9 @@ class Settings(BaseSettings):
     plugin_zip_max_uncompressed_bytes: int = 100 * 1024 * 1024
     plugin_zip_max_compression_ratio: int = 200
 
-    # 全局默认代理（仅当账号未绑定 Proxy 行时兜底）。
-    # 格式：``socks5://[user:pass@]host:port`` 或 ``http://host:port`` 或 ``mtproxy://host:port?secret=xxx``
+    # 全局默认 Telegram 代理（仅当账号未绑定 Proxy 行时兜底）。
+    # 格式：``socks5://[user:pass@]host:port``、``socks4://host:port`` 或 ``http://host:port``
+    # SOCKS4 仅供 Telethon 兼容；插件 HTTP、LLM 与 Gateway 不支持。
     # 留空 = 直连（在能直接访问 Telegram 的网络下使用）
     tg_default_proxy: str = ""
 

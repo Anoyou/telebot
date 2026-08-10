@@ -10,9 +10,6 @@
     socks5://host:port
     socks4://host:port
     http://host:port
-    mtproxy://host:port?secret=xxxx     (Telethon 用 ``connection`` 参数走 MTProxy；
-                                         本工具仅支持 PySocks 风格的 socks5/4/http；
-                                         mtproxy 留作 TODO，目前会返 None 并记录 warning)
 
 调用：
     >>> parse_proxy_url("socks5://user:pass@127.0.0.1:1080")
@@ -22,10 +19,7 @@
 """
 from __future__ import annotations
 
-import logging
 from urllib.parse import unquote, urlparse
-
-log = logging.getLogger(__name__)
 
 # Telethon / PySocks 接受的 proxy_type 枚举
 _VALID_TYPES: dict[str, str] = {
@@ -39,8 +33,12 @@ _VALID_TYPES: dict[str, str] = {
 ProxyTuple = tuple[str, str, int, bool, str | None, str | None]
 
 
+class ProxyConfigError(ValueError):
+    """显式代理配置无效；调用方必须 fail-closed，不能把它解释成直连。"""
+
+
 def parse_proxy_url(url: str | None) -> ProxyTuple | None:
-    """解析代理 URL；空 / 无效 → 返 None（即直连）。"""
+    """解析代理 URL；仅空值表示未配置，非空无效值统一抛错。"""
     if not url:
         return None
     url = url.strip()
@@ -53,30 +51,29 @@ def parse_proxy_url(url: str | None) -> ProxyTuple | None:
 
     try:
         parsed = urlparse(url)
-    except Exception:
-        log.warning("代理 URL 无法解析：%r", url)
-        return None
+    except Exception as exc:
+        raise ProxyConfigError(f"代理 URL 无法解析：{url!r}") from exc
 
     scheme = (parsed.scheme or "").lower()
 
     if scheme == "mtproxy":
-        # Telethon 的 MTProxy 不走 PySocks，需要 connection_class=ConnectionTcpMTProxyRandomizedIntermediate；
-        # 这里暂不支持；如真要用，在账号详情里通过 Proxy 表（type='mtproxy'）单独配置——
-        # 那条路径走的是 plan 里 build_proxy_tuple 的 (proxy.type, host, port, ...) 写法，
-        # Telethon 内部会把 type='mtproxy' 当作 secret 登录。
-        log.warning("MTProxy 全局代理暂不支持；请在账号绑定时单独选 mtproxy 代理")
-        return None
+        # 返回 None 会被调用方解释为“直连”，从而在用户明确配置代理时泄漏真实出口。
+        # 在实现 Telethon 专用 connection class 与 secret 校验前必须 fail-closed。
+        raise ProxyConfigError("MTProxy 当前不受支持，请使用 SOCKS5、SOCKS4 或 HTTP 代理")
 
     proxy_type = _VALID_TYPES.get(scheme)
     if not proxy_type:
-        log.warning("未知代理 scheme：%r（仅支持 socks5/socks4/http/https/mtproxy）", scheme)
-        return None
+        raise ProxyConfigError(
+            f"未知代理 scheme {scheme!r}；仅支持 socks5、socks4、http 或 https"
+        )
 
-    host = parsed.hostname
-    port = parsed.port
+    try:
+        host = parsed.hostname
+        port = parsed.port
+    except ValueError as exc:
+        raise ProxyConfigError(f"代理端口无效：{url!r}") from exc
     if not host or not port:
-        log.warning("代理 URL 缺 host 或 port：%r", url)
-        return None
+        raise ProxyConfigError(f"代理 URL 缺少 host 或 port：{url!r}")
 
     user = unquote(parsed.username) if parsed.username else None
     password = unquote(parsed.password) if parsed.password else None

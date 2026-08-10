@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import socket
 import time
 from typing import Any
 from urllib.parse import unquote, urlsplit
@@ -21,7 +20,7 @@ from ....services.network_service import get_network_info
 from ..context import ToolContext
 from ..registry import ToolRegistry, ToolSpec
 
-_VALID_PROXY_TYPES = {"socks5", "http", "https", "mtproxy"}
+_VALID_PROXY_TYPES = {"socks5", "http", "https"}
 _TG_HOST = "149.154.167.50"
 _TG_PORT = 443
 
@@ -66,7 +65,7 @@ def _parse_proxy_args(args: dict[str, Any]) -> dict[str, Any]:
     if data.get("type") is not None:
         data["type"] = str(data["type"]).lower()
         if data["type"] not in _VALID_PROXY_TYPES:
-            raise ValueError("代理类型必须是 socks5、http、https 或 mtproxy")
+            raise ValueError("代理类型必须是 socks5、http 或 https")
     if data.get("port") is not None:
         port = int(data["port"])
         if not 1 <= port <= 65535:
@@ -141,33 +140,35 @@ async def test_proxy(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     row = await ctx.db.get(Proxy, proxy_id)
     if row is None:
         raise ValueError(f"代理 #{proxy_id} 不存在")
+    proxy_type = str(row.type or "").lower()
+    if proxy_type not in {"socks5", "http", "https"}:
+        return {"ok": False, "proxy_id": proxy_id, "error": "不支持的代理类型，请先迁移"}
+    try:
+        password = decrypt_str(row.password_enc) if row.password_enc else None
+    except Exception:  # noqa: BLE001 - 坏凭据必须在任何网络探测前拒绝
+        return {
+            "ok": False,
+            "proxy_id": proxy_id,
+            "error": "代理凭据无法解密，请重新保存或更换代理",
+        }
     error = await _probe_endpoint(row.host, row.port)
     if error:
         return {"ok": False, "proxy_id": proxy_id, "error": error}
-    password = decrypt_str(row.password_enc) if row.password_enc else None
     started = time.monotonic()
     try:
-        if row.type in {"socks5", "http", "https"}:
-            proxy = AsyncProxy(
-                proxy_type={
-                    "socks5": ProxyType.SOCKS5,
-                    "http": ProxyType.HTTP,
-                    "https": ProxyType.HTTP,
-                }[row.type],
-                host=row.host,
-                port=row.port,
-                username=row.username or None,
-                password=password or None,
-            )
-            sock = await asyncio.wait_for(proxy.connect(dest_host=_TG_HOST, dest_port=_TG_PORT), timeout=8.0)
-            sock.close()
-        elif row.type == "mtproxy":
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(5.0)
-            await asyncio.get_running_loop().run_in_executor(None, sock.connect, (row.host, row.port))
-            sock.close()
-        else:
-            return {"ok": False, "proxy_id": proxy_id, "error": "不支持的代理类型"}
+        proxy = AsyncProxy(
+            proxy_type={
+                "socks5": ProxyType.SOCKS5,
+                "http": ProxyType.HTTP,
+                "https": ProxyType.HTTP,
+            }[proxy_type],
+            host=row.host,
+            port=row.port,
+            username=row.username or None,
+            password=password or None,
+        )
+        sock = await asyncio.wait_for(proxy.connect(dest_host=_TG_HOST, dest_port=_TG_PORT), timeout=8.0)
+        sock.close()
     except (ProxyConnectionError, ProxyError, TimeoutError, OSError) as exc:
         return {
             "ok": False,
@@ -231,10 +232,30 @@ async def save_proxy_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[str
         row = await ctx.db.get(Proxy, int(proxy_id))
         if row is None:
             raise ValueError(f"代理 #{proxy_id} 不存在")
+        source_type = str(row.type or "").lower()
+        if source_type in _VALID_PROXY_TYPES:
+            # 历史数据可能包含大写类型；更新其它字段时一并规范化，
+            # 避免已经可用的代理因为大小写被当前校验误判为不支持。
+            row.type = source_type
+        target_type = str(parsed.get("type") or source_type)
+        if (
+            source_type not in _VALID_PROXY_TYPES
+            and target_type in _VALID_PROXY_TYPES
+            and target_type != source_type
+        ):
+            # 历史协议凭据与新协议语义不兼容；默认清空，再应用本次显式输入。
+            row.username = None
+            row.password_enc = None
         for key in ("type", "host", "port", "username"):
             if key in parsed and parsed[key] is not None:
-                setattr(row, key, parsed[key])
-        if bool(parsed.get("clear_password")):
+                value = parsed[key]
+                if key == "username":
+                    row.username = value or None
+                else:
+                    setattr(row, key, value)
+        if bool(parsed.get("clear_password")) or (
+            "password" in parsed and parsed.get("password") == ""
+        ):
             row.password_enc = None
         elif parsed.get("password") not in (None, ""):
             row.password_enc = encrypt_str(str(parsed["password"]))
@@ -257,10 +278,8 @@ async def save_proxy_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[str
             ).all()
         )
         provider_ids = [int(item[0]) for item in provider_rows]
-        if provider_ids and row.type == "mtproxy":
-            raise ValueError(
-                "被 LLM Provider 引用的代理不能改为 MTProxy；请先解除引用或使用 HTTP/SOCKS5"
-            )
+        if row.type not in _VALID_PROXY_TYPES:
+            raise ValueError("代理类型必须是 socks5、http 或 https")
         if any(str(item[1] or "direct") == "codex_gateway" for item in provider_rows):
             _mark_gateway_candidate_sync(ctx)
         if ctx.action is not None:

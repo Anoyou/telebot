@@ -8356,7 +8356,7 @@ export interface components {
          * PluginRepoPlugin
          * @description 仓库内单个插件的描述（仅来自 plugin.json 静态解析，无执行）。
          *
-         *     ``installed`` 由服务层根据 ``remote_plugin.name`` 是否已存在来填，便于
+         *     ``installed`` 由服务层根据 ``installed_plugin.key`` 是否已存在来填，便于
          *     前端给出“已安装/可安装”按钮状态。
          */
         PluginRepoPlugin: {

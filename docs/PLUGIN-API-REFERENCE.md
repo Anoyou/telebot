@@ -175,8 +175,8 @@ class PluginContext:
 
 第三方插件可以使用两个受控 facade，但必须在 Manifest 中显式声明权限；未声明或策略不完整时字段会是 `None`：
 
-- `ctx.http`：声明 `permissions=["external_http"]` 且填写 `allowed_hosts` 后注入。它限制协议、域名、超时、响应大小，并在发起请求前阻断 localhost/内网/链路本地地址。默认走账号代理；只有 Manifest 的 `http={"allow_direct": true}` 且账号配置请求 direct 时才允许直连。
-- `ctx.ai`：声明 `permissions=["ai_text"]` 后注入。它复用 TelePilot 的 LLM Provider 池、fallback 链、账号级预算和 usage 记录；插件只能拿到脱敏 provider 元数据，不能读取 `api_key_enc`、`base_url` 或代理 URL。
+- `ctx.http`：声明 `permissions=["external_http"]` 且填写 `allowed_hosts` 后注入。它限制协议、域名、超时、响应大小，并在发起请求前阻断 localhost/内网/链路本地地址。默认走账号代理；账号代理若已删除、类型不受支持或配置无效，Web 配置动作和 worker 都会在网络请求前失败。只有 Manifest 的 `http={"allow_direct": true}` 与账号配置共同请求 direct 时才允许直连，这属于显式授权而非失败回落；未注入 `ctx.http` 的纯本地配置动作不会查询代理。
+- `ctx.ai`：声明 `permissions=["ai_text"]` 后注入。它复用 TelePilot 的 LLM Provider 池、fallback 链、账号级预算和 usage 记录；插件只能拿到脱敏 provider 元数据，不能读取 `api_key_enc`、`base_url` 或代理 URL。显式绑定缺失、已停用或无效代理的 Provider 会从插件路由排除，不会自动改成 DIRECT。
 - `ctx.ai.complete()` 推荐用 `provider_tag` 按用途选择 provider；`tag` / `tags` 是兼容别名且已 deprecated，新插件不要依赖它们作为主要入口。可选 `route="fixed"|"tag"|"auto"` 显式声明路由模式（留空时按旧参数推断，向后兼容）；返回结果的 `routing` 字段是脱敏路由摘要（模式 / provider / 生效模型 / 命中 tag / 协议 / 身份 / 是否 fallback），不含 key、base_url、代理或内部分类器细节。插件不能指定 UA、身份、密钥、代理、内部分类器或全局 fallback。
 - `ctx.ai.stream_complete()` 返回 Provider 原生文本 delta 的异步迭代器，支持 Chat Completions、Responses 与 Anthropic Messages；不拆分完整响应、不在已输出部分文本后切 Provider。上游忽略 `stream=true` 而返回普通 JSON 时，同一次请求的完整文本作为一个块产出，不会再次调用模型。调用方必须消费到迭代器自然结束；取消、提前关闭、超时或异常按已发起调用保守结算。需要跨 Provider 的完整响应 fallback 时使用 `complete()`。
 - `ctx.ai.run_agent()` 需要独立 `ai_agent` 权限，并同时要求 `capabilities.agent_tools.enabled=true`、manifest `agent_tools[]` 声明和调用方传入同名 handler。平台限制轮数、工具数、重复调用、token 与总超时；只读工具可并行，副作用工具串行。同样支持 `route="fixed"|"tag"|"auto"`，且 Agent 路由会预先排除没有已启用模型的 provider（无法支撑 tools 调用）。
@@ -523,7 +523,6 @@ POST /api/plugin-config-action-jobs/{job_id}/control  {"action":"pause"|"cancel"
 
 | 插件 | config_schema | UI 模式 | 状态 |
 |------|--------------|---------|------|
-| forward | ✅ target_chat_id, mode | `rules` | 核心兼容插件 |
 | auto_reply | 规则通过 Rules API 管理 | `rules` | 插件库推荐插件，按需安装 |
 | autorepeat | ✅ trigger / repeat / chat 配置 | `rules` | 插件库推荐插件，按需安装 |
 | game24 | ✅ command, timeout | `single` | 插件库插件，按需安装 |
@@ -531,7 +530,7 @@ POST /api/plugin-config-action-jobs/{job_id}/control  {"action":"pause"|"cancel"
 | codex_image | ✅ command, access_token, model, message_template, image_size/aspect_ratio/image_format, timeout/status/output/instructions | `single` | 插件库图片插件，按需安装 |
 | scheduler | ✅ default_notify, max_tasks | `platform` | 平台基础能力 |
 
-`examples/plugins/translate` 是历史示例目录，不属于当前内置插件清单；其中直接复用后端私有 LLM 链路的写法也不是第三方插件推荐模板。新增第三方 Telegram 事件插件优先参考 `examples/plugins/event_bus_demo`；需要 HTTP 时参考 `examples/plugins/with_http`，需要 AI 文本能力时参考 `examples/plugins/with_ai`，需要把旧交互入口迁移到标准信封时参考 `examples/plugins/with_interaction`。
+新增第三方 Telegram 事件插件优先参考 `examples/plugins/event_bus_demo`；需要 HTTP 时参考 `examples/plugins/with_http`，需要 AI 文本能力时参考 `examples/plugins/with_ai`，需要把旧交互入口迁移到标准信封时参考 `examples/plugins/with_interaction`。曾经存在的 `translate` 示例依赖后端私有 LLM 链路，已从当前示例集移除；如需考古只查看 Git 历史，不要把它复原成可安装模板。
 
 ### Manifest 验证
 
@@ -2101,11 +2100,11 @@ class MyPlugin(Plugin):
 
 | 分类 | 适用场景 | 大白话 | 典型功能 | 配置入口 |
 |------|---------|--------|---------|---------|
-| **规则配置页** | 多条规则独立配置，需 CRUD + 试运行 | 像自动化流水线：先建规则，规则只保存配置和 dry-run 输入 | forward、插件库 auto_reply / autorepeat、远程规则插件 | 专属配置页 |
+| **规则配置页** | 多条规则独立配置，需 CRUD + 试运行 | 像自动化流水线：先建规则，规则只保存配置和 dry-run 输入 | 插件库 auto_reply / autorepeat、远程规则插件 | 专属配置页 |
 | **单配置对象 / 通用独立配置页** | 每个账号只保存一份插件配置，或轻量插件只需要字段表单 | 像一个工具面板：配置好触发指令和参数，直接运行；普通字段由 schema 驱动渲染 | 插件库 game24 / math10 / codex_image / chatgpt_image、简单远程插件 / 小工具插件 | 专属或通用独立配置页 |
 | **基础能力 — 平台内置** | 系统运行时常驻能力，不作为普通插件展示 | 像底座服务：给插件或平台调用，不强调启停 | scheduler | 平台功能页 |
 
-**关键判断**：需要维护多条规则 → `rules`；只有一份账号配置或普通字段表单足够 → `single`；旧插件已经写了 `schema` → 按 `single` 通用独立页兼容；像调度器这种系统服务 → `platform`。这里的 `rules` 只表示配置页/CRUD/dry-run 形态，不是旧运行时规则驱动主路径；标准会话事件投递仍以 Event Bus + `event_subscriptions` + 标准 action 为主。
+**关键判断**：需要维护多条规则 → `rules`；只有一份账号配置或普通字段表单足够 → `single`；旧插件已经写了 `schema` → 按 `single` 通用独立页兼容；像调度器这种系统服务 → `platform`。这里的 `rules` 只表示配置页/CRUD/dry-run 形态，不是旧运行时规则驱动主路径；标准会话事件投递仍以 Event Bus + `event_subscriptions` + 标准 action 为主。通用 schema 独立页只读写单个配置对象，不会自动提供 Rules API 的列表、新建、编辑、删除或 dry-run，因此不能用来替代真正的规则 CRUD 页。
 
 #### 自动分类规则
 
@@ -2213,7 +2212,7 @@ config_schema={
 
 #### 禁止回退
 
-- 不新增 Schema 配置弹窗；`ConfigDialog` 只作为通用 schema 表单实现细节或兼容代码存在。
+- 不新增 Schema 配置弹窗；当前入口是 `GenericPluginConfigPage` 独立页。`GenericPluginConfig.tsx` 可以复用 `ConfigDialog.tsx` 导出的 schema 解析/表单 helper 与类型，但 `ConfigDialog` 弹窗本身不是当前配置入口，也不是一种插件分类。
 - 不在账号详情页展示内部分类名或 legacy schema 分组。
 - 不把“使用说明”“功能总开关”“插件配置”“插件预览”合并到同一张卡片。
 - 不把保存按钮放到页面顶部，或只放在滚动到底才能看到的位置。
@@ -2221,16 +2220,18 @@ config_schema={
 
 ---
 
-### 规则配置页（Forward / AutoReply / Autorepeat）
+### 规则配置页（AutoReply / Autorepeat / 远程规则插件）
 
 规则配置页每条 rule 存储独立的 `config` JSON，通过 CRUD API 管理。前端专属页面提供：规则列表 + 创建/编辑对话框 + 试运行（dry-run）。这只定义配置数据和页面形态；真正的 Telegram 消息投递仍应通过 Event Bus 的 `event_subscriptions`、标准事件信封和标准 action 完成。
+
+`forward` 是核心兼容能力，当前插件中心不提供它的专属管理 UI，不应把历史 `Forward.tsx` 文件当成可访问入口或新规则页模板。通用 `GenericPluginConfigPage` 也不会把 `config_schema` 自动升级成规则 CRUD；需要多规则管理的插件必须有对应 Rules API 和专属页面。
 
 #### 专属规则页适配清单
 
 | # | 文件 | 修改内容 |
 |---|------|---------|
 | 1 | `frontend/src/api/types.ts` | 添加 `XxxRuleConfig` 接口（描述单条规则的 config 字段） |
-| 2 | `frontend/src/pages/Plugins/configs/XxxConfig.tsx` | **新建**：规则列表页（参考 `AutoReply.tsx` 或 `Forward.tsx`） |
+| 2 | `frontend/src/pages/Plugins/configs/XxxConfig.tsx` | **新建**：规则列表页（参考当前可访问的 `AutoReply.tsx`） |
 | 3 | 插件包内 `manifest.py` | `config_schema["x-ui-mode"] = "rules"`；新插件应放在远程仓库或 `plugins/local_imports/xxx/` 后由 Web 安装 |
 | 4 | `frontend/src/App.tsx` | lazy import 新页面组件，并在通用 `:featureKey` 路由之前添加 `:aid/features/xxx` 显式路由 |
 | 5 | `frontend/src/pages/Plugins/_shared/featureConfig.ts` | 在共享的 `FEATURE_CONFIG_PAGE_KEYS` Set 中添加 key |
@@ -2323,7 +2324,7 @@ const FEATURE_CONFIG_PAGE_KEYS = new Set([
 ]);
 ```
 
-**作用**：Set 中的 key 会让账号详情和插件中心的“配置”按钮跳转到专属页面路由 `/accounts/:aid/features/xxx`；不在 Set 中的 key 应进入通用独立配置页。历史代码和旧文档中出现的 `ConfigDialog` 只代表通用 schema 表单实现，不再是一类插件形态。
+**作用**：Set 中的 key 会让账号详情和插件中心的“配置”按钮跳转到专属页面路由 `/accounts/:aid/features/xxx`；不在 Set 中的 key 应进入 `GenericPluginConfigPage` 通用独立配置页。该页可复用 `ConfigDialog.tsx` 中的 schema helper，但不会打开 `ConfigDialog` 弹窗；`ConfigDialog` 也不再代表一类插件形态。
 
 #### 6. feature.py — 后端常量
 
@@ -2476,6 +2477,7 @@ config_schema={
 - 多个预览字段应在同一个 Telegram 风格预览场景里按字段顺序展示为多条气泡，方便同时检查开局、进行中、答对、超时、取消和错误提示等模板。
 - `usage_preview` / `usage_guide` / `usage_instructions` / `ai_usage_guide` 只用于“使用说明”卡片，不会再出现在插件配置字段区；`template_placeholders` 只作为只读占位符说明，不算详细使用说明。
 - 配置布局可使用 `x-ui-section`、`x-ui-order`、`x-ui-columns` 在平台容器内做分组、排序和列数控制。
+- 这个页面只编辑一份账号/全局配置对象，不提供 Rules API 的多条列表、创建、编辑、删除或 dry-run；规则插件不能用通用 schema 页代替专属 CRUD。
 
 ```python
 # config_schema 示例（适用于通用独立配置页自动渲染）

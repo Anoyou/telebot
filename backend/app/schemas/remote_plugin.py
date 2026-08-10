@@ -34,13 +34,3 @@ class RemotePluginOut(BaseModel):
     installed_at: datetime | None = None
 
     model_config = ConfigDict(from_attributes=True)
-
-
-class RegistryPluginOut(BaseModel):
-    name: str
-    display_name: str
-    description: str
-    author: str
-    source_url: str
-    version: str
-    installed: bool

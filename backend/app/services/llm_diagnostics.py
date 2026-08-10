@@ -289,13 +289,6 @@ def _structured_error_facts(body: str | Mapping[str, Any] | None) -> _Structured
     )
 
 
-def _structured_error(body: str | Mapping[str, Any] | None) -> tuple[str | None, str]:
-    """兼容旧调用者；分类新逻辑使用完整结构化事实。"""
-
-    facts = _structured_error_facts(body)
-    return facts.upstream_error_code or facts.code, facts.upstream_error_message or facts.message
-
-
 def _category_from_code(code: str | None) -> str | None:
     normalized = (code or "").lower()
     exact = {

@@ -391,8 +391,12 @@ async def _sync_gateway_candidate_or_raise(db: Any) -> None:
     """在 Provider 事务提交前同步同一事务可见的完整 Gateway 快照。"""
 
     from ..services.gateway_runtime import reconcile_gateway_runtime_from_session
+    from ..util.proxy import ProxyConfigError
 
-    gateway_status = await reconcile_gateway_runtime_from_session(db)
+    try:
+        gateway_status = await reconcile_gateway_runtime_from_session(db)
+    except ProxyConfigError as exc:
+        raise _llm_err("LLM_PROXY_INVALID", str(exc), 422) from None
     if gateway_status.state == "degraded":
         raise HTTPException(
             status_code=422,
@@ -659,8 +663,12 @@ async def _resolve_proxy_url(db, proxy_id: int | None) -> str | None:
     主进程内（不能 import worker.runtime——后者持有 telethon 等重依赖）。
     """
     from ..services.llm_proxy_service import resolve_proxy_url
+    from ..util.proxy import ProxyConfigError
 
-    return await resolve_proxy_url(db, proxy_id)
+    try:
+        return await resolve_proxy_url(db, proxy_id)
+    except ProxyConfigError as exc:
+        raise _llm_err("LLM_PROXY_INVALID", str(exc), 422) from None
 
 
 @router.post(

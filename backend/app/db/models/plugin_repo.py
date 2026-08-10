@@ -1,12 +1,12 @@
 """插件仓库登记表（阶段 F：可浏览的 Git 仓库列表）。
 
-与 ``remote_plugin`` 表的区别：
-- ``remote_plugin`` 是“已安装的单个第三方插件”——每行对应一份在
+与 ``installed_plugin`` 表的区别：
+- ``installed_plugin`` 是当前安装台账——每行对应一份在
   ``plugins/installed/<name>/`` 下落地的代码。
 - ``plugin_repo`` 是“可浏览的插件仓库”——每行是一个 git URL，仓库内可能
   包含**多个**插件子目录；用户可在 UI 里列出仓库内插件并选择安装。
 
-两表彼此独立：``plugin_repo`` 仅是“目录索引”，``remote_plugin`` 真正决定
+两表职责独立：``plugin_repo`` 仅是“目录索引”，``installed_plugin`` 决定
 worker loader 是否会加载该插件。
 """
 

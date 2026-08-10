@@ -34,9 +34,7 @@ INCLUDED_EXAMPLES = {
     "with_interaction",
     "webhook_receiver",
 }
-SKIPPED_EXAMPLES = {
-    "translate": "历史示例仍依赖后端私有 LLM 链路，迁移到 ctx.ai 前不纳入稳定 API gate。",
-}
+SKIPPED_EXAMPLES: dict[str, str] = {}
 REQUIRED_FILES = {"plugin.json", "manifest.py", "plugin.py", "__init__.py"}
 REQUIRED_PERMISSIONS = {
     "with_ai": {"ai_text"},

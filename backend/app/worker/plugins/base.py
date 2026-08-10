@@ -830,6 +830,7 @@ class PluginContext:
     identities: Any = None  # PluginIdentityFacade
     generation: int = 0
     account_proxy_url: str | None = None
+    account_proxy_error: str | None = None
     event: Any | None = None
     args: list[str] = field(default_factory=list)
     command: str = ""

@@ -11,11 +11,11 @@ import { OperationsTemplatesPage } from "./Templates";
 export function OperationsWorkspaceRoutes() {
   return (
     <Routes>
-      <Route index element={<Navigate to="templates" replace />} />
+      <Route index element={<Navigate to="/operations/templates" replace />} />
       <Route path="templates" element={<OperationsTemplatesPage />} />
       <Route path="scheduler" element={<OperationsSchedulerPage />} />
       <Route path="auto-command-whitelist" element={<OperationsAutoCommandWhitelistPage />} />
-      <Route path="*" element={<Navigate to="templates" replace />} />
+      <Route path="*" element={<Navigate to="/operations/templates" replace />} />
     </Routes>
   );
 }

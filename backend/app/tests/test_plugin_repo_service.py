@@ -294,7 +294,6 @@ async def test_remote_official_sources_only_include_official_tag(tmp_path, monke
 
     assert [item.meta.name for item in sources] == ["codex_image"]
     assert sources[0].source_url == "https://github.com/example/official.git"
-    assert sources[0].remote is True
 
 
 @pytest.mark.asyncio
@@ -337,7 +336,6 @@ async def test_list_official_plugins_reads_remote_repo_and_marks_updates(tmp_pat
     async def _remote_root(*, force_refresh: bool = False):
         return repo
 
-    monkeypatch.setattr(svc, "_iter_local_official_sources", lambda: [])
     monkeypatch.setattr(svc, "_official_remote_plugin_root", _remote_root)
 
     plugins = await svc.list_official_plugins(_DB())

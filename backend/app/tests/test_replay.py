@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import json
 import sys
@@ -7,6 +8,7 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
 
 from app.services import action_tap
@@ -14,6 +16,7 @@ from app.worker import replay as replay_mod
 from app.worker.plugins import base as plugin_base_mod
 from app.worker.plugins import loader as loader_mod
 from app.worker.plugins.base import Plugin
+from app.worker.plugins.http_facade import PluginHTTP, PluginHTTPPolicyError
 from app.worker.replay import replay_recording
 
 
@@ -183,6 +186,80 @@ async def test_recording_jsonl_replays_stable_action_sequence(recording_root: Pa
             "error_summary": None,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_replay_blocks_plugin_http_even_when_manifest_allows_direct() -> None:
+    requested = 0
+
+    async def _resolver(_host: str, _port: int) -> list[str]:
+        return ["93.184.216.34"]
+
+    async def _handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal requested
+        requested += 1
+        return httpx.Response(200, content=b"ok")
+
+    http = PluginHTTP(
+        allowed_hosts=["api.example.com"],
+        network_mode="direct",
+        resolver=_resolver,
+        transport=httpx.MockTransport(_handler),
+    )
+    capture = replay_mod._ActionEventCapture()  # noqa: SLF001
+
+    async with replay_mod._replay_runtime_patches(capture):  # noqa: SLF001
+        with pytest.raises(PluginHTTPPolicyError, match="回放模式禁止"):
+            await http.get("https://api.example.com/v1")
+
+    assert requested == 0
+
+
+@pytest.mark.asyncio
+async def test_replay_http_block_is_isolated_from_existing_tasks() -> None:
+    replay_requested = 0
+    live_requested = 0
+    live_gate = asyncio.Event()
+
+    async def _resolver(_host: str, _port: int) -> list[str]:
+        return ["93.184.216.34"]
+
+    async def _replay_handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal replay_requested
+        replay_requested += 1
+        return httpx.Response(200, content=b"unexpected")
+
+    async def _live_handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal live_requested
+        await live_gate.wait()
+        live_requested += 1
+        return httpx.Response(200, content=b"ok")
+
+    replay_http = PluginHTTP(
+        allowed_hosts=["api.example.com"],
+        network_mode="direct",
+        resolver=_resolver,
+        transport=httpx.MockTransport(_replay_handler),
+    )
+    live_http = PluginHTTP(
+        allowed_hosts=["api.example.com"],
+        network_mode="direct",
+        resolver=_resolver,
+        transport=httpx.MockTransport(_live_handler),
+    )
+    live_task = asyncio.create_task(live_http.get("https://api.example.com/live"))
+    await asyncio.sleep(0)
+    capture = replay_mod._ActionEventCapture()  # noqa: SLF001
+
+    async with replay_mod._replay_runtime_patches(capture):  # noqa: SLF001
+        live_gate.set()
+        response = await live_task
+        assert response.status_code == 200
+        with pytest.raises(PluginHTTPPolicyError, match="回放模式禁止"):
+            await replay_http.get("https://api.example.com/replay")
+
+    assert live_requested == 1
+    assert replay_requested == 0
 
 
 @pytest.mark.asyncio

@@ -16,6 +16,7 @@ from ...llm_probe_defaults import (
 )
 from ...services import llm_quick_verify
 from ...services.llm_request_headers import decrypt_request_headers
+from ...util.proxy import ProxyConfigError
 from .registry import ActionKeepPendingError
 
 
@@ -159,6 +160,17 @@ async def resolve_provider_verify_args(
 ) -> dict[str, Any]:
     """合并已有 Provider 与参数，得到 verify 所需字段。"""
 
+    async def resolve_proxy(proxy_id: int | None) -> str | None:
+        from ...services.llm_proxy_service import resolve_proxy_url
+
+        try:
+            return await resolve_proxy_url(db, proxy_id)
+        except ProxyConfigError as exc:
+            raise ActionKeepPendingError(
+                str(exc),
+                code="PROXY_CONFIG_INVALID",
+            ) from None
+
     provider_id = args.get("id") or args.get("provider_id")
     base: dict[str, Any] = {
         "provider": args.get("provider"),
@@ -176,9 +188,7 @@ async def resolve_provider_verify_args(
         base["client_identity_profile"] = base.get("client_identity_profile") or "auto"
         if bool(args.get("clear_proxy")):
             base["proxy_id"] = None
-        from ...services.llm_proxy_service import resolve_proxy_url
-
-        base["proxy_url"] = await resolve_proxy_url(db, base.get("proxy_id"))
+        base["proxy_url"] = await resolve_proxy(base.get("proxy_id"))
         return base
     row = await db.get(LLMProvider, int(provider_id))
     if row is None:
@@ -218,9 +228,7 @@ async def resolve_provider_verify_args(
                 "已保存的 Provider 兼容请求头无法解密，请在 Web 配置中重新保存。",
                 code="REQUEST_HEADERS_DECRYPT_FAILED",
             ) from None
-    from ...services.llm_proxy_service import resolve_proxy_url
-
-    base["proxy_url"] = await resolve_proxy_url(db, base.get("proxy_id"))
+    base["proxy_url"] = await resolve_proxy(base.get("proxy_id"))
     return base
 
 

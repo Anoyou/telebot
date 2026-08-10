@@ -471,17 +471,36 @@ async def temporary_gateway_provider(db: Any, provider: LLMProviderDTO):
             yield temporary
         finally:
             active_error = sys.exception()
-            try:
-                restored = await gateway_runtime_manager.reconcile(
+            restore_task = asyncio.create_task(
+                gateway_runtime_manager.reconcile(
                     committed,
                     recover_on_failure=True,
+                ),
+                name="restore-temporary-gateway-provider",
+            )
+            restored, restore_error, cancelled = await _await_gateway_compensation(
+                restore_task,
+                operation="恢复临时 Gateway Provider",
+            )
+            if restore_error is None and restored.state not in {"ready", "not_required"}:
+                restore_error = RuntimeError(
+                    restored.error or "恢复 Gateway 已提交配置失败"
                 )
-                if restored.state not in {"ready", "not_required"}:
-                    raise RuntimeError(restored.error or "恢复 Gateway 已提交配置失败")
-            except BaseException:
+            if restore_error is not None:
+                cancelled = (
+                    await _mark_gateway_degraded_best_effort(restore_error)
+                    or cancelled
+                )
                 if active_error is None:
-                    raise
-                log.exception("临时 Gateway 请求结束后恢复已提交配置失败")
+                    if cancelled:
+                        raise asyncio.CancelledError from restore_error
+                    raise restore_error
+                log.error(
+                    "临时 Gateway 请求结束后恢复已提交配置失败",
+                    exc_info=restore_error,
+                )
+            if cancelled and not isinstance(active_error, asyncio.CancelledError):
+                raise asyncio.CancelledError from restore_error
     finally:
         gateway_provider_transaction_lock.release()
 
@@ -520,12 +539,71 @@ async def restore_committed_gateway_snapshot() -> GatewayRuntimeStatus:
             raise
 
 
+async def _await_gateway_compensation(
+    task: asyncio.Task[Any],
+    *,
+    operation: str,
+) -> tuple[Any | None, BaseException | None, bool]:
+    """等待补偿任务完成；调用方取消只延后传播，不取消补偿任务。"""
+
+    caller_cancelled = False
+    while True:
+        try:
+            return await asyncio.shield(task), None, caller_cancelled
+        except asyncio.CancelledError:
+            caller_task = asyncio.current_task()
+            caller_cancelled = caller_cancelled or bool(
+                caller_task and caller_task.cancelling()
+            )
+            if not task.done():
+                continue
+            if task.cancelled():
+                return (
+                    None,
+                    RuntimeError(f"{operation}的补偿任务被取消"),
+                    caller_cancelled,
+                )
+            try:
+                return task.result(), None, caller_cancelled
+            except BaseException as exc:  # noqa: BLE001
+                return None, exc, caller_cancelled
+        except BaseException as exc:  # noqa: BLE001
+            return None, exc, caller_cancelled
+
+
+async def _mark_gateway_degraded_best_effort(error: BaseException) -> bool:
+    """尽力收敛为 degraded；标记失败不能掩盖原始补偿结果。"""
+
+    task = asyncio.create_task(
+        gateway_runtime_manager.mark_control_plane_degraded(
+            error if isinstance(error, Exception) else RuntimeError(str(error))
+        ),
+        name="mark-gateway-control-plane-degraded",
+    )
+    _, mark_error, caller_cancelled = await _await_gateway_compensation(
+        task,
+        operation="标记 Gateway degraded",
+    )
+    if mark_error is not None:
+        log.error(
+            "标记 Gateway 控制面 degraded 失败：%s",
+            mark_error,
+            exc_info=mark_error,
+        )
+    return caller_cancelled
+
+
 async def rollback_and_restore_gateway(db: Any) -> bool:
     """回滚当前事务，并以已提交 DB 快照补偿 Gateway；失败时保持 degraded。"""
 
     rollback_ok = True
+    cancelled = False
     try:
         await db.rollback()
+    except asyncio.CancelledError:
+        rollback_ok = False
+        cancelled = True
+        log.warning("Gateway 配置事务回滚期间收到取消，继续恢复已提交快照")
     except BaseException:  # noqa: BLE001
         rollback_ok = False
         log.exception("Gateway 配置事务回滚失败，继续尝试恢复已提交快照")
@@ -534,25 +612,29 @@ async def rollback_and_restore_gateway(db: Any) -> bool:
         restore_committed_gateway_snapshot(),
         name="restore-gateway-committed-snapshot",
     )
-    try:
-        status = await asyncio.shield(restore_task)
-    except asyncio.CancelledError:
-        try:
-            status = await restore_task
-        except Exception:  # noqa: BLE001
-            log.exception("Gateway 配置事务取消后恢复已提交快照失败")
-            await gateway_runtime_manager.mark_control_plane_degraded(
-                RuntimeError("恢复已提交 Gateway 快照失败")
-            )
-            return False
-    except Exception as exc:  # noqa: BLE001
-        log.exception("Gateway 配置事务失败后恢复已提交快照失败")
-        await gateway_runtime_manager.mark_control_plane_degraded(exc)
+    status, restore_error, restore_cancelled = await _await_gateway_compensation(
+        restore_task,
+        operation="恢复已提交 Gateway 快照",
+    )
+    cancelled = cancelled or restore_cancelled
+    if restore_error is not None:
+        log.error(
+            "Gateway 配置事务失败后恢复已提交快照失败",
+            exc_info=restore_error,
+        )
+        cancelled = (
+            await _mark_gateway_degraded_best_effort(restore_error)
+            or cancelled
+        )
+        if cancelled:
+            raise asyncio.CancelledError from restore_error
         return False
 
     restored = status.state in {"ready", "not_required"}
     if not restored:
         log.error("Gateway 已提交快照恢复未就绪：state=%s", status.state)
+    if cancelled:
+        raise asyncio.CancelledError
     return rollback_ok and restored
 
 

@@ -110,7 +110,8 @@ services:
       redis:
         condition: service_healthy
     volumes:
-      # session 加密文件落盘目录，volume 持久化
+      # 历史兼容 session 卷；当前 Telethon StringSession 经 MASTER_KEY 加密后存入 DB，
+      # 账号运行不依赖该卷。暂保留卷名，避免破坏旧部署的备份/恢复布局。
       - sessions:/app/sessions
       # 远程插件安装产物和插件仓库缓存必须持久化；否则重建 web 容器后插件文件会丢失
       - plugins_installed:/app/plugins/installed

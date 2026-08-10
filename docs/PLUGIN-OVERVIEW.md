@@ -29,6 +29,7 @@ TelePilot 0.x 阶段只保留一个默认插件模式：**个人可信插件标�
 plugins/installed/{插件名}/
 ├── __init__.py        # 导出 PLUGIN_CLASS 和 MANIFEST
 ├── manifest.py        # Manifest 元数据
+├── plugin.json        # 安装前静态元数据；installed loader 必需
 ├── plugin.py          # 插件主类
 └── (其他插件)
 ```
@@ -85,6 +86,29 @@ MANIFEST = Manifest(
 )
 ```
 
+**plugin.json：**
+```json
+{
+  "name": "event_ping",
+  "display_name": "Event Ping",
+  "description": "演示 Event Bus + MessageOps 的最小插件",
+  "author": "example",
+  "version": "0.1.0",
+  "entry": "plugin.py",
+  "category": "utility",
+  "permissions": ["send_message"],
+  "usage": "在允许会话内发送 ping，插件会按当前会话通道回复 pong。",
+  "event_subscriptions": [
+    {
+      "source": ["userbot", "interaction_bot"],
+      "events": ["message"],
+      "scope": "all_allowed_chats"
+    }
+  ],
+  "capabilities": {}
+}
+```
+
 **__init__.py：**
 ```python
 from .manifest import MANIFEST
@@ -94,7 +118,7 @@ PLUGIN_CLASS = EventPingPlugin
 __all__ = ["PLUGIN_CLASS", "MANIFEST"]
 ```
 
-通过安装接口安装并在账号上启用后，Event Bus 会按 `event_subscriptions` 投递事件。插件只读取标准事件信封，并通过 `ctx.messages` 或标准 action 请求发送、编辑、删除、按钮 ACK、Inline answer 和 settlement。
+`plugin.json.name`、`MANIFEST.key`、插件类 `key` 与目录名必须一致。通过安装接口安装并在账号上启用后，Event Bus 会按 `event_subscriptions` 投递事件。插件只读取标准事件信封，并通过 `ctx.messages` 或标准 action 请求发送、编辑、删除、按钮 ACK、Inline answer 和 settlement。
 
 可直接参考最终版主模板：`examples/plugins/event_bus_demo`。它覆盖 message、command、callback、inline、chosen inline 和 payment fixtures。
 
