@@ -42,14 +42,19 @@
    - 开发分支发布 beta 检查点，使用目标正式版本的 prerelease 版本，例如 `0.81.0-beta.1`；同一候选版本继续收口只递增 `beta.N`。
    - beta 期间加入新的 minor 或 major 级变化时，提升基础版本并从 `-beta.1` 重新开始；补丁候选则提升 PATCH 后从 `-beta.1` 开始。
    - `main` 只发布稳定版；beta 验证稳定并合入 `main` 后，去掉后缀发布相同基础版本，例如 `0.81.0-beta.3` 对应 `0.81.0`。
-4. 同步更新四处版本号：
+4. 同步更新五处版本信息：
    - `backend/app/__init__.py`
    - `backend/pyproject.toml`
    - `frontend/package.json`
    - `frontend/src/lib/version.ts`
+   - 运行 `make codegen`，由后端版本生成 `openapi/telepilot.openapi.json` 的 `info.version`
 5. 用中文把 `CHANGELOG.md` 的 `Unreleased` 移到 beta 或稳定版本段落，只记录实际落地内容。
 6. Commit、PR、release 标题和正文使用中文。
 7. 发 tag 或 release 前，确认 tag 指向正确提交，不能指向旧 HEAD。
+8. Beta push 必须保留 prerelease 版本；面向 `main` 的 PR 和 `main` push
+   必须先切换为稳定版本，并在 `CHANGELOG.md` 中存在当前精确版本段。
+9. 等待 `CI Gate` 成功后再核对镜像；Web、Frontend、Updater 的发布标签都
+   必须来自代码版本校验，且清单同时包含 `linux/amd64` 与 `linux/arm64`。
 
 推荐验证：
 
@@ -165,7 +170,7 @@ docker compose logs --tail=100 web
 文档更新门禁：
 
 - 新增或修改公开 API、环境变量、默认开关、错误码、fail-open / fail-closed 语义、资金状态机或插件契约时，同一批改动必须更新对应 README、部署、安全或插件文档。
-- “当前版本”只从四处版本文件核对；不要把旧版本号写进长期有效的架构和开发说明，版本历史留在 `CHANGELOG.md`。
+- “当前版本”从四个源版本文件与 OpenAPI 快照的 `info.version` 核对；不要把旧版本号写进长期有效的架构和开发说明，版本历史留在 `CHANGELOG.md`。
 - 源码证据优先引用文件和稳定函数/类名，不引用容易漂移的行号。接口请求体以 FastAPI `/docs` 和 Pydantic schema 为准，CLI 参数以 `--help` 为准。
 - `/healthz` 只用于 liveness，生产就绪和更新完成使用 `/readyz`。文档必须明确两者差异。
 - 示例命令要在仓库当前 Makefile、脚本或 package scripts 中真实存在；相对路径要写清从仓库根目录还是子目录执行。

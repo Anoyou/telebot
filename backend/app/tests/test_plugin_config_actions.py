@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 
 from app.db.models.log import PluginConfigActionJob, RuntimeLog
@@ -13,6 +14,7 @@ from app.services import plugin_config_action_jobs, plugin_config_actions
 from app.services.plugin_config_action_jobs import create_plugin_config_action_job
 from app.services.plugin_config_actions import declared_config_actions, run_plugin_config_action
 from app.worker.plugins.base import Plugin, PluginContext
+from app.worker.plugins.http_facade import PluginHTTP, PluginHTTPPolicyError
 
 
 class DemoConfigActionPlugin(Plugin):
@@ -71,6 +73,37 @@ class OldInstalledConfigActionPlugin(Plugin):
         payload: dict,
     ) -> dict:
         return {"message": "旧代码"}
+
+
+class NetworkConfigActionPlugin(Plugin):
+    key = "network_action"
+    display_name = "Network Action"
+    invoked = False
+
+    async def on_config_action(
+        self,
+        ctx: PluginContext,
+        action_key: str,
+        payload: dict,
+    ) -> dict:
+        del ctx, action_key, payload
+        type(self).invoked = True
+        return {"message": "不应执行"}
+
+
+class HTTPConfigActionPlugin(Plugin):
+    key = "http_action"
+    display_name = "HTTP Action"
+
+    async def on_config_action(
+        self,
+        ctx: PluginContext,
+        action_key: str,
+        payload: dict,
+    ) -> dict:
+        del action_key, payload
+        response = await ctx.http.get("https://api.example.com/v1")
+        return {"message": f"HTTP {response.status_code}"}
 
 
 class FreshInstalledConfigActionPlugin(Plugin):
@@ -237,6 +270,290 @@ async def test_run_plugin_config_action_merges_form_config_and_returns_patch(mon
     assert result["config_patch"]["items"] == [
         {"enabled": True, "name": "第一组", "count": 3}
     ]
+
+
+@pytest.mark.asyncio
+async def test_config_action_without_http_does_not_query_account_proxy(monkeypatch) -> None:
+    class _DB(FakeDB):
+        async def get(self, model, *_args, **_kwargs):  # noqa: ANN001, ANN202
+            if getattr(model, "__name__", "") == "Proxy":
+                raise AssertionError("纯本地配置动作不应查询账号代理")
+            return None
+
+    feature = SimpleNamespace(
+        key="network_action",
+        manifest={
+            "permissions": [],
+            "config_actions": [{"key": "probe", "title": "探测"}],
+        },
+    )
+    account = SimpleNamespace(id=7, proxy_id=999)
+    NetworkConfigActionPlugin.invoked = False
+    monkeypatch.setattr(
+        plugin_config_actions,
+        "get_plugin",
+        lambda _key: NetworkConfigActionPlugin,
+    )
+
+    result = await run_plugin_config_action(
+        _DB(),
+        account=account,
+        feature=feature,
+        action_key="probe",
+        effective_config={},
+        installed_plugin=SimpleNamespace(manifest_json={}),
+    )
+
+    assert result["message"] == "不应执行"
+    assert NetworkConfigActionPlugin.invoked is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("proxy", "error_pattern"),
+    [
+        (
+            SimpleNamespace(
+                id=9,
+                type="mtproxy",
+                host="proxy.example",
+                port=443,
+                username=None,
+                password_enc=None,
+            ),
+            "不能用于插件 HTTP",
+        ),
+        (None, "不存在"),
+        (
+            SimpleNamespace(
+                id=9,
+                type="socks5",
+                host="proxy.example",
+                port=1080,
+                username="user",
+                password_enc="broken",
+            ),
+            "凭据无法解密",
+        ),
+    ],
+)
+async def test_config_action_account_proxy_error_fails_before_dns_or_transport(
+    monkeypatch,
+    proxy,
+    error_pattern,
+) -> None:
+    class _DB(FakeDB):
+        async def get(self, model, *_args, **_kwargs):  # noqa: ANN001, ANN202
+            return proxy if getattr(model, "__name__", "") == "Proxy" else None
+
+    resolved = 0
+    requested = 0
+
+    async def _resolver(_host: str, _port: int) -> list[str]:
+        nonlocal resolved
+        resolved += 1
+        return ["93.184.216.34"]
+
+    async def _handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal requested
+        requested += 1
+        return httpx.Response(200, content=b"unexpected")
+
+    original_from_context = PluginHTTP.from_context
+
+    def _from_context(ctx, *, allowed_hosts, manifest_http=None):  # noqa: ANN001, ANN202
+        return original_from_context(
+            ctx,
+            allowed_hosts=allowed_hosts,
+            manifest_http=manifest_http,
+            resolver=_resolver,
+            transport=httpx.MockTransport(_handler),
+        )
+
+    feature = SimpleNamespace(
+        key="http_action",
+        manifest={
+            "permissions": ["external_http"],
+            "allowed_hosts": ["api.example.com"],
+            "config_actions": [{"key": "probe", "title": "探测"}],
+        },
+    )
+    account = SimpleNamespace(id=7, proxy_id=9)
+    monkeypatch.setattr(
+        plugin_config_actions,
+        "get_plugin",
+        lambda _key: HTTPConfigActionPlugin,
+    )
+    monkeypatch.setattr(plugin_config_actions.PluginHTTP, "from_context", _from_context)
+    if proxy is not None and proxy.password_enc:
+        monkeypatch.setattr(
+            plugin_config_actions,
+            "decrypt_str",
+            lambda _value: (_ for _ in ()).throw(ValueError("bad ciphertext")),
+        )
+
+    with pytest.raises(PluginHTTPPolicyError, match=error_pattern):
+        await run_plugin_config_action(
+            _DB(),
+            account=account,
+            feature=feature,
+            action_key="probe",
+            effective_config={},
+            installed_plugin=SimpleNamespace(manifest_json={}),
+        )
+
+    assert resolved == 0
+    assert requested == 0
+
+
+@pytest.mark.asyncio
+async def test_config_action_without_http_runs_with_socks4_account_proxy(monkeypatch) -> None:
+    proxy = SimpleNamespace(
+        id=10,
+        type="socks4",
+        host="proxy.example",
+        port=1080,
+        username=None,
+        password_enc=None,
+    )
+
+    class _DB(FakeDB):
+        async def get(self, model, *_args, **_kwargs):  # noqa: ANN001, ANN202
+            return proxy if getattr(model, "__name__", "") == "Proxy" else None
+
+    feature = SimpleNamespace(
+        key="network_action",
+        manifest={
+            "permissions": [],
+            "config_actions": [{"key": "probe", "title": "探测"}],
+        },
+    )
+    account = SimpleNamespace(id=7, proxy_id=10)
+    NetworkConfigActionPlugin.invoked = False
+    monkeypatch.setattr(
+        plugin_config_actions,
+        "get_plugin",
+        lambda _key: NetworkConfigActionPlugin,
+    )
+
+    result = await run_plugin_config_action(
+        _DB(),
+        account=account,
+        feature=feature,
+        action_key="probe",
+        effective_config={},
+        installed_plugin=SimpleNamespace(manifest_json={}),
+    )
+
+    assert result["message"] == "不应执行"
+    assert NetworkConfigActionPlugin.invoked is True
+
+
+@pytest.mark.asyncio
+async def test_config_action_http_with_socks4_fails_before_dns_or_transport(monkeypatch) -> None:
+    proxy = SimpleNamespace(
+        id=10,
+        type="socks4",
+        host="proxy.example",
+        port=1080,
+        username=None,
+        password_enc=None,
+    )
+
+    class _DB(FakeDB):
+        async def get(self, model, *_args, **_kwargs):  # noqa: ANN001, ANN202
+            return proxy if getattr(model, "__name__", "") == "Proxy" else None
+
+    feature = SimpleNamespace(
+        key="http_action",
+        manifest={
+            "permissions": ["external_http"],
+            "allowed_hosts": ["api.example.com"],
+            "config_actions": [{"key": "probe", "title": "探测"}],
+        },
+    )
+    account = SimpleNamespace(id=7, proxy_id=10)
+    monkeypatch.setattr(
+        plugin_config_actions,
+        "get_plugin",
+        lambda _key: HTTPConfigActionPlugin,
+    )
+
+    with pytest.raises(PluginHTTPPolicyError, match="拒绝回落直连"):
+        await run_plugin_config_action(
+            _DB(),
+            account=account,
+            feature=feature,
+            action_key="probe",
+            effective_config={},
+            installed_plugin=SimpleNamespace(manifest_json={}),
+        )
+
+
+@pytest.mark.asyncio
+async def test_config_action_manifest_direct_http_can_ignore_legacy_proxy_limitation(monkeypatch) -> None:
+    proxy = SimpleNamespace(
+        id=10,
+        type="mtproxy",
+        host="proxy.example",
+        port=443,
+        username=None,
+        password_enc=None,
+    )
+
+    class _DB(FakeDB):
+        async def get(self, model, *_args, **_kwargs):  # noqa: ANN001, ANN202
+            return proxy if getattr(model, "__name__", "") == "Proxy" else None
+
+    requested = 0
+
+    async def _resolver(_host: str, _port: int) -> list[str]:
+        return ["93.184.216.34"]
+
+    async def _handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal requested
+        requested += 1
+        return httpx.Response(200, content=b"ok")
+
+    original_from_context = PluginHTTP.from_context
+
+    def _from_context(ctx, *, allowed_hosts, manifest_http=None):  # noqa: ANN001, ANN202
+        return original_from_context(
+            ctx,
+            allowed_hosts=allowed_hosts,
+            manifest_http=manifest_http,
+            resolver=_resolver,
+            transport=httpx.MockTransport(_handler),
+        )
+
+    feature = SimpleNamespace(
+        key="http_action",
+        manifest={
+            "permissions": ["external_http"],
+            "allowed_hosts": ["api.example.com"],
+            "http": {"allow_direct": True},
+            "config_actions": [{"key": "probe", "title": "探测"}],
+        },
+    )
+    account = SimpleNamespace(id=7, proxy_id=10)
+    monkeypatch.setattr(
+        plugin_config_actions,
+        "get_plugin",
+        lambda _key: HTTPConfigActionPlugin,
+    )
+    monkeypatch.setattr(plugin_config_actions.PluginHTTP, "from_context", _from_context)
+
+    result = await run_plugin_config_action(
+        _DB(),
+        account=account,
+        feature=feature,
+        action_key="probe",
+        effective_config={"http": {"network_mode": "direct"}},
+        installed_plugin=SimpleNamespace(manifest_json={}),
+    )
+
+    assert result["message"] == "HTTP 200"
+    assert requested == 1
 
 
 @pytest.mark.asyncio

@@ -1153,6 +1153,52 @@ async def test_stale_concurrent_retry_cannot_execute_twice(agent_db, monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_retry_with_explicit_text_sends_supplement_to_runtime(
+    agent_db,
+    monkeypatch,
+) -> None:
+    svc = SystemAgentService()
+    runtime_goals: list[str] = []
+
+    async def success_stream(*_args, **kwargs):
+        runtime_goals.append(str(kwargs["user_text"]))
+        yield {"type": "assistant_message", "content": "完成", "usage": {}}
+        yield {"type": "done", "ok": True}
+
+    monkeypatch.setattr(svc.runtime, "stream_turn", success_stream)
+
+    async with agent_db() as db:
+        session = await svc.create_session(
+            db,
+            channel=CHANNEL_WEB,
+            web_user_id=1,
+        )
+        message = SystemAgentMessage(
+            session_id=session.id,
+            role=MESSAGE_ROLE_USER,
+            content={"text": "执行原任务"},
+            run_status=MESSAGE_RUN_FAILED,
+        )
+        db.add(message)
+        await db.commit()
+
+        supplemented = "执行原任务\n\n补充说明：改用备用模型"
+        async for _event in svc.stream_message(
+            db,
+            session=session,
+            text=supplemented,
+            role="admin",
+            channel=CHANNEL_WEB,
+            web_user_id=1,
+            retry_message=message,
+        ):
+            pass
+
+        assert runtime_goals == [supplemented]
+        assert message.content == {"text": supplemented}
+
+
+@pytest.mark.asyncio
 async def test_unexpected_stream_crash_becomes_retryable_failed_turn(agent_db, monkeypatch) -> None:
     svc = SystemAgentService()
 

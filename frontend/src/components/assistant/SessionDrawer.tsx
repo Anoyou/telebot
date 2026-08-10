@@ -6,9 +6,19 @@ import { cn } from "@/lib/utils";
 
 export type SessionOriginFilter = "all" | "interactive" | "scheduled";
 
+const RUN_STATUS_LABELS: Record<string, string> = {
+  queued: "排队",
+  running: "运行",
+  waiting_input: "待补充",
+  waiting_approval: "待审批",
+  failed: "失败",
+};
+
 export function SessionDrawer({
   sessions,
   activeId,
+  runStatusBySession = {},
+  queueCountBySession = {},
   onSelect,
   onCreate,
   onDelete,
@@ -21,6 +31,8 @@ export function SessionDrawer({
 }: {
   sessions: SystemAgentSession[];
   activeId: string | null;
+  runStatusBySession?: Record<string, string | undefined>;
+  queueCountBySession?: Record<string, number | undefined>;
   onSelect: (id: string) => void;
   onCreate: () => void;
   onDelete: (id: string) => void;
@@ -40,6 +52,8 @@ export function SessionDrawer({
 
   const renderSession = (session: SystemAgentSession) => {
     const isBotSession = session.channel === "bot";
+    const runStatus = runStatusBySession[session.id];
+    const queueCount = queueCountBySession[session.id] || 0;
     return (
       <div
         key={session.id}
@@ -61,6 +75,24 @@ export function SessionDrawer({
             {session.origin === "scheduled" ? (
               <span className="inline-block shrink-0 rounded bg-amber-500/15 px-1 text-[10px] text-amber-700 dark:text-amber-300">
                 定时
+              </span>
+            ) : null}
+            {runStatus ? (
+              <span
+                className={cn(
+                  "inline-block shrink-0 rounded px-1 text-[10px]",
+                  runStatus === "running"
+                    ? "bg-blue-500/15 text-blue-700 dark:text-blue-300"
+                    : runStatus === "failed"
+                      ? "bg-destructive/10 text-destructive"
+                      : "bg-amber-500/15 text-amber-700 dark:text-amber-300",
+                )}
+              >
+                {RUN_STATUS_LABELS[runStatus] || runStatus}
+              </span>
+            ) : queueCount > 0 ? (
+              <span className="inline-block shrink-0 rounded bg-muted px-1 text-[10px] text-muted-foreground">
+                队列 {queueCount}
               </span>
             ) : null}
           </span>

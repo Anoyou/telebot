@@ -18,7 +18,7 @@ from telethon.sessions import StringSession
 from ..crypto import decrypt_bytes, decrypt_str
 from ..db.models.account import Account, Proxy
 from ..services.device_profile import HARDCODED_FALLBACK, ResolvedDeviceProfile
-from ..util.proxy import get_default_proxy_tuple, parse_proxy_url
+from ..util.proxy import ProxyConfigError, get_default_proxy_tuple, parse_proxy_url
 
 
 def build_proxy_tuple(proxy: Proxy | None):
@@ -30,14 +30,20 @@ def build_proxy_tuple(proxy: Proxy | None):
     """
     if not proxy:
         return get_default_proxy_tuple()
-    password = decrypt_str(proxy.password_enc) if proxy.password_enc else None
+    proxy_type = str(proxy.type or "").lower()
+    if proxy_type not in {"socks5", "socks4", "http", "https"}:
+        raise ProxyConfigError(f"不支持的 Telegram 代理类型: {proxy.type}")
+    try:
+        password = decrypt_str(proxy.password_enc) if proxy.password_enc else None
+    except Exception as exc:  # noqa: BLE001 - 统一转成可操作的代理配置错误
+        raise ProxyConfigError("代理凭据无法解密，请重新保存或更换代理") from exc
     if "://" in proxy.host:
         parsed = parse_proxy_url(proxy.host)
         if parsed is not None:
             ptype, host, port, rdns, parsed_user, parsed_password = parsed
             return (ptype, host, port, rdns, proxy.username or parsed_user, password or parsed_password)
     return (
-        proxy.type,                  # "socks5" | "http" | "mtproxy"
+        "http" if proxy_type == "https" else proxy_type,
         proxy.host,
         proxy.port,
         True,                        # 强制走远端 DNS，避免本地 DNS 泄漏

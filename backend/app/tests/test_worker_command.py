@@ -393,6 +393,43 @@ async def test_periodic_userbot_session_expire_scan_calls_loader(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("timeout_error", [TimeoutError(), pytest.param(None, id="redis_timeout")])
+async def test_periodic_userbot_session_expire_scan_retries_timeout_once(monkeypatch, timeout_error):
+    """瞬时超时只退避重试一次，连续失败后交给下一轮周期扫描。"""
+    from app.worker import runtime as runtime_mod
+    from app.worker.plugins import loader as loader_mod
+
+    error = timeout_error or runtime_mod.RedisTimeoutError()
+    scan = AsyncMock(side_effect=error)
+    log = AsyncMock()
+    monkeypatch.setattr(loader_mod, "scan_userbot_expired_sessions_once", scan)
+    monkeypatch.setattr(runtime_mod, "_log", log)
+    sleep_calls: list[float] = []
+
+    async def fake_sleep(seconds):
+        sleep_calls.append(seconds)
+        if seconds == runtime_mod._USERBOT_SESSION_EXPIRE_SCAN_RETRY_SECONDS:
+            return
+        assert seconds == runtime_mod._USERBOT_SESSION_EXPIRE_SCAN_SECONDS
+        if sleep_calls.count(runtime_mod._USERBOT_SESSION_EXPIRE_SCAN_SECONDS) == 1:
+            return
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(runtime_mod.asyncio, "sleep", fake_sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await runtime_mod._periodic_userbot_session_expire_scan(_FakeCmdRedis(), 103)
+
+    assert scan.await_count == 2
+    assert sleep_calls == [
+        runtime_mod._USERBOT_SESSION_EXPIRE_SCAN_SECONDS,
+        runtime_mod._USERBOT_SESSION_EXPIRE_SCAN_RETRY_SECONDS,
+        runtime_mod._USERBOT_SESSION_EXPIRE_SCAN_SECONDS,
+    ]
+    log.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_run_interaction_userbot_action_payout_uses_rate_limit_and_parse_mode(monkeypatch):
     from app.worker import runtime as runtime_mod
 

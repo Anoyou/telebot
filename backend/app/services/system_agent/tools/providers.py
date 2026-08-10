@@ -64,9 +64,16 @@ def _mark_reload_ai_commands(ctx: ToolContext) -> None:
     ctx.action.arguments = stored
 
 
+def _mark_gateway_candidate_sync(ctx: ToolContext) -> None:
+    ctx.gateway_candidate_sync = True
+
+
 def _reject_request_headers(args: dict[str, Any]) -> None:
     if "request_headers" in args:
-        raise ValueError("自定义请求头不能通过 System Agent 设置，请使用 AI Provider 设置页")
+        raise ValueError(
+            "System Agent 工具参数包含自定义请求头，已被本地安全策略拒绝，"
+            "尚未向上游发起请求；请使用 AI Provider 设置页配置请求头"
+        )
 
 
 async def list_providers(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
@@ -193,6 +200,14 @@ async def save_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]
     provider_id = args.get("id") or args.get("provider_id")
     try:
         if provider_id not in (None, ""):
+            current = await ctx.db.get(LLMProvider, int(provider_id))
+            if current is None:
+                raise ValueError(f"Provider #{provider_id} 不存在")
+            if (
+                str(getattr(current, "execution_backend", "direct") or "direct")
+                == "codex_gateway"
+            ):
+                _mark_gateway_candidate_sync(ctx)
             data: dict[str, Any] = {}
             for key in (
                 "name",
@@ -348,6 +363,11 @@ async def delete_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[str, An
 
 async def delete_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     provider_id = int(args.get("id") or args.get("provider_id"))
+    current = await ctx.db.get(LLMProvider, provider_id)
+    if current is None:
+        raise ValueError(f"Provider #{provider_id} 不存在")
+    if str(getattr(current, "execution_backend", "direct") or "direct") == "codex_gateway":
+        _mark_gateway_candidate_sync(ctx)
     await command_service.delete_provider(ctx.db, provider_id)
     _mark_reload_ai_commands(ctx)
     return {"id": provider_id, "deleted": True, "business_changed": True}
@@ -474,7 +494,7 @@ def register(registry: ToolRegistry) -> None:
             min_role="admin",
             risk="normal",
             diagnostic_safe=True,
-            secret_argument_names=("api_key", "request_headers"),
+            secret_argument_names=("api_key",),
             precheck_clear_secret_argument_names=("api_key",),
             allow_secret_input=False,
             preview_handler=probe_and_add_preview,
@@ -506,7 +526,7 @@ def register(registry: ToolRegistry) -> None:
             read_only=False,
             min_role="admin",
             risk="normal",
-            secret_argument_names=("api_key", "request_headers"),
+            secret_argument_names=("api_key",),
             precheck_clear_secret_argument_names=("api_key",),
             preview_handler=save_preview,
             precheck_handler=save_precheck,
@@ -558,7 +578,7 @@ def register(registry: ToolRegistry) -> None:
             min_role="admin",
             risk="normal",
             diagnostic_safe=True,
-            secret_argument_names=("api_key", "request_headers"),
+            secret_argument_names=("api_key",),
             precheck_clear_secret_argument_names=("api_key",),
             preview_handler=verify_preview,
             precheck_handler=verify_precheck,

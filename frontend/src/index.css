@@ -894,7 +894,7 @@
 
   /* 助手展开后把主导航让位给对话，并让机器人停在输入框上沿附近。 */
   .mobile-bottom-dock:has([data-assistant-mobile-button][aria-expanded="true"]) {
-    bottom: calc(10rem + max(1rem, env(safe-area-inset-bottom)));
+    bottom: calc(10.25rem + max(1rem, env(safe-area-inset-bottom)));
   }
 
   .mobile-bottom-dock:has([data-assistant-mobile-button][aria-expanded="true"]) > div {

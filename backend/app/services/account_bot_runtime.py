@@ -13,7 +13,7 @@ import unicodedata
 from dataclasses import asdict, dataclass, replace
 from typing import Any
 
-from sqlalchemy import desc, select
+from sqlalchemy import delete, desc, select
 
 from ..account_bot_defaults import (
     DEFAULT_DEBIT_NOTICE_TEMPLATE,
@@ -94,7 +94,6 @@ from .interaction.delivery import (
 )
 from .interaction.delivery import (
     InteractionDeliveryExecutor,
-    action_save_message_id_key,
     delivery_message_id,
     read_action_reply_target,
 )
@@ -1211,16 +1210,43 @@ async def start_interaction_bot_manager() -> int:
                 )
             )
         ).scalars().all()
+        account_ids = {
+            int(aid)
+            for aid in (
+                await db.execute(select(Account.id))
+            ).scalars().all()
+        }
     count = 0
+    orphan_keys: list[str] = []
     for row in rows:
         try:
             aid = int(str(row.key).removeprefix(account_bot_service.TRANSFER_NOTICE_SETTING_PREFIX))
         except ValueError:
             continue
+        if aid not in account_ids:
+            orphan_keys.append(str(row.key))
+            continue
         cfg = account_bot_service.normalize_transfer_notice_config(row.value)
         if cfg.get("enabled") and (cfg.get("interaction_bot_token_enc") or cfg.get("transfer_bot_token_enc")):
-            await restart_interaction_bot(aid)
+            try:
+                await restart_interaction_bot(aid)
+            except Exception as exc:  # noqa: BLE001
+                detail = getattr(exc, "detail", None)
+                if not isinstance(detail, dict) or detail.get("code") != "ACCOUNT_NOT_FOUND":
+                    raise
+                # 账号可能在启动扫描与重启之间被删除；把这个竞态按孤儿配置处理，
+                # 避免上层 runtime retry 因永久 ACCOUNT_NOT_FOUND 无限重试。
+                orphan_keys.append(str(row.key))
+                log.warning("跳过已删除账号的交互 Bot 配置并准备清理 aid=%s", aid)
+                continue
             count += 1
+    if orphan_keys:
+        async with AsyncSessionLocal() as db:
+            await db.execute(
+                delete(SystemSetting).where(SystemSetting.key.in_(orphan_keys))
+            )
+            await db.commit()
+        log.warning("启动时清理 %d 条不存在账号的交互 Bot 配置", len(orphan_keys))
     return count
 
 
@@ -2476,6 +2502,10 @@ async def _handle_update(aid: int, token: str, update: dict[str, Any]) -> None:
                     text=text_body,
                     send=_agent_send,
                     draft=_agent_draft,
+                    client_request_id=(
+                        f"tg:{incoming.account_id}:{incoming.user_id}:"
+                        f"{incoming.message_id or incoming.update_id}"
+                    ),
                 )
                 final_status = TRACE_STATUS_OK
                 return
@@ -2782,10 +2812,6 @@ def _plain_callback_text(text: str, *, limit: int = 180) -> str:
     return plain[:limit]
 
 
-def _interaction_action_save_message_id_key(raw: Any) -> str | None:
-    return action_save_message_id_key(raw)
-
-
 def _render_transfer_bot_notice_with_error(
     template: str,
     payer_name: str,
@@ -2847,16 +2873,6 @@ def _render_transfer_bot_notice(
         escape_html=escape_html,
     )
     return rendered
-
-
-def _interaction_chat_matches(cfg: dict[str, Any], chat_id: int) -> bool:
-    raw_chat_ids = cfg.get("chat_ids")
-    if isinstance(raw_chat_ids, list) and raw_chat_ids:
-        try:
-            return int(chat_id) in {int(item) for item in raw_chat_ids}
-        except (TypeError, ValueError):
-            return False
-    return cfg.get("chat_id") is None or int(cfg["chat_id"]) == int(chat_id)
 
 
 def _interaction_triggers(cfg: dict[str, Any]) -> list[str]:
@@ -3371,24 +3387,6 @@ def _interaction_rule_limit_label(rule: dict[str, Any]) -> str:
     if rule.get("daily_limit_per_user") is not None:
         parts.append(f"每用户日上限 <code>{account_bot_service.html_text(rule.get('daily_limit_per_user'))}</code>")
     return "；".join(parts) if parts else "无限制"
-
-
-def _interaction_rule_trigger_labels(rule: dict[str, Any]) -> list[str]:
-    labels = [f"方式：{_interaction_trigger_mode_label(rule)}"]
-    if _rule_trigger_mode_allows(rule, "keyword"):
-        keywords = _rule_keyword_list(rule, "module_start_keywords")
-        if keywords:
-            labels.append("关键词：" + " / ".join(f"<code>{account_bot_service.html_text(item)}</code>" for item in keywords[:5]))
-        else:
-            labels.append("关键词：未配置")
-    if _rule_trigger_mode_allows(rule, "payment"):
-        triggers = _rule_triggers(rule)
-        labels.append("转账通知：" + " / ".join(f"<code>{account_bot_service.html_text(item)}</code>" for item in triggers[:5]))
-        amount_label = _interaction_amount_condition_label(rule)
-        if amount_label:
-            labels.append(amount_label)
-        labels.append(_interaction_receiver_condition_label(rule))
-    return labels
 
 
 def _interaction_rule_query_trigger_label(rule: dict[str, Any]) -> str:
@@ -5588,18 +5586,6 @@ async def _try_handle_event_bus_subscriptions(
         if not decision.matched:
             continue
         entry_key = str(decision.entry_key or "").strip()
-        if not entry_key:
-            all_ok = False
-            await record_span(
-                trace_log_context(incoming.trace_id),
-                "plugin_invoke",
-                TRACE_STATUS_SKIPPED,
-                component="event_bus",
-                plugin_key=decision.plugin_key,
-                reason_code="entry_key_missing",
-                message="Event Bus 订阅缺少 entry_key，无法投递给插件入口。",
-            )
-            continue
         await _maybe_fast_ack_callback(incoming, decision.plugin_key, entry_key)
         payload = _event_bus_plugin_payload(incoming, event, decision)
         ok, error, actions = await _run_worker_interaction_entry(
@@ -5916,8 +5902,11 @@ async def _event_bus_account_state(db: Any, incoming: Incoming, cfg: dict[str, A
     owner_ids, known_user_ids = await _event_bus_cached_known_user_ids(db, incoming.account_id)
     active_participant_ids = await _event_bus_active_session_participant_ids(incoming, cfg)
     known_user_ids.update(active_participant_ids)
+    allowed_chat_ids = _interaction_allowed_chat_ids(cfg)
     return {
-        "allowed_chat_ids": _interaction_allowed_chat_ids(cfg),
+        # 交互 Bot 与 UserBot 使用同一范围语义：允许会话留空表示全部，
+        # 只有显式配置会话列表时才按 chat_id 收窄。
+        "allowed_chat_ids": allowed_chat_ids or "*",
         "owner_user_ids": owner_ids,
         "known_user_ids": sorted(known_user_ids),
     }
@@ -8592,6 +8581,10 @@ async def _handle_command(incoming: Incoming, role: str) -> None:
             text=incoming.text or "",
             send=_agent_send,
             draft=_agent_draft,
+            client_request_id=(
+                f"tg:{incoming.account_id}:{incoming.user_id}:"
+                f"{incoming.message_id or incoming.update_id}"
+            ),
         )
     elif command_base.startswith("/pause"):
         await _pause_account(incoming, role)

@@ -19,9 +19,10 @@ git status --short --branch -uall
 
 | 依赖 | 当前要求 |
 | --- | --- |
-| Python | 3.12 或 3.13 |
+| Python | 3.12 或 3.13；Makefile 默认命令名为 `python3.12`，只有 3.13 时用 `make install PYTHON=python3.13` |
 | Node.js | 22，与 CI 一致 |
 | pnpm | 10.23，版本声明在 `frontend/package.json` |
+| Go | 1.23 或更高；仅开发内置 Codex Gateway 时需要 |
 | Docker | Docker Desktop、OrbStack 或 Docker Engine |
 | Compose | Docker Compose v2 |
 | 系统 | macOS 或 Linux；Windows 尚未作为正式开发环境验证 |
@@ -76,6 +77,9 @@ make dev-up      # 只启动 PostgreSQL 和 Redis
 make migrate
 make backend     # 前台运行 Uvicorn，带 --reload
 make frontend    # 前台运行 Vite
+make gateway-build
+make gateway-test
+make gateway-run # 前台监听 .run/gateway.sock
 ```
 
 `make backend` 适合只改控制面 API。涉及 Worker 的改动仍要完整重启。
@@ -85,6 +89,8 @@ make frontend    # 前台运行 Vite
 FastAPI 进程同时承载 Web API、System Agent、Worker Supervisor、Account Bot manager 和 Interaction Bot manager。生产环境固定使用一个 Uvicorn worker，避免同一账号被多个 Supervisor 重复拉起。
 
 每个运行中的 Telegram 账号对应一个独立 Worker 子进程。Worker 内运行 Telethon、命令、插件、调度器和账号级任务，通过 Redis 与控制面通信。PostgreSQL 保存持久数据和加密字段，Redis 还负责租约、去重、限流和短期状态。
+
+选择 `codex_gateway` 的 Responses Provider 由 FastAPI 按需拉起 `telepilot-gateway` Go 子进程，通过权限收紧的 Unix Socket 同步内存路由和发起请求。Gateway 不纳入全局 `/readyz`，故障不能阻断 direct Provider、Web 或 Worker。完整开发与安全边界见 [内置 Codex Gateway](docs/CODEX-GATEWAY.md)。
 
 几个边界不能混用：
 
@@ -107,13 +113,14 @@ FastAPI 进程同时承载 Web API、System Agent、Worker Supervisor、Account 
 | `backend/app/db/` | SQLAlchemy base、session 和模型 |
 | `backend/app/schemas/` | Pydantic 请求与响应结构 |
 | `backend/app/tests/` | 后端回归、安全、迁移和运行时测试 |
+| `gateway/` | 内置 Codex Gateway Go module、协议契约与单元测试 |
 | `backend/alembic/versions/` | 线性 Alembic 迁移历史 |
 | `frontend/src/pages/` | 一级工作台与详情页面 |
 | `frontend/src/components/` | 布局、系统助手、插件和通用 UI |
 | `frontend/src/api/` | API client、手写类型与 OpenAPI 生成类型 |
 | `frontend/src/lib/` | 导航、版本、流式协议和纯逻辑工具 |
 | `frontend/tests/` | Playwright 视觉与无障碍测试 |
-| `examples/plugins/` | 受 CI 维护的插件示例 |
+| `examples/plugins/` | 插件示例；其中纳入 `validate-plugin-examples.py` 的稳定公开 API 示例由 CI 维护 |
 | `docs/` | 架构、部署、安全、插件和 Agent 文档 |
 | `deploy/` | 备份、恢复、Caddy 示例和内网 Updater |
 | `scripts/` | 本地启动、生产更新和插件示例校验 |
@@ -194,7 +201,7 @@ backend/.venv/bin/python scripts/validate-installed-interaction-plugins.py
 - 可编辑字段用表单控件，只读状态、ID 和渲染结果使用展示组件。
 - 新页面要覆盖 loading、empty、error、disabled 和 success 状态。
 - 桌面、834px 平板和 iPhone 13 宽度下不能出现横向滚动、按钮重叠或长中文溢出。
-- 修改公开 API 后更新 `frontend/src/api/` 类型；需要重新生成 OpenAPI 类型时先启动后端，再运行 `make codegen`。
+- 修改公开 API 后更新 `frontend/src/api/` 类型；`make codegen` 会直接导入应用并离线导出 OpenAPI，不需要先启动后端。若导入失败，应先修复依赖或应用初始化错误，不要改用运行中的旧服务生成快照。
 
 前端基础验证：
 
@@ -294,7 +301,7 @@ pnpm --dir frontend test:visual
 - 页面主入口、平台模块、部署步骤、备份恢复或更新流程。
 - System Agent 工具、权限、Action 确认和隐私边界。
 
-长期文档不要硬编码容易过期的当前版本号。版本历史放在 `CHANGELOG.md`，当前版本从四处版本文件读取。接口请求体以 FastAPI `/docs` 和 Pydantic schema 为准，CLI 参数以 `--help` 为准。
+长期文档不要硬编码容易过期的当前版本号。版本历史放在 `CHANGELOG.md`，当前版本以四个源版本文件与生成的 OpenAPI `info.version` 共五处一致为准。接口请求体以 FastAPI `/docs` 和 Pydantic schema 为准，CLI 参数以 `--help` 为准。
 
 ## 版本与发布
 
@@ -303,7 +310,7 @@ pnpm --dir frontend test:visual
 - 开发过程中把变更写入 `CHANGELOG.md` 的 `Unreleased`，不要为每个小提交单独迭代版本号。
 - 准备 beta 检查点、稳定发布、推送稳定检查点、创建 release/PR，或维护者明确要求发版时，才统一决定版本号。
 - 发布前执行 `git fetch origin --prune`，同时检查 `origin/main` 与仍活跃的发布/开发分支。
-- beta 检查点和稳定发布必须同步更新 `backend/app/__init__.py`、`backend/pyproject.toml`、`frontend/package.json`、`frontend/src/lib/version.ts`，并用中文更新 `CHANGELOG.md`。
+- beta 检查点和稳定发布必须同步更新 `backend/app/__init__.py`、`backend/pyproject.toml`、`frontend/package.json`、`frontend/src/lib/version.ts`，运行 `make codegen` 同步 `openapi/telepilot.openapi.json` 的 `info.version` 与 `frontend/src/api/schema.ts`，并用中文更新 `CHANGELOG.md`。
 - Commit、PR 和 release 文案使用中文。
 
 SemVer 判断：破坏兼容为 MAJOR，用户可感知的新能力或主入口变化为 MINOR，Bug、文案、小 UI、测试和兼容补丁为 PATCH。0.x 阶段的 `0.X.0` 表示阶段性能力版本，`0.X.Y` 表示同阶段补丁。
@@ -314,7 +321,7 @@ SemVer 判断：破坏兼容为 MAJOR，用户可感知的新能力或主入口�
 
 - 有复现和回归测试的 Bug 修复。
 - 文档、示例和测试补充。
-- 维护在 `examples/plugins/` 的示例插件。
+- 维护在 `examples/plugins/` 且已纳入 `validate-plugin-examples.py` 稳定公开 API gate 的示例插件。
 - 边界清楚、依赖不变的小功能和小幅 UX 调整。
 
 先开 issue：

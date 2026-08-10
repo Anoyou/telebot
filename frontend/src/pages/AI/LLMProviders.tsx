@@ -6,12 +6,11 @@
 // 一条 ,ai 指令该把请求送给哪个 provider；详见 backend/services/llm_router.py
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
-import { ArrowLeft, Plus, Trash2, KeyRound, Edit3, Download, Check, CheckCircle2, XCircle, Star, ChevronDown, ChevronRight, Eye, EyeOff, Filter, X, Package, Save, Activity, ArrowUpDown, GripVertical } from "lucide-react";
+import { ArrowLeft, Plus, Trash2, KeyRound, Edit3, Download, Check, CheckCircle2, XCircle, Star, ChevronDown, ChevronRight, Eye, EyeOff, Filter, X, Package, Save, Activity, ArrowUpDown, GripVertical, ServerCog, RefreshCw } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { CommandBadge } from "@/components/CommandBadge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
@@ -19,7 +18,7 @@ import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { MetaBadge } from "@/components/ui/meta-badge";
 import { Spinner } from "@/components/ui/misc";
-import { SectionHeader, SignalPill } from "@/components/ui/status";
+import { SignalPill } from "@/components/ui/status";
 import {
   Card,
   CardContent,
@@ -56,15 +55,23 @@ import {
   updateClientIdentityVersions,
 } from "@/api/commands";
 import { listProxies } from "@/api/proxies";
-import { getSystemSettings, patchSystemSettings } from "@/api/system";
-import type { ChatTestModelResult, ClientIdentityHeaderItem, ClientIdentityRequestProfile, ClientIdentityVersionDetectItem, ClientIdentityVersionItem, DetectProviderProtocolsResponse, LLMApiFormat, LLMClientIdentityProfile, LLMModality, LLMProtocolProfile, LLMProviderKind, LLMProviderOut, LLMRequestHeaderInput, LLMRequestHeaderScope, LLMTag, LLMWebSearchApiFormat, ProviderModel, ProtocolProbeResult, ProxyOut } from "@/api/types";
+import { getHealthOverview, getSystemSettings, patchSystemSettings } from "@/api/system";
+import type { ChatTestModelResult, ClientIdentityHeaderItem, ClientIdentityRequestProfile, ClientIdentityVersionDetectItem, ClientIdentityVersionItem, DetectProviderProtocolsResponse, LLMApiFormat, LLMClientIdentityProfile, LLMExecutionBackend, LLMModality, LLMProtocolProfile, LLMProviderKind, LLMProviderOut, LLMRequestHeaderInput, LLMRequestHeaderScope, LLMTag, LLMWebSearchApiFormat, ProviderModel, ProtocolProbeResult, ProxyOut } from "@/api/types";
 import { getErrMsg } from "@/lib/api";
+import {
+  isSupportedProxyType,
+  proxySelectionNeedsLoadedList,
+  proxySelectionIssue,
+  visibleProxyOptions,
+} from "@/lib/proxySupport";
 import { cn } from "@/lib/utils";
 import { confirmDiscardChanges, useUnsavedChanges } from "@/lib/unsavedChanges";
+import { applyExecutionBackend, executionBackendLabel, isGatewayBackend } from "@/lib/providerExecutionBackend";
 import {
   ProviderCreateVerification,
   type ProviderCreateStage,
 } from "@/components/ai/ProviderCreateVerification";
+import { UpstreamErrorFacts } from "@/components/ai/UpstreamErrorFacts";
 
 // 各 provider 的默认 base_url 提示，仅作 placeholder
 const DEFAULT_BASE_URLS: Record<LLMProviderKind, string> = {
@@ -83,7 +90,7 @@ const API_FORMAT_OPTIONS: { value: LLMApiFormat; label: string; hint: string }[]
   {
     value: "responses",
     label: "Responses ( /responses )",
-    hint: "OpenAI 2024 出的新协议；anyrouter 等部分反代只接这个；默认应该选这个解决 chat/completions 不通的问题",
+    hint: "OpenAI 兼容的新协议；DeepSeek 官方 deepseek-v4-flash 原生支持，Base URL 请填 https://api.deepseek.com（无需 /v1）",
   },
   {
     value: "anthropic_messages",
@@ -91,6 +98,34 @@ const API_FORMAT_OPTIONS: { value: LLMApiFormat; label: string; hint: string }[]
     hint: "Anthropic 协议；走官方 https://api.anthropic.com 或兼容反代时选",
   },
 ];
+
+const PROTOCOL_PROFILE_OPTIONS: Record<
+  LLMApiFormat,
+  Array<{ value: LLMProtocolProfile; label: string; hint: string }>
+> = {
+  chat_completions: [
+    { value: "standard", label: "标准 Chat Completions", hint: "使用所选 API Format 的标准字段。" },
+  ],
+  responses: [
+    { value: "standard", label: "通用 Responses", hint: "适合未声明特殊方言的兼容服务。" },
+    { value: "openai_responses", label: "OpenAI Responses", hint: "启用 OpenAI 官方 Responses 字段与标准 SDK 身份。" },
+    { value: "deepseek_responses", label: "DeepSeek Responses", hint: "按 DeepSeek V4 正式版约束移除 store、previous_response_id、include 等不支持字段。" },
+    { value: "codex_responses", label: "Codex Responses", hint: "用于明确要求 Codex 身份及加密 reasoning 回传的 Responses 服务。" },
+  ],
+  anthropic_messages: [
+    { value: "standard", label: "标准 Anthropic API", hint: "仅发送 Anthropic Messages 标准字段。" },
+    { value: "claude_code_proxy", label: "Claude Code 反代兼容", hint: "仅用于明确要求 Claude Code beta 语义的反代。" },
+  ],
+};
+
+function protocolProfileForFormat(
+  apiFormat: LLMApiFormat,
+  profile: LLMProtocolProfile,
+): LLMProtocolProfile {
+  return PROTOCOL_PROFILE_OPTIONS[apiFormat].some((option) => option.value === profile)
+    ? profile
+    : "standard";
+}
 
 const WEB_SEARCH_API_FORMAT_OPTIONS: { value: LLMWebSearchApiFormat; label: string; hint: string }[] = [
   {
@@ -125,7 +160,7 @@ const CLIENT_IDENTITY_OPTIONS: {
   {
     value: "auto",
     label: "自动（推荐）",
-    hint: "按本次实际协议解析：chat_completions→OpenAI SDK / responses→Codex TUI / anthropic_messages→Claude Code CLI。",
+    hint: "按协议档案解析：标准 Responses / DeepSeek 使用 OpenAI SDK，Codex 档案仅使用兼容请求头，Anthropic 使用 Claude Code CLI。",
   },
   {
     value: "minimal",
@@ -139,13 +174,13 @@ const CLIENT_IDENTITY_OPTIONS: {
   },
   {
     value: "codex_tui",
-    label: "Codex TUI",
-    hint: "Codex 终端交互身份（originator=codex-tui），用于 Responses。",
+    label: "Codex TUI（基础身份）",
+    hint: "仅覆盖 UA、Originator 和基础会话头；若上游要求 x-codex-*、installation/window 或完整 client_metadata，请使用 Codex 客户端兼容 Gateway。",
   },
   {
     value: "codex_desktop",
-    label: "Codex Desktop",
-    hint: "Codex 桌面端身份（originator=Codex Desktop），用于 Responses。",
+    label: "Codex Desktop（基础身份）",
+    hint: "仅覆盖 Codex Desktop 的 UA、Originator 和基础会话头；不等同于真实客户端完整请求契约。",
   },
   {
     value: "claude_code",
@@ -229,6 +264,10 @@ interface FormState {
   web_search_api_format: LLMWebSearchApiFormat;
   // 客户端身份档案；与 protocol_profile 相互独立
   client_identity_profile: LLMClientIdentityProfile;
+  execution_backend: LLMExecutionBackend;
+  direct_api_format?: LLMApiFormat;
+  direct_protocol_profile?: LLMProtocolProfile;
+  direct_web_search_api_format?: LLMWebSearchApiFormat;
   // 编辑模式下，是否要"清空已有 key"（按钮触发）
   clearKey: boolean;
   // ── 路由元数据 ──
@@ -269,7 +308,8 @@ const EMPTY_FORM: FormState = {
   api_format: "responses",
   protocol_profile: "standard",
   web_search_api_format: "auto",
-  client_identity_profile: "codex_tui",
+  client_identity_profile: "auto",
+  execution_backend: "direct",
   clearKey: false,
   modality: "text",
   tags: ["chat"],
@@ -397,7 +437,7 @@ const REQUEST_HEADER_GUIDES: RequestHeaderGuide[] = [
     key: "deepseek",
     label: "DeepSeek 官方",
     hosts: ["api.deepseek.com"],
-    note: "官方 API 通常只需要系统生成的 Bearer 鉴权，不需要额外兼容头。",
+    note: "官方 API 通常只需要系统生成的 Bearer 鉴权，不需要额外兼容头；deepseek-v4-flash 请优先选择 Responses（Base URL 无需 /v1）。",
     headers: [],
   },
   {
@@ -708,6 +748,7 @@ export function LLMProviders({
     openCreateOnMount ? { ...EMPTY_FORM } : null,
   );
   const [identityVersionsOpen, setIdentityVersionsOpen] = useState(false);
+  const [gatewayStatusOpen, setGatewayStatusOpen] = useState(false);
   const settingsQ = useQuery({
     queryKey: ["system", "settings"],
     queryFn: getSystemSettings,
@@ -814,11 +855,10 @@ export function LLMProviders({
         base_url: form.base_url || null,
         default_model: form.default_model.trim(),
         api_format: form.api_format,
-        ...(form.api_format === "anthropic_messages"
-          ? { protocol_profile: form.protocol_profile }
-          : {}),
+        protocol_profile: form.protocol_profile,
         web_search_api_format: form.web_search_api_format,
         client_identity_profile: form.client_identity_profile,
+        execution_backend: form.execution_backend,
         modality: form.modality,
         tags: form.tags,
         cost_tier: form.cost_tier,
@@ -831,9 +871,13 @@ export function LLMProviders({
       toast.success("已新建模型提供商");
       qc.invalidateQueries({ queryKey: ["llm-providers"] });
       qc.invalidateQueries({ queryKey: ["system-agent", "capabilities"] });
+      qc.invalidateQueries({ queryKey: ["system", "health-overview"] });
       closeCreate();
     },
-    onError: (err) => toast.error(getErrMsg(err)),
+    onError: (err) => {
+      toast.error(getErrMsg(err));
+      void qc.invalidateQueries({ queryKey: ["system", "health-overview"] });
+    },
   });
 
   const updateMut = useMutation({
@@ -851,11 +895,10 @@ export function LLMProviders({
         base_url: form.base_url || null,
         default_model: form.default_model.trim(),
         api_format: form.api_format,
-        ...(form.api_format === "anthropic_messages"
-          ? { protocol_profile: form.protocol_profile }
-          : {}),
+        protocol_profile: form.protocol_profile,
         web_search_api_format: form.web_search_api_format,
         client_identity_profile: form.client_identity_profile,
+        execution_backend: form.execution_backend,
         modality: form.modality,
         tags: form.tags,
         cost_tier: form.cost_tier,
@@ -869,9 +912,13 @@ export function LLMProviders({
       toast.success("已保存");
       qc.invalidateQueries({ queryKey: ["llm-providers"] });
       qc.invalidateQueries({ queryKey: ["system-agent", "capabilities"] });
+      qc.invalidateQueries({ queryKey: ["system", "health-overview"] });
       setEditing(null);
     },
-    onError: (err) => toast.error(getErrMsg(err)),
+    onError: (err) => {
+      toast.error(getErrMsg(err));
+      void qc.invalidateQueries({ queryKey: ["system", "health-overview"] });
+    },
   });
 
   const deleteMut = useMutation({
@@ -880,6 +927,7 @@ export function LLMProviders({
       toast.success("已删除");
       qc.invalidateQueries({ queryKey: ["llm-providers"] });
       qc.invalidateQueries({ queryKey: ["system-agent", "capabilities"] });
+      qc.invalidateQueries({ queryKey: ["system", "health-overview"] });
     },
     onError: (err) => toast.error(getErrMsg(err)),
   });
@@ -895,12 +943,13 @@ export function LLMProviders({
       base_url: p.base_url || "",
       default_model: p.default_model,
       api_format: ((p.api_format as LLMApiFormat) || "chat_completions"),
-      protocol_profile:
-        p.api_format === "anthropic_messages" && p.protocol_profile === "claude_code_proxy"
-          ? "claude_code_proxy"
-          : "standard",
+      protocol_profile: protocolProfileForFormat(
+        ((p.api_format as LLMApiFormat) || "chat_completions"),
+        ((p.protocol_profile as LLMProtocolProfile) || "standard"),
+      ),
       web_search_api_format: ((p.web_search_api_format as LLMWebSearchApiFormat) || "auto"),
       client_identity_profile: ((p.client_identity_profile as LLMClientIdentityProfile) || "auto"),
+      execution_backend: ((p.execution_backend as LLMExecutionBackend) || "direct"),
       clearKey: false,
       modality: ((p.modality as LLMModality) || "text"),
       tags: ((p.tags as LLMTag[]) || []).filter((t) =>
@@ -930,6 +979,26 @@ export function LLMProviders({
 
   const saveEditing = () => {
     if (!editing) return;
+    if (proxySelectionNeedsLoadedList(editing.proxy_id, proxiesListQ.isSuccess)) {
+      toast.error(
+        proxiesListQ.isError
+          ? "代理列表加载失败，无法核对当前绑定，请重试或改选 DIRECT"
+          : "代理列表仍在加载，请稍后再保存",
+      );
+      return;
+    }
+    const selectedProxyIssue = proxySelectionIssue(
+      proxiesListQ.data || [],
+      editing.proxy_id,
+    );
+    if (selectedProxyIssue) {
+      toast.error(
+        selectedProxyIssue === "missing"
+          ? "当前绑定的代理已不存在，请选择 DIRECT 或受支持代理"
+          : "当前绑定的代理已停止支持，请选择 DIRECT 或受支持代理",
+      );
+      return;
+    }
     if (!editing.name.trim()) {
       toast.error("名称必填");
       return;
@@ -991,7 +1060,7 @@ export function LLMProviders({
                 />
               </div>
             </div>
-            <div className="grid grid-cols-2 items-center gap-2 rounded-md border border-primary/20 bg-primary/[0.04] p-2 shadow-sm sm:flex sm:flex-wrap">
+            <div className="grid grid-cols-3 items-center gap-2 rounded-md border border-primary/20 bg-primary/[0.04] p-2 shadow-sm sm:flex sm:flex-wrap">
               <Button
                 type="button"
                 size="sm"
@@ -1009,6 +1078,16 @@ export function LLMProviders({
                 onClick={() => setIdentityVersionsOpen(true)}
               >
                 <KeyRound className="mr-1 h-4 w-4" />请求配置
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="min-w-0 flex-1 px-2 shadow-sm sm:flex-none sm:px-3"
+                onClick={() => setGatewayStatusOpen(true)}
+              >
+                <ServerCog className="mr-1 h-4 w-4" />
+                <span className="truncate">Gateway 管理</span>
               </Button>
             </div>
           </div>
@@ -1110,12 +1189,13 @@ export function LLMProviders({
           ) : visibleProviders.length > 0 ? (
             <>
             <div className="hidden overflow-x-auto md:block">
-            <Table className="min-w-[1080px]">
+            <Table className="min-w-[1180px]">
               <TableHeader>
                 <TableRow>
                   <TableHead>名称</TableHead>
                   <TableHead>提供商协议</TableHead>
                   <TableHead>API 协议</TableHead>
+                  <TableHead>调用方式</TableHead>
                   <TableHead>联网搜索协议</TableHead>
                   <TableHead>默认模型 ID</TableHead>
                   <TableHead>已启用模型</TableHead>
@@ -1135,13 +1215,18 @@ export function LLMProviders({
                       <TableCell className="font-mono text-xs">{p.provider}</TableCell>
                       <TableCell className="space-y-1 text-xs">
                         <MetaBadge mono>{p.api_format || "chat_completions"}</MetaBadge>
-                        {p.api_format === "anthropic_messages" ? (
+                        {(p.protocol_profile || "standard") !== "standard" ? (
                           <div>
                             <MetaBadge mono tone={p.protocol_profile === "claude_code_proxy" ? "warn" : "neutral"}>
                               {p.protocol_profile || "standard"}
                             </MetaBadge>
                           </div>
                         ) : null}
+                      </TableCell>
+                      <TableCell>
+                        <MetaBadge mono tone={isGatewayBackend(p.execution_backend) ? "info" : "neutral"}>
+                          {executionBackendLabel(p.execution_backend)}
+                        </MetaBadge>
                       </TableCell>
                       <TableCell className="text-xs">
                         <MetaBadge mono tone={(p.web_search_api_format || "auto") === "auto" ? "neutral" : "outline"}>
@@ -1263,6 +1348,7 @@ export function LLMProviders({
       </Card>
 
       <IdentityVersionsDialog open={identityVersionsOpen} onOpenChange={setIdentityVersionsOpen} />
+      <GatewayStatusDialog open={gatewayStatusOpen} onOpenChange={setGatewayStatusOpen} />
     </div>
   );
 }
@@ -1293,7 +1379,10 @@ function ProviderMobileCard({
           </MetaBadge>
           <MetaBadge mono>{provider.provider}</MetaBadge>
           <MetaBadge mono>{provider.api_format || "chat_completions"}</MetaBadge>
-          {provider.api_format === "anthropic_messages" ? (
+          <MetaBadge mono tone={isGatewayBackend(provider.execution_backend) ? "info" : "neutral"}>
+            {executionBackendLabel(provider.execution_backend)}
+          </MetaBadge>
+          {(provider.protocol_profile || "standard") !== "standard" ? (
             <MetaBadge mono tone={provider.protocol_profile === "claude_code_proxy" ? "warn" : "neutral"}>
               {provider.protocol_profile || "standard"}
             </MetaBadge>
@@ -1387,6 +1476,8 @@ function ProviderCreateWorkspace({
   onStageChange,
   proxies,
   proxiesLoading,
+  proxiesLoaded,
+  proxiesLoadError,
   protocolDetection,
   detectingProtocol,
   onDetectProtocol,
@@ -1403,6 +1494,8 @@ function ProviderCreateWorkspace({
   onStageChange: (stage: ProviderCreateStage) => void;
   proxies: ProxyOut[];
   proxiesLoading: boolean;
+  proxiesLoaded: boolean;
+  proxiesLoadError: boolean;
   protocolDetection: DetectProviderProtocolsResponse | null;
   detectingProtocol: boolean;
   onDetectProtocol: () => void;
@@ -1419,6 +1512,28 @@ function ProviderCreateWorkspace({
   const defaultBaseUrl = DEFAULT_BASE_URLS[form.provider];
   const endpoint = form.base_url.trim() || defaultBaseUrl;
   const enabledModelCount = form.models.filter((model) => model.enabled).length;
+  const gatewayMode = isGatewayBackend(form.execution_backend);
+  const gatewayHealthQ = useQuery({
+    queryKey: ["system", "health-overview"],
+    queryFn: getHealthOverview,
+    enabled: gatewayMode,
+    staleTime: 5_000,
+    refetchOnWindowFocus: true,
+  });
+  const gatewayHealth = gatewayHealthQ.data?.codex_gateway;
+  const gatewayHasApiKey = Boolean(form.api_key.trim())
+    || (isEdit && Boolean(form.hasApiKey) && !form.clearKey);
+  const gatewayBlocked = gatewayMode && (
+    gatewayHealthQ.isLoading ||
+    gatewayHealthQ.isError ||
+    !gatewayHasApiKey
+  );
+  const proxyListRequired = proxySelectionNeedsLoadedList(form.proxy_id, proxiesLoaded);
+  const selectedProxyIssue = proxiesLoaded
+    ? proxySelectionIssue(proxies, form.proxy_id)
+    : null;
+  const proxySelectionBlocked = proxyListRequired || selectedProxyIssue !== null;
+  const proxyOptions = visibleProxyOptions(proxies, form.proxy_id);
 
   useEffect(() => {
     const root = document.querySelector<HTMLElement>("[data-app-main]");
@@ -1443,21 +1558,22 @@ function ProviderCreateWorkspace({
   }, []);
 
   const setApiFormat = (apiFormat: LLMApiFormat) => {
+    if (gatewayMode) return;
     const provider: LLMProviderKind =
       apiFormat === "anthropic_messages" ? "anthropic" : form.provider === "anthropic" ? "openai" : form.provider;
     onChange({
       ...form,
       provider,
       api_format: apiFormat,
-      protocol_profile: apiFormat === "anthropic_messages" ? form.protocol_profile : "standard",
-      client_identity_profile:
-        apiFormat === "responses"
-          ? "codex_tui"
-          : apiFormat === "anthropic_messages"
-            ? "claude_code"
-            : "openai_sdk",
+      protocol_profile: protocolProfileForFormat(apiFormat, form.protocol_profile),
+      client_identity_profile: "auto",
       ...(!isEdit ? { default_model: "", models: [] } : {}),
     });
+    onVerificationChange(false);
+  };
+
+  const setExecutionBackend = (executionBackend: LLMExecutionBackend) => {
+    onChange(applyExecutionBackend(form, executionBackend) as FormState);
     onVerificationChange(false);
   };
 
@@ -1547,6 +1663,40 @@ function ProviderCreateWorkspace({
 
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-1.5 sm:col-span-2">
+                <Label htmlFor="provider-create-execution-backend">调用方式</Label>
+                <Select
+                  id="provider-create-execution-backend"
+                  value={form.execution_backend}
+                  disabled={connectionLocked}
+                  onChange={(event) => setExecutionBackend(event.target.value as LLMExecutionBackend)}
+                >
+                  <option value="direct">标准 API 直连</option>
+                  <option value="codex_gateway">Codex 客户端兼容模式（Gateway）</option>
+                </Select>
+                {gatewayMode ? (
+                  <div className={cn(
+                    "rounded-md border px-3 py-2 text-xs leading-5",
+                    gatewayHealthQ.isError || gatewayHealth?.state === "degraded"
+                      ? "border-destructive/40 bg-destructive/5 text-destructive"
+                      : "border-primary/25 bg-primary/[0.04] text-muted-foreground",
+                  )}>
+                    {gatewayHealthQ.isLoading ? (
+                      <span className="inline-flex items-center gap-2"><Spinner className="h-3.5 w-3.5 text-primary" />正在读取 Gateway 状态…</span>
+                    ) : gatewayHealthQ.isError ? (
+                      "无法读取 Gateway 状态，暂不能保存 Gateway Provider。"
+                    ) : gatewayHealth?.state === "degraded" ? (
+                      gatewayHealth.error || "Codex 客户端兼容 Gateway 当前不可用；标准 API 直连不受影响。"
+                    ) : gatewayHealth?.state === "ready" ? (
+                      `Gateway 已就绪${gatewayHealth.version ? ` · ${gatewayHealth.version}` : ""}。它会按接近真实 Codex Responses 客户端的请求契约发送。`
+                    ) : (
+                      "当前无需运行 Gateway；保存时会验证内置二进制并按需启动。它不包含 OAuth、ChatGPT 账号身份或设备证明。"
+                    )}
+                  </div>
+                ) : (
+                  <p className="text-xs text-muted-foreground">由 TelePilot 直接调用当前 Provider API，并使用所选基础身份与出口代理。</p>
+                )}
+              </div>
+              <div className="space-y-1.5 sm:col-span-2">
                 <Label htmlFor="provider-create-base-url">Base URL</Label>
                 <Input
                   id="provider-create-base-url"
@@ -1604,7 +1754,7 @@ function ProviderCreateWorkspace({
                 <Select
                   id="provider-create-api-format"
                   value={form.api_format}
-                  disabled={connectionLocked}
+                  disabled={connectionLocked || gatewayMode}
                   onChange={(event) => setApiFormat(event.target.value as LLMApiFormat)}
                 >
                   {API_FORMAT_OPTIONS.map((option) => (
@@ -1612,15 +1762,17 @@ function ProviderCreateWorkspace({
                   ))}
                 </Select>
                 <p className="text-xs leading-5 text-muted-foreground">
-                  {API_FORMAT_OPTIONS.find((option) => option.value === form.api_format)?.hint}
+                  {gatewayMode
+                    ? "Gateway 固定使用 Responses 协议。"
+                    : API_FORMAT_OPTIONS.find((option) => option.value === form.api_format)?.hint}
                 </p>
               </div>
               <div className="space-y-1.5">
-                <Label htmlFor="provider-create-client">客户端身份</Label>
+                <Label htmlFor="provider-create-client">客户端身份模拟</Label>
                 <Select
                   id="provider-create-client"
                   value={form.client_identity_profile}
-                  disabled={connectionLocked}
+                  disabled={connectionLocked || gatewayMode}
                   onChange={(event) => setField("client_identity_profile", event.target.value as LLMClientIdentityProfile)}
                 >
                   {CLIENT_IDENTITY_OPTIONS.map((option) => (
@@ -1628,7 +1780,9 @@ function ProviderCreateWorkspace({
                   ))}
                 </Select>
                 <p className="text-xs leading-5 text-muted-foreground">
-                  {CLIENT_IDENTITY_OPTIONS.find((option) => option.value === form.client_identity_profile)?.hint}
+                  {gatewayMode
+                    ? "Gateway 会补齐 x-codex-*、installation/window、client_metadata 等请求契约；当前基础身份配置会保留，切回标准 API 直连后继续使用。"
+                    : CLIENT_IDENTITY_OPTIONS.find((option) => option.value === form.client_identity_profile)?.hint}
                 </p>
               </div>
             </div>
@@ -1658,19 +1812,31 @@ function ProviderCreateWorkspace({
                 variant="outline"
                 size="sm"
                 loading={detectingProtocol}
-                disabled={connectionLocked || (!form.api_key.trim() && !form.hasApiKey && form.provider !== "ollama")}
+                disabled={gatewayMode || connectionLocked || proxySelectionBlocked || (!form.api_key.trim() && !form.hasApiKey && form.provider !== "ollama")}
                 onClick={onDetectProtocol}
               >
                 {!detectingProtocol ? <Download className="mr-1 h-4 w-4" /> : null}
                 自动检测协议
               </Button>
-              <span className="text-xs text-muted-foreground">不确定兼容协议时再检测，默认使用 Responses + Codex CLI。</span>
+              <span className="text-xs text-muted-foreground">
+                {gatewayMode ? "Gateway 已固定 Responses/Codex 档案，无需自动检测。" : "不确定兼容协议时再检测，默认使用 Responses + Codex CLI。"}
+              </span>
             </div>
             {protocolDetection ? <div className="mt-3"><ProtocolDetectionPanel result={protocolDetection} /></div> : null}
           </section>
 
           <div ref={verifySectionRef}>
-            {isEdit ? (
+            {proxySelectionBlocked ? (
+              <div className="border-t py-6">
+                <div className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+                  {proxyListRequired
+                    ? proxiesLoadError
+                      ? "代理列表加载失败，无法核对当前绑定。请重试或改选 DIRECT 后继续。"
+                      : "正在核对当前代理，请稍候。"
+                    : `当前代理${selectedProxyIssue === "missing" ? "已不存在" : "已停止支持"}。请选择 DIRECT 或受支持代理后，才能读取模型、测活或保存。`}
+                </div>
+              </div>
+            ) : isEdit ? (
               <section className="border-t pt-6" aria-labelledby="provider-model-management-title">
                 <div className="mb-4">
                   <h2 id="provider-model-management-title" className="text-base font-semibold">模型管理</h2>
@@ -1687,6 +1853,8 @@ function ProviderCreateWorkspace({
                   onSetDefault={(model) => setField("default_model", model)}
                   providerKind={form.provider}
                   apiFormat={form.api_format}
+                  protocolProfile={form.protocol_profile}
+                  executionBackend={form.execution_backend}
                   baseUrl={form.base_url}
                   apiKey={form.api_key}
                   proxyId={form.proxy_id}
@@ -1695,6 +1863,7 @@ function ProviderCreateWorkspace({
             ) : (
             <ProviderCreateVerification
               providerKind={form.provider}
+              executionBackend={form.execution_backend}
               apiFormat={form.api_format}
               protocolProfile={form.protocol_profile}
               clientIdentityProfile={form.client_identity_profile}
@@ -1779,19 +1948,43 @@ function ProviderCreateWorkspace({
                   ) : (
                     <Select disabled={connectionLocked} value={form.proxy_id} onChange={(event) => setField("proxy_id", event.target.value)}>
                       <option value="">DIRECT，不走代理</option>
-                      {proxies.map((proxy) => (
-                        <option key={proxy.id} value={String(proxy.id)}>#{proxy.id} · {proxy.type} · {proxy.host}:{proxy.port}</option>
+                      {selectedProxyIssue === "missing" ? (
+                        <option value={form.proxy_id} disabled>代理 #{form.proxy_id} 已不存在，请重新选择</option>
+                      ) : null}
+                      {proxyOptions.map((proxy) => (
+                        <option
+                          key={proxy.id}
+                          value={String(proxy.id)}
+                          disabled={!isSupportedProxyType(proxy.type)}
+                        >
+                          #{proxy.id} · {proxy.type} · {proxy.host}:{proxy.port}
+                          {!isSupportedProxyType(proxy.type) ? " · 已停止支持" : ""}
+                        </option>
                       ))}
                     </Select>
                   )}
+                  {proxyListRequired ? (
+                    <p className="text-xs leading-5 text-destructive">
+                      {proxiesLoadError
+                        ? "代理列表加载失败，无法核对当前绑定。请重试或改选 DIRECT。"
+                        : "正在核对当前代理，请稍候。"}
+                    </p>
+                  ) : selectedProxyIssue ? (
+                    <p className="text-xs leading-5 text-destructive">
+                      当前绑定不可用，请显式切换为 DIRECT 或受支持代理。
+                    </p>
+                  ) : null}
                 </div>
                 <div className="space-y-1.5">
                   <Label>联网搜索协议</Label>
-                  <Select value={form.web_search_api_format} onChange={(event) => setField("web_search_api_format", event.target.value as LLMWebSearchApiFormat)}>
+                  <Select disabled={connectionLocked || gatewayMode} value={form.web_search_api_format} onChange={(event) => setField("web_search_api_format", event.target.value as LLMWebSearchApiFormat)}>
                     {WEB_SEARCH_API_FORMAT_OPTIONS.map((option) => (
                       <option key={option.value} value={option.value}>{option.label}</option>
                     ))}
                   </Select>
+                  {gatewayMode ? (
+                    <p className="text-xs leading-5 text-muted-foreground">Gateway 的联网请求固定使用 Responses；切回标准 API 直连后恢复原设置。</p>
+                  ) : null}
                 </div>
                 <div className="space-y-1.5">
                   <Label>模态</Label>
@@ -1809,14 +2002,23 @@ function ProviderCreateWorkspace({
                     ))}
                   </Select>
                 </div>
-                {form.api_format === "anthropic_messages" ? (
+                {form.api_format !== "chat_completions" ? (
                   <div className="space-y-1.5">
-                    <Label>Anthropic 请求兼容模式</Label>
-                    <Select disabled={connectionLocked} value={form.protocol_profile} onChange={(event) => setField("protocol_profile", event.target.value as LLMProtocolProfile)}>
-                      <option value="standard">标准 Anthropic API</option>
-                      <option value="claude_code_proxy">Claude Code 反代兼容</option>
+                    <Label>协议档案</Label>
+                    <Select disabled={connectionLocked || gatewayMode} value={form.protocol_profile} onChange={(event) => setField("protocol_profile", event.target.value as LLMProtocolProfile)}>
+                      {PROTOCOL_PROFILE_OPTIONS[form.api_format].map((option) => (
+                        <option key={option.value} value={option.value}>{option.label}</option>
+                      ))}
                     </Select>
+                    <p className="text-xs leading-5 text-muted-foreground">
+                      {gatewayMode
+                        ? "Gateway 固定使用 Codex Responses 档案。"
+                        : PROTOCOL_PROFILE_OPTIONS[form.api_format].find((option) => option.value === form.protocol_profile)?.hint}
+                    </p>
                   </div>
+                ) : null}
+                {gatewayMode && !gatewayHasApiKey ? (
+                  <p className="text-xs leading-5 text-destructive">Gateway Provider 必须配置 API Key。</p>
                 ) : null}
               </div>
               <div className="space-y-2">
@@ -1857,7 +2059,7 @@ function ProviderCreateWorkspace({
             <Button
               type="button"
               loading={saving}
-              disabled={!form.name.trim() || !form.default_model.trim()}
+              disabled={!form.name.trim() || !form.default_model.trim() || gatewayBlocked || proxySelectionBlocked}
               onClick={() => {
                 if (!isEdit && !verified && !window.confirm("当前 Provider 尚未通过真实模型验证。仍要保存吗？保存后建议立即进入模型测活确认可用性。")) return;
                 onSave();
@@ -1877,7 +2079,8 @@ function ProviderCreateWorkspace({
           <dl className="space-y-3 text-xs">
             <div><dt className="text-muted-foreground">接入地址</dt><dd className="mt-1 break-all font-mono">{endpoint}</dd></div>
             <div><dt className="text-muted-foreground">实际协议</dt><dd className="mt-1 font-medium">{form.api_format}</dd></div>
-            <div><dt className="text-muted-foreground">客户端身份</dt><dd className="mt-1 font-medium">{form.client_identity_profile}</dd></div>
+            <div><dt className="text-muted-foreground">调用方式</dt><dd className="mt-1 font-medium">{executionBackendLabel(form.execution_backend)}</dd></div>
+            <div><dt className="text-muted-foreground">客户端身份模拟</dt><dd className="mt-1 font-medium">{gatewayMode ? "由 Gateway 管理" : form.client_identity_profile}</dd></div>
             <div><dt className="text-muted-foreground">默认模型</dt><dd className="mt-1 break-all font-mono">{form.default_model || "待选择"}</dd></div>
             <div><dt className="text-muted-foreground">启用模型</dt><dd className="mt-1 font-medium">{enabledModelCount} 个</dd></div>
           </dl>
@@ -1911,18 +2114,10 @@ function ProviderEditDialog({
     if (saving || !confirmDiscardChanges(dirty)) return;
     onCancel();
   };
-  const setField = <K extends keyof FormState>(k: K, v: FormState[K]) =>
-    onChange({ ...form, [k]: v });
-
-  // 列出所有代理；mtproxy 不能给 LLM 用，前端做硬过滤；
-  // 后端 service 层有同样的拒绝逻辑兜底
   const proxiesQ = useQuery({
     queryKey: ["proxies-for-llm"],
     queryFn: listProxies,
   });
-  const llmUsableProxies: ProxyOut[] = (proxiesQ.data || []).filter(
-    (p) => (p.type || "").toLowerCase() !== "mtproxy",
-  );
   const settingsQ = useQuery({
     queryKey: ["system", "settings"],
     queryFn: getSystemSettings,
@@ -1957,8 +2152,10 @@ function ProviderEditDialog({
                 : form.provider
             : form.provider,
           api_format: recommendedApiFormat,
-          protocol_profile:
-            recommendedApiFormat === "anthropic_messages" ? form.protocol_profile : "standard",
+          protocol_profile: protocolProfileForFormat(
+            recommendedApiFormat,
+            (resp.recommended_protocol_profile as LLMProtocolProfile) || "standard",
+          ),
           web_search_api_format: (resp.recommended_web_search_api_format || "auto") as LLMWebSearchApiFormat,
           client_identity_profile:
             (resp.recommended_client_identity_profile as LLMClientIdentityProfile) ||
@@ -1984,8 +2181,10 @@ function ProviderEditDialog({
       onVerificationChange={setCreateVerified}
       stage={createStage}
       onStageChange={setCreateStage}
-      proxies={llmUsableProxies}
+      proxies={proxiesQ.data || []}
       proxiesLoading={proxiesQ.isLoading}
+      proxiesLoaded={proxiesQ.isSuccess}
+      proxiesLoadError={proxiesQ.isError}
       protocolDetection={protocolDetection}
       detectingProtocol={detectProtocolsMut.isPending}
       onDetectProtocol={() => detectProtocolsMut.mutate()}
@@ -2037,7 +2236,13 @@ function ProtocolDetectionPanel({ result }: { result: DetectProviderProtocolsRes
                 <MetaBadge mono>{a.api_format}</MetaBadge>
                 <MetaBadge mono>{a.client_identity_profile}</MetaBadge>
                 <MetaBadge mono tone={a.ok ? "success" : "warn"}>
-                  {a.ok ? "OK" : a.status_code ? `HTTP ${a.status_code}` : "FAIL"}
+                  {a.ok
+                    ? "OK"
+                    : a.upstream_status_code
+                      ? `上游 HTTP ${a.upstream_status_code}`
+                      : a.status_code
+                        ? `HTTP ${a.status_code}`
+                        : "FAIL"}
                 </MetaBadge>
                 {a.error_category ? (
                   <span className="text-muted-foreground">{a.error_category}</span>
@@ -2045,6 +2250,7 @@ function ProtocolDetectionPanel({ result }: { result: DetectProviderProtocolsRes
                 {a.suggestion ? (
                   <span className="w-full break-words text-muted-foreground">{a.suggestion}</span>
                 ) : null}
+                <UpstreamErrorFacts value={a} className="w-full" />
               </div>
             ))}
           </div>
@@ -2060,11 +2266,21 @@ function ProbeRow({ label, probe }: { label: string; probe: ProtocolProbeResult 
       <div className="flex items-center justify-between gap-2">
         <span className="font-mono">{label}</span>
         <MetaBadge mono tone={probe.ok ? "success" : "warn"}>
-          {probe.ok ? "OK" : probe.status_code ? `HTTP ${probe.status_code}` : "FAIL"}
+          {probe.ok
+            ? "OK"
+            : probe.upstream_status_code
+              ? `上游 HTTP ${probe.upstream_status_code}`
+              : probe.status_code
+                ? `HTTP ${probe.status_code}`
+                : "FAIL"}
         </MetaBadge>
       </div>
       <div className="mt-1 text-muted-foreground">{probe.latency_ms} ms</div>
       {probe.error ? <div className="mt-1 break-words text-muted-foreground">{probe.error}</div> : null}
+      <UpstreamErrorFacts value={probe} className="mt-1.5" />
+      {probe.suggestion && probe.suggestion !== probe.error ? (
+        <div className="mt-1 break-words text-muted-foreground">建议：{probe.suggestion}</div>
+      ) : null}
     </div>
   );
 }
@@ -2075,7 +2291,7 @@ function ProbeRow({ label, probe }: { label: string; probe: ProtocolProbeResult 
 //
 // 设计：
 // - models 是 form 的本地状态；toggle / 删除 / 自定义添加都改本地，最终随"保存"PATCH 落库
-// - "Fetch 模型列表"现在直接读编辑表单当前值（provider/base_url/api_key/api_format/proxy_id）
+// - “获取模型列表”直接读取编辑表单当前值（provider/base_url/api_key/api_format/proxy_id）
 //   走 ``/fetch-models-preview`` 预览端点，不需要先保存；新增模型 merge 到 form.models 本地。
 // - 单模型测活在后台复用真实对话接口并原地返回结果；未保存的 provider
 //   （form.id 为空）按钮置灰 + 提示"先保存"。
@@ -2088,6 +2304,8 @@ function ProviderModelsSection({
   onSetDefault,
   providerKind,
   apiFormat,
+  protocolProfile,
+  executionBackend,
   baseUrl,
   apiKey,
   proxyId,
@@ -2100,6 +2318,8 @@ function ProviderModelsSection({
   onSetDefault: (id: string) => void;
   providerKind: LLMProviderKind;
   apiFormat: LLMApiFormat;
+  protocolProfile: LLMProtocolProfile;
+  executionBackend: LLMExecutionBackend;
   baseUrl: string;
   apiKey: string;
   proxyId: string;
@@ -2138,6 +2358,7 @@ function ProviderModelsSection({
       const old = existing.get(mid);
       if (old) {
         merged.push({
+          ...old,
           id: mid,
           enabled: !!old.enabled,
           custom: false,
@@ -2160,6 +2381,8 @@ function ProviderModelsSection({
       fetchProviderModelsPreview({
         provider: providerKind,
         api_format: apiFormat,
+        protocol_profile: protocolProfile,
+        execution_backend: executionBackend,
         base_url: baseUrl ? baseUrl.trim() : null,
         // 编辑模式下若用户没重填 api_key，让后端回落到 DB 已存的
         api_key: apiKey ? apiKey : null,
@@ -2194,6 +2417,7 @@ function ProviderModelsSection({
           system_prompt: "你正在执行模型可用性检查。请直接、简短地回复用户，不要调用工具。",
           max_tokens: 128,
           timeout_seconds: 90,
+          execution_backend_override: executionBackend,
         },
         { signal: controller.signal },
       );
@@ -2261,8 +2485,8 @@ function ProviderModelsSection({
   // Fetch 按钮可用性：新建模式使用表单内 Key；编辑模式可回落到 DB 已存 Key。
   const fetchDisabledHint =
     !persisted && !apiKey.trim() && providerKind !== "ollama"
-        ? "新建模式下需先填 API Key 才能 Fetch；或先保存让后端用已存 key"
-        : null;
+      ? "新建模式下需先填 API Key 才能 Fetch；或先保存让后端用已存 key"
+      : null;
 
   // 渲染单行模型；按用户要求保持**固定顺序**：
   //   [⭐(设默认) 或 默认徽章] / 测活 / 删除
@@ -2303,6 +2527,17 @@ function ProviderModelsSection({
             </MetaBadge>
           )
         ) : null}
+        {result?.execution_backend ? (
+          <MetaBadge
+            tone={isGatewayBackend(result.execution_backend) ? "info" : "neutral"}
+            className="text-[10px] leading-4"
+            title={isGatewayBackend(result.execution_backend)
+              ? [result.gateway_version, result.gateway_stage, result.gateway_request_id].filter(Boolean).join(" · ")
+              : "实际通过标准 API 直连调用"}
+          >
+            {executionBackendLabel(result.execution_backend)}
+          </MetaBadge>
+        ) : null}
         {/* 槽位 1：设默认动作（非默认 → ⭐ 按钮；默认 → 默认徽章） */}
         {isDefault ? (
           <MetaBadge tone="success" className="text-[10px] leading-4">默认</MetaBadge>
@@ -2324,7 +2559,7 @@ function ProviderModelsSection({
           variant="ghost"
           loading={testingId === m.id}
           disabled={!persisted || (testingId !== null && testingId !== m.id)}
-          title={persisted ? "后台发起一次真实单模型对话测活" : "先保存 Provider 再测活"}
+          title={persisted ? "使用当前表单所选调用方式发起真实单模型对话测活" : "先保存 Provider 再测活"}
           onClick={() => onTest(m.id)}
         >
           {testingId !== m.id ? <Activity className="h-3.5 w-3.5" /> : null}
@@ -2358,7 +2593,7 @@ function ProviderModelsSection({
         <div>
           <Label className="text-sm font-semibold">模型管理</Label>
           <p className="text-xs text-muted-foreground">
-            点 <code>Fetch</code> 用<strong>当前编辑表单的字段</strong>（提供商 / Base URL / API 协议 / API Key / 代理）拉模型列表，
+            点击“获取模型列表”会使用当前表单所选调用方式和接入参数，无需先保存；
             手动启用要用的几个；也能手动添加。
             启用的模型会在「自定义指令 → AI 子表单」的下拉里展开成
             <code> 名称（提供商 · 模型ID）</code>
@@ -2376,7 +2611,7 @@ function ProviderModelsSection({
           {!fetchMut.isPending ? (
             <Download className="mr-1 h-4 w-4" />
           ) : null}
-          Fetch 模型列表
+          获取模型列表
         </Button>
       </div>
 
@@ -2411,7 +2646,7 @@ function ProviderModelsSection({
       {/* 模型列表 */}
       {models.length === 0 ? (
         <p className="rounded-md border border-dashed py-4 text-center text-xs text-muted-foreground">
-          尚无候选模型。点 Fetch 自动拉，或在上面手动添加。
+          尚无候选模型。点击“获取模型列表”自动读取，或在上面手动添加。
         </p>
       ) : (
         <div className="space-y-2">
@@ -2421,7 +2656,7 @@ function ProviderModelsSection({
             </div>
           ) : (
             <p className="rounded-md border border-dashed py-3 text-center text-xs text-muted-foreground">
-              当前没有启用任何模型。展开下方未启用列表开启模型，或在上面 Fetch 后自定义添加
+              当前没有启用任何模型。展开下方未启用列表开启模型，或获取列表后自定义添加
             </p>
           )}
 
@@ -2453,6 +2688,253 @@ function ProviderModelsSection({
         </div>
       )}
     </div>
+  );
+}
+
+function GatewayStatusDialog({
+  open,
+  onOpenChange,
+}: {
+  open: boolean;
+  onOpenChange: (value: boolean) => void;
+}) {
+  const queryClient = useQueryClient();
+  const [detectedVersion, setDetectedVersion] = useState<string | null>(null);
+  const [detectError, setDetectError] = useState<string | null>(null);
+  const [action, setAction] = useState<"detect" | "apply" | "restore" | null>(null);
+  const healthQ = useQuery({
+    queryKey: ["system", "health-overview"],
+    queryFn: getHealthOverview,
+    enabled: open,
+    staleTime: 5_000,
+    refetchOnWindowFocus: true,
+  });
+  const versionsQ = useQuery({
+    queryKey: ["llm", "identity-versions", "gateway"],
+    queryFn: getClientIdentityVersions,
+    enabled: open,
+    staleTime: 5_000,
+  });
+  const gateway = healthQ.data?.codex_gateway;
+  const codexVersion = versionsQ.data?.items.find((item) => item.key === "codex_tui");
+  const stateLabel = gateway?.state === "ready"
+    ? "已就绪"
+    : gateway?.state === "degraded"
+      ? "异常"
+      : gateway?.state === "not_required"
+        ? "当前未启用"
+        : "读取中";
+  const stateTone = gateway?.state === "ready"
+    ? "success"
+    : gateway?.state === "degraded"
+      ? "danger"
+      : "outline";
+
+  const refresh = async () => {
+    await Promise.all([healthQ.refetch(), versionsQ.refetch()]);
+  };
+
+  const detectLatest = async () => {
+    setAction("detect");
+    setDetectError(null);
+    try {
+      const response = await detectClientIdentityVersions();
+      const result = response.items.find((item) => item.key === "codex_tui");
+      if (!result?.latest || result.error) {
+        throw new Error(result?.error || "检测源没有返回 Codex 版本");
+      }
+      setDetectedVersion(result.latest);
+      toast.success(`检测到 Codex ${result.latest}`);
+    } catch (error) {
+      setDetectError(getErrMsg(error));
+    } finally {
+      setAction(null);
+    }
+  };
+
+  const saveCodexVersion = async (version: string | null) => {
+    const items = versionsQ.data?.items || [];
+    const overrides: Record<string, string> = {};
+    for (const item of items) {
+      if (item.key === "codex_tui") continue;
+      if (item.current.trim() && item.current.trim() !== item.default.trim()) {
+        overrides[item.key] = item.current.trim();
+      }
+    }
+    if (version && codexVersion && version.trim() !== codexVersion.default.trim()) {
+      overrides.codex_tui = version.trim();
+    }
+    await updateClientIdentityVersions({ overrides });
+    await queryClient.invalidateQueries({ queryKey: ["system", "health-overview"] });
+    await queryClient.invalidateQueries({ queryKey: ["llm", "identity-versions"] });
+    await refresh();
+  };
+
+  const applyDetected = async () => {
+    if (!detectedVersion) return;
+    setAction("apply");
+    setDetectError(null);
+    try {
+      await saveCodexVersion(detectedVersion);
+      toast.success(`已保存 Codex ${detectedVersion}，Gateway 状态已刷新`);
+    } catch (error) {
+      setDetectError(getErrMsg(error));
+    } finally {
+      setAction(null);
+    }
+  };
+
+  const restoreBuiltin = async () => {
+    setAction("restore");
+    setDetectError(null);
+    try {
+      await saveCodexVersion(null);
+      toast.success("已恢复 Codex 内置版本，Gateway 状态已刷新");
+    } catch (error) {
+      setDetectError(getErrMsg(error));
+    } finally {
+      setAction(null);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[90vh] min-w-0 max-w-2xl overflow-x-hidden overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>Codex 客户端兼容 Gateway</DialogTitle>
+          <DialogDescription>
+            最接近真实 Codex Responses 客户端请求契约的内置调用方式，会补齐动态会话头和 client_metadata；不包含 OAuth、ChatGPT 账号身份或设备证明。
+          </DialogDescription>
+        </DialogHeader>
+        {healthQ.isLoading || versionsQ.isLoading ? (
+          <div className="flex min-h-32 items-center justify-center gap-2 text-sm text-muted-foreground">
+            <Spinner className="text-primary" />
+            正在读取 Gateway 状态…
+          </div>
+        ) : healthQ.isError || versionsQ.isError ? (
+          <p className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+            {getErrMsg(healthQ.error ?? versionsQ.error)}
+          </p>
+        ) : (
+          <div className="min-w-0 space-y-4">
+            <div className="flex items-center justify-between rounded-md border bg-muted/20 px-3 py-2.5">
+              <span className="text-sm font-medium">运行状态</span>
+              <MetaBadge tone={stateTone}>{stateLabel}</MetaBadge>
+            </div>
+            <dl className="grid min-w-0 grid-cols-1 gap-3 text-sm sm:grid-cols-2">
+              <div className="rounded-md border p-3">
+                <dt className="text-xs text-muted-foreground">Gateway 模块版本</dt>
+                <dd className="mt-1 break-all font-mono text-xs">{gateway?.version || "暂无"}</dd>
+              </div>
+              <div className="rounded-md border p-3">
+                <dt className="text-xs text-muted-foreground">Gateway 协议版本</dt>
+                <dd className="mt-1 break-all font-mono text-xs">{gateway?.protocol_version || "暂无"}</dd>
+              </div>
+              <div className="rounded-md border p-3">
+                <dt className="text-xs text-muted-foreground">当前 Codex 客户端版本</dt>
+                <dd className="mt-1 break-all font-mono text-xs">
+                  {gateway?.codex_client_version || codexVersion?.current || "暂无"}
+                </dd>
+              </div>
+              <div className="rounded-md border p-3">
+                <dt className="text-xs text-muted-foreground">版本来源</dt>
+                <dd className="mt-1 font-medium">
+                  {gateway?.codex_version_source === "manual_override" ? "手动覆盖" : "内置默认"}
+                </dd>
+              </div>
+              <div className="rounded-md border p-3">
+                <dt className="text-xs text-muted-foreground">检测到的最新版本</dt>
+                <dd className="mt-1 break-all font-mono text-xs">{detectedVersion || "尚未检测"}</dd>
+              </div>
+              <div className="rounded-md border p-3">
+                <dt className="text-xs text-muted-foreground">请求契约审查基线</dt>
+                <dd className="mt-1 text-xs leading-5">
+                  协议 {gateway?.protocol_version || "暂无"}
+                  {gateway?.contract_review_date ? ` · ${gateway.contract_review_date}` : ""}
+                </dd>
+              </div>
+              <div className="rounded-md border p-3">
+                <dt className="text-xs text-muted-foreground">上游基线提交</dt>
+                <dd className="mt-1 break-all font-mono text-xs">{gateway?.upstream_commit || "暂无"}</dd>
+              </div>
+              <div className="rounded-md border p-3">
+                <dt className="text-xs text-muted-foreground">构建提交</dt>
+                <dd className="mt-1 break-all font-mono text-xs">{gateway?.build_commit || "暂无"}</dd>
+              </div>
+              <div className="rounded-md border p-3">
+                <dt className="text-xs text-muted-foreground">Provider 数量</dt>
+                <dd className="mt-1 font-semibold">{gateway?.provider_count ?? 0}</dd>
+              </div>
+              <div className="rounded-md border p-3">
+                <dt className="text-xs text-muted-foreground">配置修订</dt>
+                <dd className="mt-1 font-mono text-xs">{gateway?.revision ?? 0}</dd>
+              </div>
+            </dl>
+            <p className="rounded-md border border-primary/20 bg-primary/[0.04] px-3 py-2 text-xs leading-5 text-muted-foreground">
+              “检测最新版本”只查询版本号，不会自动应用，也不代表请求契约已经自动完成审查。应用或恢复版本后，模型列表、测活和 Agent 请求会热同步，无需重启 Web。
+            </p>
+            {detectError ? (
+              <p className="break-words rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs leading-5 text-destructive">
+                {detectError}
+              </p>
+            ) : null}
+            {gateway?.error ? (
+              <div className="rounded-md border border-destructive/30 bg-destructive/5 p-3">
+                <div className="text-xs font-medium text-destructive">最近错误</div>
+                <p className="mt-1 break-words text-xs leading-5 text-destructive">{gateway.error}</p>
+              </div>
+            ) : (
+              <p className="rounded-md border border-dashed px-3 py-2 text-xs leading-5 text-muted-foreground">
+                当前没有 Gateway 错误。新增、编辑或停用 Gateway Provider 后，配置会自动同步。
+              </p>
+            )}
+          </div>
+        )}
+        <DialogFooter className="flex-row flex-wrap justify-end gap-2">
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={action !== null}
+            onClick={() => void detectLatest()}
+          >
+            {action === "detect" ? <Spinner className="mr-1 h-4 w-4" /> : <Download className="mr-1 h-4 w-4" />}
+            检测最新版本
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={action !== null || !detectedVersion || detectedVersion === codexVersion?.current}
+            onClick={() => void applyDetected()}
+          >
+            {action === "apply" ? <Spinner className="mr-1 h-4 w-4" /> : null}
+            应用检测版本
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={action !== null || codexVersion?.current === codexVersion?.default}
+            onClick={() => void restoreBuiltin()}
+          >
+            {action === "restore" ? <Spinner className="mr-1 h-4 w-4" /> : null}
+            恢复内置版本
+          </Button>
+          <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
+            关闭
+          </Button>
+          <Button
+            type="button"
+            disabled={healthQ.isFetching || versionsQ.isFetching || action !== null}
+            onClick={() => void refresh()}
+          >
+            <RefreshCw className={cn("mr-1 h-4 w-4", (healthQ.isFetching || versionsQ.isFetching) && "animate-spin")} />
+            刷新状态
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 

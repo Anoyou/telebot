@@ -225,6 +225,10 @@ class ModelResponse:
     # Provider-native chain-of-thought (DeepSeek reasoning_content / Anthropic thinking)。
     # 与 content 分离，便于工具轮完整回传；text 属性仍只暴露最终可见正文。
     reasoning_content: str | None = None
+    execution_backend: str = "direct"
+    gateway_version: str | None = None
+    gateway_request_id: str | None = None
+    gateway_stage: str | None = None
 
     @property
     def text(self) -> str:
@@ -255,14 +259,24 @@ class ProviderCapabilities:
     multi_turn: bool = True
     images: bool = False
     tools: bool = False
+    parallel_tool_calls: bool = True
     streaming: bool = False
     web_search: bool = False
     temperature: bool = True
     reasoning: bool = False
     reasoning_efforts: frozenset[str] = frozenset()
+    context_window: int | None = None
+    max_output_tokens: int | None = None
+    input_modalities: frozenset[str] = frozenset({"text"})
+    output_modalities: frozenset[str] = frozenset({"text"})
+    supported_api_formats: frozenset[str] = frozenset()
+    reasoning_transport: str = "native"
+    protocol_compatible: bool = True
 
     def validation_errors(self, request: ModelRequest) -> list[str]:
         errors: list[str] = []
+        if not self.protocol_compatible:
+            errors.append("模型元数据声明不支持当前 API 协议")
         if len(request.messages) > 2 and not self.multi_turn:
             errors.append("provider 不支持多轮消息")
         if any(isinstance(block, ImageContent) for msg in request.messages for block in msg.content):
@@ -276,6 +290,10 @@ class ProviderCapabilities:
             errors.append("provider 不支持原生联网搜索")
         if request.temperature is not None and not self.temperature:
             errors.append("provider 不支持 temperature")
+        if self.max_output_tokens is not None and request.max_output_tokens > self.max_output_tokens:
+            errors.append(
+                f"max_output_tokens 超过模型上限 {self.max_output_tokens}"
+            )
         if request.reasoning_effort:
             if not self.reasoning:
                 errors.append("provider 不支持 reasoning")
@@ -295,11 +313,19 @@ class ProviderCapabilities:
             "multi_turn": self.multi_turn,
             "images": self.images,
             "tools": self.tools,
+            "parallel_tool_calls": self.parallel_tool_calls,
             "streaming": self.streaming,
             "web_search": self.web_search,
             "temperature": self.temperature,
             "reasoning": self.reasoning,
             "reasoning_efforts": self.reasoning_efforts,
+            "context_window": self.context_window,
+            "max_output_tokens": self.max_output_tokens,
+            "input_modalities": self.input_modalities,
+            "output_modalities": self.output_modalities,
+            "supported_api_formats": self.supported_api_formats,
+            "reasoning_transport": self.reasoning_transport,
+            "protocol_compatible": self.protocol_compatible,
         }
         unknown = set(overrides) - values.keys()
         if unknown:
@@ -321,6 +347,8 @@ CAPABILITIES_BY_API_FORMAT: dict[str, ProviderCapabilities] = {
         tools=True,
         streaming=True,
         reasoning=True,
+        supported_api_formats=frozenset({"chat_completions"}),
+        reasoning_transport="reasoning_content",
     ),
     "responses": ProviderCapabilities(
         images=True,
@@ -328,6 +356,8 @@ CAPABILITIES_BY_API_FORMAT: dict[str, ProviderCapabilities] = {
         streaming=True,
         web_search=True,
         reasoning=True,
+        supported_api_formats=frozenset({"responses"}),
+        reasoning_transport="responses_item",
     ),
     "anthropic_messages": ProviderCapabilities(
         images=True,
@@ -335,6 +365,8 @@ CAPABILITIES_BY_API_FORMAT: dict[str, ProviderCapabilities] = {
         streaming=True,
         reasoning=True,
         reasoning_efforts=frozenset({"low", "medium", "high", "max"}),
+        supported_api_formats=frozenset({"anthropic_messages"}),
+        reasoning_transport="anthropic_thinking",
     ),
 }
 
@@ -350,6 +382,7 @@ def capabilities_for(api_format: ApiFormat | str) -> ProviderCapabilities:
 
 _KNOWN_ENDPOINTS = (
     re.compile(r"/models/[^/]+:(?:generateContent|streamGenerateContent)$", re.I),
+    re.compile(r"/models$", re.I),
     re.compile(r"/(?:chat/completions|completions|responses|messages)$", re.I),
 )
 
@@ -388,6 +421,11 @@ def _with_default_version(base_url: str, api_format: str) -> str:
     # OpenAI-compatible reverse proxies.  Only bare origins get a default.
     if path:
         return base_url
+    # DeepSeek 的官方 OpenAI SDK 配置明确使用 ``https://api.deepseek.com``
+    # 作为 base_url，Responses/Chat 端点均直接挂在根路径下（不带 /v1）。
+    # 保留显式填写的 /v1 路径，但不要为官方根域名隐式插入版本段。
+    if (urlsplit(base_url).hostname or "").lower() == "api.deepseek.com":
+        return base_url
     return f"{base_url}/v1"
 
 
@@ -419,6 +457,60 @@ def provider_models_endpoint(base_url: str, api_format: ApiFormat | str) -> str:
     normalized_format = ApiFormat(api_format).value
     base = _with_default_version(normalize_base_url(base_url), normalized_format)
     return f"{base}/models"
+
+
+def provider_models_endpoints(
+    base_url: str,
+    api_format: ApiFormat | str,
+    *,
+    protocol_profile: str | None = None,
+) -> tuple[str, ...]:
+    """Return ordered model discovery candidates.
+
+    Only callers decide whether to continue after an HTTP response.  The
+    contract is to try another candidate for route-missing statuses (404/405),
+    never to hide authentication, rate-limit, or server errors.
+    """
+
+    normalized_format = ApiFormat(api_format).value
+    normalized_base = normalize_base_url(base_url)
+    primary = provider_models_endpoint(normalized_base, normalized_format)
+    candidates = [primary]
+
+    from .llm_profiles import resolve_protocol_profile
+
+    profile = resolve_protocol_profile(
+        normalized_format,
+        protocol_profile,
+        base_url=normalized_base,
+    )
+    parsed = urlsplit(normalized_base)
+    base_path = parsed.path.rstrip("/")
+    for suffix in profile.models_endpoint_suffixes:
+        if suffix == "/models":
+            candidate = f"{normalized_base}/models"
+        elif suffix.startswith("/"):
+            candidate = urlunsplit(
+                (parsed.scheme, parsed.netloc, suffix, "", "")
+            ).rstrip("/")
+        else:
+            candidate = f"{normalized_base}/{suffix}"
+        candidates.append(candidate)
+
+    last_segment = base_path.rsplit("/", 1)[-1]
+    if _VERSION_SEGMENT.fullmatch(last_segment):
+        parent_path = base_path.rsplit("/", 1)[0]
+        candidates.append(
+            urlunsplit(
+                (parsed.scheme, parsed.netloc, f"{parent_path}/models", "", "")
+            )
+        )
+    elif not base_path:
+        candidates.append(
+            urlunsplit((parsed.scheme, parsed.netloc, "/v1/models", "", ""))
+        )
+
+    return tuple(dict.fromkeys(candidate.rstrip("/") for candidate in candidates))
 
 
 def stop_reason_from_provider(value: object) -> StopReason:
@@ -468,6 +560,7 @@ __all__ = [
     "normalize_base_url",
     "provider_endpoint",
     "provider_models_endpoint",
+    "provider_models_endpoints",
     "stop_reason_from_provider",
     "from_wire_tool_name",
     "to_wire_tool_name",

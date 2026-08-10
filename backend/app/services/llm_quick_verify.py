@@ -9,11 +9,13 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from urllib.parse import urlsplit
 
 import httpx
 
 from ..crypto import encrypt_str
+from . import llm_diagnostics
 from .llm_client import (
     LLMError,
     LLMErrorScope,
@@ -21,7 +23,7 @@ from .llm_client import (
     build_client_from_dto,
 )
 from .llm_dto import LLMProviderDTO
-from .llm_protocol import normalize_base_url, provider_models_endpoint
+from .llm_protocol import normalize_base_url, provider_models_endpoints
 from .llm_request_headers import (
     REQUEST_SCOPE_LIVENESS,
     REQUEST_SCOPE_MODELS,
@@ -86,6 +88,33 @@ def _safe_message(message: str, api_key: str) -> str:
     return _safe_error_message(message, api_key or None)
 
 
+def _error_event_facts(exc: LLMError, api_key: str) -> dict[str, object]:
+    """把已核实错误事实带到 Web 测活与 System Agent，不让下游解析文案猜状态。"""
+
+    category = str(getattr(exc, "category", None) or "").strip() or None
+    values: dict[str, object | None] = {
+        "status_code": getattr(exc, "status_code", None),
+        "error_category": category,
+        "suggestion": llm_diagnostics.suggestion_for(category) if category else None,
+        "upstream_status_code": getattr(exc, "upstream_status_code", None),
+        "upstream_error_code": getattr(exc, "upstream_error_code", None),
+        "upstream_error_message": getattr(exc, "upstream_error_message", None),
+        "upstream_error_detail": getattr(exc, "upstream_error_detail", None),
+        "upstream_request_id": getattr(exc, "upstream_request_id", None),
+        "client_request_id": getattr(exc, "client_request_id", None),
+        "gateway_request_id": getattr(exc, "request_id", None),
+    }
+    return {
+        key: (
+            _safe_message(value, api_key)
+            if isinstance(value, str) and key != "error_category"
+            else value
+        )
+        for key, value in values.items()
+        if value is not None and value != ""
+    }
+
+
 def _discovery_headers(api_format: str, api_key: str) -> dict[str, str]:
     headers = {"Accept": "application/json"}
     if not api_key:
@@ -148,6 +177,7 @@ async def discover_models(
     base_url: str,
     api_key: str,
     api_format: str,
+    protocol_profile: str = "standard",
     proxy_url: str | None = None,
     timeout_seconds: int,
     request_headers: list[object] | None = None,
@@ -161,24 +191,32 @@ async def discover_models(
         client_kwargs["proxy"] = proxy_url
     else:
         client_kwargs["trust_env"] = False
+    headers = plan_request_headers(
+        system_headers=_discovery_headers(api_format, api_key),
+        compatibility_headers=request_headers_for_scope(
+            request_headers,
+            REQUEST_SCOPE_MODELS,
+        ),
+    )
+    response: httpx.Response | None = None
     try:
         async with httpx.AsyncClient(**client_kwargs) as client:
-            response = await client.get(
-                provider_models_endpoint(base_url, api_format),
-                headers=plan_request_headers(
-                    system_headers=_discovery_headers(api_format, api_key),
-                    compatibility_headers=request_headers_for_scope(
-                        request_headers,
-                        REQUEST_SCOPE_MODELS,
-                    ),
-                ),
-            )
+            for endpoint in provider_models_endpoints(
+                base_url,
+                api_format,
+                protocol_profile=protocol_profile,
+            ):
+                response = await client.get(endpoint, headers=headers)
+                if response.status_code not in {404, 405}:
+                    break
     except httpx.HTTPError as exc:
         raise LLMError(
             _safe_message(f"模型列表请求失败（{type(exc).__name__}）。", api_key),
             retryable=True,
         ) from None
 
+    if response is None:
+        raise LLMError("没有可用的模型列表候选端点。")
     if response.status_code >= 400:
         raise LLMError(
             _safe_message(
@@ -250,6 +288,7 @@ async def quick_verify_events(
     max_tokens: int,
     timeout_seconds: int,
     request_headers: list[object] | None = None,
+    provider_override: LLMProviderDTO | None = None,
 ) -> AsyncIterator[dict[str, object]]:
     """生成单次快速验证 NDJSON 事件，不产生持久化副作用。"""
 
@@ -262,23 +301,29 @@ async def quick_verify_events(
                 base_url=base_url,
                 api_key=api_key,
                 api_format=api_format,
+                protocol_profile=protocol_profile,
                 proxy_url=proxy_url,
                 timeout_seconds=timeout_seconds,
                 request_headers=request_headers,
             )
         except LLMError as exc:
             requires_model = _discovery_requires_manual_model(exc)
+            diagnostic_error = _safe_message(
+                llm_diagnostics.format_diagnostic_error(exc),
+                api_key,
+            )
             yield {
                 "type": "error",
                 "ok": False,
                 "error": (
-                    f"无法自动获取可对话模型，请填写模型 ID 后重试。{_safe_message(str(exc), api_key)}"
+                    f"无法自动获取可对话模型，请填写模型 ID 后重试。{diagnostic_error}"
                     if requires_model
-                    else _safe_message(str(exc), api_key)
+                    else diagnostic_error
                 ),
                 "requires_model": requires_model,
                 "models": [],
                 "api_format": api_format,
+                **_error_event_facts(exc, api_key),
             }
             return
         if not models:
@@ -319,19 +364,27 @@ async def quick_verify_events(
     fallback_response_consumed = False
     stream_terminal_received = False
     max_response_chars = max(16_384, max_tokens * 16)
-    dto = LLMProviderDTO(
-        id=0,
-        name="quick-verify",
-        provider=suggested_provider(api_format, base_url, api_key),
-        api_format=api_format,
-        protocol_profile=protocol_profile,
-        client_identity_profile=client_identity_profile,
-        web_search_api_format="auto",
-        base_url=base_url,
-        default_model=selected_model,
-        api_key_enc=encrypt_str(api_key) if api_key else None,
-        request_headers_enc=encrypt_request_headers(request_headers),
-        proxy_url=proxy_url,
+    dto = (
+        replace(
+            provider_override,
+            default_model=selected_model,
+            models=[{"id": selected_model, "enabled": True}],
+        )
+        if provider_override is not None
+        else LLMProviderDTO(
+            id=0,
+            name="quick-verify",
+            provider=suggested_provider(api_format, base_url, api_key),
+            api_format=api_format,
+            protocol_profile=protocol_profile,
+            client_identity_profile=client_identity_profile,
+            web_search_api_format="auto",
+            base_url=base_url,
+            default_model=selected_model,
+            api_key_enc=encrypt_str(api_key) if api_key else None,
+            request_headers_enc=encrypt_request_headers(request_headers),
+            proxy_url=proxy_url,
+        )
     )
 
     try:
@@ -445,10 +498,14 @@ async def quick_verify_events(
             "requested_model": selected_model,
             "latency_ms": int((time.monotonic() - started) * 1000),
             "response": "".join(text_parts).strip() or None,
-            "error": _safe_message(str(exc), api_key),
+            "error": _safe_message(
+                llm_diagnostics.format_diagnostic_error(exc),
+                api_key,
+            ),
             "requires_model": _requires_manual_model(exc, auto_selected=auto_selected),
             "models": models,
             "api_format": api_format,
+            **_error_event_facts(exc, api_key),
         }
     except Exception as exc:  # noqa: BLE001
         yield {

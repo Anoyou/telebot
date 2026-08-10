@@ -17,8 +17,8 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import re
-import uuid
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Iterable, Mapping
 from contextvars import ContextVar
@@ -33,17 +33,25 @@ from ..db.models.command import (
     LLM_API_FORMAT_ANTHROPIC_MESSAGES,
     LLM_API_FORMAT_CHAT_COMPLETIONS,
     LLM_API_FORMAT_RESPONSES,
+    LLM_EXECUTION_BACKEND_CODEX_GATEWAY,
     LLM_PROTOCOL_PROFILE_CLAUDE_CODE_PROXY,
     LLM_PROTOCOL_PROFILE_STANDARD,
     LLM_PROVIDER_OLLAMA,
     LLMProvider,
     default_api_format_for,
 )
+from . import llm_diagnostics as llm_diag
+from .llm_call_context import ClientRuntimeContext
+from .llm_codecs.anthropic import usage_from_anthropic
+from .llm_codecs.chat_completions import usage_from_chat
+from .llm_codecs.responses import plan_responses_body, usage_from_responses
+from .llm_codecs.sse import iter_sse_events, parse_sse_text
 from .llm_dto import LLMProviderDTO
 from .llm_identity import (
     ClientIdentity,
     resolve_identity,
 )
+from .llm_profiles import ProviderProtocolProfile, resolve_protocol_profile
 from .llm_protocol import (
     ImageContent,
     MessageRole,
@@ -164,6 +172,10 @@ class LLMResult:
     tool_calls: list[ToolCall] = field(default_factory=list)
     stop_reason: StopReason = StopReason.UNKNOWN
     provider_status: str | None = None
+    execution_backend: str = "direct"
+    gateway_version: str | None = None
+    gateway_request_id: str | None = None
+    gateway_stage: str | None = None
 
 
 @dataclass(frozen=True)
@@ -179,6 +191,34 @@ class LLMStreamChunk:
     # response.  Callers surface this as an honest non-incremental fallback and
     # must not issue a second request or split the text into pretend deltas.
     stream_fallback: bool = False
+    execution_backend: str = "direct"
+    gateway_version: str | None = None
+    gateway_request_id: str | None = None
+    gateway_stage: str | None = None
+
+
+def _responses_event_error(prefix: str, error: Any, api_key: str | None) -> LLMError:
+    """Preserve structured facts from HTTP-200 Responses error events."""
+
+    payload = error if isinstance(error, Mapping) else {"message": str(error or "")}
+    fact = llm_diag.diagnose_http_error(400, payload, api_key=api_key)
+    return LLMError(
+        _safe_error_message(
+            f"{prefix}：{llm_diag.format_diagnostic_error(fact)}",
+            api_key,
+        ),
+        retryable=fact.retryable,
+        scope=fact.scope,
+        status_code=fact.status_code,
+        category=fact.category,
+        upstream_status_code=fact.upstream_status_code,
+        upstream_error_code=fact.upstream_error_code,
+        upstream_error_message=fact.upstream_error_message,
+        upstream_error_detail=fact.upstream_error_detail,
+        upstream_request_id=fact.upstream_request_id,
+        client_request_id=fact.client_request_id,
+        upstream_summary=fact.upstream_summary,
+    )
 
 
 def _completed_json_as_stream_result(
@@ -201,19 +241,13 @@ def _completed_json_as_stream_result(
             status == "incomplete" and incomplete_reason not in _RESPONSES_ALLOWED_INCOMPLETE_REASONS
         ):
             detail = data.get("error") or data.get("incomplete_details") or status
-            raise LLMError(
-                _safe_error_message(
-                    f"Responses 返回状态异常: {status}: {str(detail)[:200]}",
-                    api_key,
-                )
-            )
-    if data.get("error"):
-        raise LLMError(
-            _safe_error_message(
-                f"上游流式请求返回错误: {str(data['error'])[:200]}",
+            raise _responses_event_error(
+                f"Responses 返回状态异常: {status}",
+                detail,
                 api_key,
             )
-        )
+    if data.get("error"):
+        raise _responses_event_error("上游流式请求返回错误", data["error"], api_key)
     text = ""
     stop_reason = StopReason.UNKNOWN
     provider_status: str | None = None
@@ -297,38 +331,19 @@ async def _iter_limited_sse_lines(
     line_limit_bytes: int = _STREAM_SSE_LINE_LIMIT_BYTES,
     total_limit_bytes: int = _STREAM_SSE_TOTAL_LIMIT_BYTES,
 ) -> AsyncIterator[str]:
-    """按原始字节有界解析 SSE 行，拒绝超长单行和无限滴流响应。"""
+    """按完整 SSE block 解析，再投影成兼容旧调用方的 event/data/空行。"""
 
-    pending = bytearray()
-    total = 0
-    async for chunk in response.aiter_bytes():
-        if not isinstance(chunk, (bytes, bytearray)):
-            raise LLMError("上游 streaming 返回了无效的字节流")
-        total += len(chunk)
-        if total > total_limit_bytes:
-            raise LLMError("上游 streaming 响应超过 8 MiB 限制")
-        pending.extend(chunk)
-        while True:
-            newline = pending.find(b"\n")
-            if newline < 0:
-                if len(pending) > line_limit_bytes:
-                    raise LLMError("上游 streaming 单个 SSE 事件超过 1 MiB 限制")
-                break
-            raw = bytes(pending[:newline])
-            del pending[: newline + 1]
-            if len(raw) > line_limit_bytes:
-                raise LLMError("上游 streaming 单个 SSE 事件超过 1 MiB 限制")
-            try:
-                yield raw.rstrip(b"\r").decode("utf-8")
-            except UnicodeDecodeError:
-                raise LLMError("上游 streaming 返回了无效的 UTF-8 SSE 数据") from None
-    if pending:
-        if len(pending) > line_limit_bytes:
-            raise LLMError("上游 streaming 单个 SSE 事件超过 1 MiB 限制")
-        try:
-            yield bytes(pending).rstrip(b"\r").decode("utf-8")
-        except UnicodeDecodeError:
-            raise LLMError("上游 streaming 返回了无效的 UTF-8 SSE 数据") from None
+    try:
+        async for event in iter_sse_events(
+            response,
+            event_limit_bytes=line_limit_bytes,
+            total_limit_bytes=total_limit_bytes,
+        ):
+            yield f"event: {event.event}"
+            yield f"data: {event.data}"
+            yield ""
+    except ValueError as exc:
+        raise LLMError(f"上游 streaming SSE 结构异常: {exc}") from None
 
 
 def _model_response_from_result(result: LLMResult) -> ModelResponse:
@@ -510,8 +525,28 @@ def _responses_input(
                 for result in message.tool_results
             )
             continue
-        content: list[dict[str, Any]] = []
         text = message.text_content()
+        # Responses reasoning item 必须与同一轮后续的 assistant message 或
+        # function_call 成对出现。推理被截断且没有生成结果时不能回放，否则
+        # 下一次请求会被上游以 "without its required following item" 拒绝。
+        if (
+            message.role is MessageRole.ASSISTANT
+            and isinstance(message.reasoning_content, str)
+            and message.reasoning_content
+            and (bool(text) or bool(message.tool_calls))
+        ):
+            output.append(
+                {
+                    "type": "reasoning",
+                    "content": [
+                        {
+                            "type": "reasoning_text",
+                            "text": message.reasoning_content,
+                        }
+                    ],
+                }
+            )
+        content: list[dict[str, Any]] = []
         if text:
             content.append(
                 {
@@ -746,11 +781,7 @@ def _openai_structured_response(
         model=str(data.get("model") or request.model),
         content=(TextContent(visible),) if visible else (),
         tool_calls=tool_calls,
-        usage=ModelUsage(
-            input_tokens=int(usage.get("prompt_tokens") or 0),
-            output_tokens=int(usage.get("completion_tokens") or 0),
-            reasoning_tokens=int((usage.get("completion_tokens_details") or {}).get("reasoning_tokens") or 0),
-        ),
+        usage=usage_from_chat(usage),
         stop_reason=(
             StopReason.REFUSAL
             if isinstance(refusal, str) and refusal.strip()
@@ -864,12 +895,7 @@ def _anthropic_structured_response(
         model=str(data.get("model") or request.model),
         content=tuple(content),
         tool_calls=tuple(tool_calls),
-        usage=ModelUsage(
-            input_tokens=int(usage.get("input_tokens") or 0),
-            output_tokens=int(usage.get("output_tokens") or 0),
-            cache_read_tokens=int(usage.get("cache_read_input_tokens") or 0),
-            cache_write_tokens=int(usage.get("cache_creation_input_tokens") or 0),
-        ),
+        usage=usage_from_anthropic(usage),
         stop_reason=(StopReason.TOOL_CALLS if tool_calls else normalized_stop_reason),
         provider_status=str(stop_reason) if stop_reason else None,
         stream_fallback=stream_fallback,
@@ -1054,25 +1080,19 @@ def _responses_structured_response(
                 text_parts.append(content["text"])
     if not text_parts and isinstance(data.get("output_text"), str) and data["output_text"]:
         text_parts.append(str(data["output_text"]))
-    # 仅有 reasoning 无正文时兜底（中转站 / 推理模型常见）
-    if not text_parts and reasoning_parts:
+    # 仅有 reasoning、没有工具调用时才兜底为正文。工具轮必须保持
+    # reasoning 独立，供下一轮按 Responses input item 原样回传。
+    if not text_parts and reasoning_parts and not tool_calls:
         text_parts.extend(reasoning_parts)
     usage = data.get("usage") or {}
     if not isinstance(usage, dict):
         usage = {}
-    details = usage.get("output_tokens_details") or {}
-    if not isinstance(details, dict):
-        details = {}
     provider_reason = incomplete_reason or status
     return ModelResponse(
         model=str(data.get("model") or request.model),
         content=(TextContent("".join(text_parts)),) if text_parts else (),
         tool_calls=tuple(tool_calls),
-        usage=ModelUsage(
-            input_tokens=int(usage.get("input_tokens") or 0),
-            output_tokens=int(usage.get("output_tokens") or 0),
-            reasoning_tokens=int(details.get("reasoning_tokens") or 0),
-        ),
+        usage=usage_from_responses(usage),
         stop_reason=(
             StopReason.REFUSAL
             if has_refusal
@@ -1254,38 +1274,13 @@ def _response_content_type(resp: Any) -> str:
         return ""
 
 
-def _parse_responses_sse(text: str) -> dict[str, Any]:
+def _parse_responses_sse(text: str, api_key: str | None = None) -> dict[str, Any]:
     """把 Responses API 的 SSE 成功流折叠为普通 Responses JSON。
 
     部分 Codex/CLIProxyAPI 反代即使请求里带了 ``stream: false``，仍会返回
     ``text/event-stream``。这里优先使用 ``response.completed`` 里的完整响应；
     如果反代只给了文本增量，则退化为顶层 ``output_text``。
     """
-    events: list[tuple[str, str]] = []
-    event_name = "message"
-    data_lines: list[str] = []
-
-    def flush() -> None:
-        nonlocal event_name, data_lines
-        if data_lines:
-            events.append((event_name, "\n".join(data_lines)))
-        event_name = "message"
-        data_lines = []
-
-    for raw_line in text.splitlines():
-        line = raw_line.rstrip("\r")
-        if not line:
-            flush()
-            continue
-        if line.startswith(":"):
-            continue
-        if line.startswith("event:"):
-            event_name = line.removeprefix("event:").strip() or "message"
-            continue
-        if line.startswith("data:"):
-            data_lines.append(line.removeprefix("data:").strip())
-    flush()
-
     delta_parts: list[str] = []
     done_text = ""
     error_payload: Any = None
@@ -1304,7 +1299,9 @@ def _parse_responses_sse(text: str) -> dict[str, Any]:
         response["output_text"] = stream_text
         return response
 
-    for event_name, raw_data in events:
+    for event in parse_sse_text(text):
+        event_name = event.event
+        raw_data = event.data
         if not raw_data or raw_data == "[DONE]":
             continue
         try:
@@ -1322,9 +1319,12 @@ def _parse_responses_sse(text: str) -> dict[str, Any]:
         response = payload.get("response")
         if isinstance(response, dict):
             # Responses 的状态字段描述资源状态，不能替代协议定义的终态事件。
-            # 只有 response.completed 才表示整个 SSE 响应已完成。
-            if payload_type == "response.completed":
+            # response.completed / response.incomplete 都是官方定义的正常终态。
+            if payload_type in {"response.completed", "response.incomplete"}:
                 return with_stream_text(response)
+            if payload_type == "response.failed":
+                error_payload = payload
+                continue
 
         if payload_type == "response.output_text.delta" and isinstance(payload.get("delta"), str):
             delta_parts.append(payload["delta"])
@@ -1339,8 +1339,8 @@ def _parse_responses_sse(text: str) -> dict[str, Any]:
                 delta_parts.append(payload["delta"])
 
     if error_payload is not None:
-        raise ValueError(f"error event: {str(error_payload)[:200]}")
-    raise ValueError("缺少 response.completed 终态")
+        raise _responses_event_error("Responses SSE 返回错误事件", error_payload, api_key)
+    raise ValueError("缺少 response.completed / response.incomplete 终态")
 
 
 def _decode_responses_payload(prefix: str, resp: Any, api_key: str | None) -> dict[str, Any]:
@@ -1348,7 +1348,9 @@ def _decode_responses_payload(prefix: str, resp: Any, api_key: str | None) -> di
     text = _response_text(resp)
     if "text/event-stream" in content_type or text.lstrip().startswith(("event:", "data:")):
         try:
-            return _parse_responses_sse(text)
+            return _parse_responses_sse(text, api_key)
+        except LLMError:
+            raise
         except ValueError as exc:
             raise LLMError(_safe_error_message(f"{prefix} SSE 返回结构异常: {exc}", api_key)) from None
     try:
@@ -1391,10 +1393,6 @@ def _unsupported_parameter_name(resp: Any) -> str | None:
     return None
 
 
-def _is_unsupported_parameter(resp: Any, parameter: str) -> bool:
-    return _unsupported_parameter_name(resp) == parameter.lower()
-
-
 def _remove_unsupported_parameter(body: dict[str, Any], parameter: str) -> str | None:
     parameter = parameter.strip().lower()
     key = _RESPONSES_REMOVABLE_PARAMETERS.get(parameter)
@@ -1424,6 +1422,20 @@ async def _post_responses_compatible(
         if not removed_key or removed_key in removed:
             return resp
         removed.add(removed_key)
+
+
+def _responses_capabilities_for_profile(
+    profile: ProviderProtocolProfile,
+):
+    overrides = {
+        name: False
+        for name in profile.hard_disabled_capabilities
+        if name in {"images", "tools", "parallel_tool_calls", "web_search", "temperature"}
+    }
+    return capabilities_for_api_format(LLM_API_FORMAT_RESPONSES).with_overrides(
+        reasoning_transport=profile.reasoning_transport,
+        **overrides,
+    )
 
 
 def _non_json_error(prefix: str, resp: Any, exc: json.JSONDecodeError, api_key: str | None) -> LLMError:
@@ -1664,7 +1676,7 @@ class OpenAIClient(LLMClient):
             # 不要把 api_key 回显到错误里；构造前先剥离
             raise LLMError(
                 _safe_error_message(
-                    f"OpenAI 接口返回 {resp.status_code}: {resp.text[:200]}{_hint_for_status(resp.status_code)}",
+                    f"OpenAI 接口返回 {resp.status_code}: {resp.text[:200]}{_diagnostic_hint(resp.status_code, resp.text)}",
                     self._api_key,
                 ),
                 retryable=_is_retryable_status(resp.status_code),
@@ -1816,7 +1828,7 @@ class OpenAIClient(LLMClient):
                         raise LLMError(
                             _safe_error_message(
                                 f"OpenAI streaming 接口返回 {resp.status_code}: "
-                                f"{error_body[:200]}{_hint_for_status(resp.status_code)}",
+                                f"{error_body[:200]}{_diagnostic_hint(resp.status_code, error_body)}",
                                 self._api_key,
                             ),
                             retryable=_is_retryable_status(resp.status_code),
@@ -1970,7 +1982,7 @@ class OpenAIClient(LLMClient):
         if resp.status_code >= 400:
             raise LLMError(
                 _safe_error_message(
-                    f"OpenAI 接口返回 {resp.status_code}: {resp.text[:200]}{_hint_for_status(resp.status_code)}",
+                    f"OpenAI 接口返回 {resp.status_code}: {resp.text[:200]}{_diagnostic_hint(resp.status_code, resp.text)}",
                     self._api_key,
                 ),
                 retryable=_is_retryable_status(resp.status_code),
@@ -2086,7 +2098,7 @@ class OpenAIClient(LLMClient):
                         raise LLMError(
                             _safe_error_message(
                                 f"OpenAI streaming 接口返回 {resp.status_code}: "
-                                f"{error_body[:200]}{_hint_for_status(resp.status_code)}",
+                                f"{error_body[:200]}{_diagnostic_hint(resp.status_code, error_body)}",
                                 self._api_key,
                             ),
                             retryable=_is_retryable_status(resp.status_code),
@@ -2238,7 +2250,7 @@ class OpenAIClient(LLMClient):
         if resp.status_code >= 400:
             raise LLMError(
                 _safe_error_message(
-                    f"STT 接口返回 {resp.status_code}: {resp.text[:200]}{_hint_for_status(resp.status_code)}",
+                    f"STT 接口返回 {resp.status_code}: {resp.text[:200]}{_diagnostic_hint(resp.status_code, resp.text)}",
                     self._api_key,
                 ),
                 retryable=_is_retryable_status(resp.status_code),
@@ -2312,7 +2324,7 @@ class OpenAIClient(LLMClient):
         if resp.status_code >= 400:
             raise LLMError(
                 _safe_error_message(
-                    f"Images 接口返回 {resp.status_code}: {resp.text[:200]}{_hint_for_status(resp.status_code)}",
+                    f"Images 接口返回 {resp.status_code}: {resp.text[:200]}{_diagnostic_hint(resp.status_code, resp.text)}",
                     self._api_key,
                 ),
                 retryable=_is_retryable_status(resp.status_code),
@@ -2369,6 +2381,7 @@ class AnthropicClient(LLMClient):
         protocol_profile: str = LLM_PROTOCOL_PROFILE_STANDARD,
         identity: ClientIdentity | None = None,
         compatibility_headers: Mapping[str, str] | None = None,
+        provider_scope: str | None = None,
     ):
         self._api_key = api_key
         self._base_url = normalize_base_url(base_url or "https://api.anthropic.com/v1")
@@ -2376,14 +2389,10 @@ class AnthropicClient(LLMClient):
         self._proxy_url = proxy_url
         self._protocol_profile = protocol_profile
         self._identity = identity
+        self._provider_scope = provider_scope or f"{self._base_url}|{protocol_profile}"
         self._compatibility_headers = dict(compatibility_headers or {})
-        self._runtime_headers = (
-            {"X-Claude-Code-Session-Id": str(uuid.uuid4())}
-            if identity is not None and identity.profile == "claude_code"
-            else {}
-        )
 
-    def _headers(self) -> dict[str, str]:
+    def _headers(self, request: ModelRequest | None = None) -> dict[str, str]:
         _activate_error_secrets(self._compatibility_headers.values())
         # 协议必需头：x-api-key / anthropic-version / Content-Type。
         # 身份头（UA、x-app 等）由集中身份目录提供，不再发送 TelePilot 产品 UA；
@@ -2405,10 +2414,20 @@ class AnthropicClient(LLMClient):
                     "x-app": "cli",
                 }
             )
+        runtime_headers: dict[str, str] = {}
+        if self._identity is not None:
+            context = ClientRuntimeContext.from_metadata(
+                request.metadata if request is not None else None,
+                provider_scope=self._provider_scope,
+            )
+            runtime_headers = context.headers_for_identity(
+                self._identity.profile,
+                model=request.model if request is not None else self._model,
+            )
         return plan_request_headers(
             system_headers=system_headers,
             identity_headers=self._identity.headers() if self._identity is not None else None,
-            runtime_headers=self._runtime_headers,
+            runtime_headers=runtime_headers,
             compatibility_headers=self._compatibility_headers,
         )
 
@@ -2496,7 +2515,7 @@ class AnthropicClient(LLMClient):
                                 break
                         raise LLMError(
                             _safe_error_message(
-                                f"Anthropic 接口返回 {resp.status_code}: {error_body[:200]}{_hint_for_status(resp.status_code)}",
+                                f"Anthropic 接口返回 {resp.status_code}: {error_body[:200]}{_diagnostic_hint(resp.status_code, error_body)}",
                                 self._api_key,
                             ),
                             retryable=_is_retryable_status(resp.status_code),
@@ -2666,7 +2685,7 @@ class AnthropicClient(LLMClient):
             client_kwargs["trust_env"] = False
         try:
             async with httpx.AsyncClient(**client_kwargs) as cli:
-                resp = await cli.post(url, headers=self._headers(), json=body)
+                resp = await cli.post(url, headers=self._headers(request), json=body)
         except httpx.HTTPError as exc:
             raise LLMError(
                 _safe_error_message(_describe_http_error(exc, self._base_url), self._api_key),
@@ -2675,7 +2694,7 @@ class AnthropicClient(LLMClient):
         if resp.status_code >= 400:
             raise LLMError(
                 _safe_error_message(
-                    f"Anthropic 接口返回 {resp.status_code}: {resp.text[:200]}{_hint_for_status(resp.status_code)}",
+                    f"Anthropic 接口返回 {resp.status_code}: {resp.text[:200]}{_diagnostic_hint(resp.status_code, resp.text)}",
                     self._api_key,
                 ),
                 retryable=_is_retryable_status(resp.status_code),
@@ -2782,7 +2801,12 @@ class AnthropicClient(LLMClient):
 
         try:
             async with httpx.AsyncClient(**client_kwargs) as cli:
-                async with cli.stream("POST", url, headers=self._headers(), json=body) as resp:
+                async with cli.stream(
+                    "POST",
+                    url,
+                    headers=self._headers(request),
+                    json=body,
+                ) as resp:
                     if resp.status_code >= 400:
                         error_body = ""
                         async for chunk in resp.aiter_text():
@@ -2792,7 +2816,7 @@ class AnthropicClient(LLMClient):
                         raise LLMError(
                             _safe_error_message(
                                 f"Anthropic streaming 接口返回 {resp.status_code}: "
-                                f"{error_body[:200]}{_hint_for_status(resp.status_code)}",
+                                f"{error_body[:200]}{_diagnostic_hint(resp.status_code, error_body)}",
                                 self._api_key,
                             ),
                             retryable=_is_retryable_status(resp.status_code),
@@ -3030,7 +3054,7 @@ class AnthropicClient(LLMClient):
                                 break
                         raise LLMError(
                             _safe_error_message(
-                                f"Anthropic streaming 接口返回 {resp.status_code}: {error_body[:200]}{_hint_for_status(resp.status_code)}",
+                                f"Anthropic streaming 接口返回 {resp.status_code}: {error_body[:200]}{_diagnostic_hint(resp.status_code, error_body)}",
                                 self._api_key,
                             ),
                             retryable=_is_retryable_status(resp.status_code),
@@ -3174,36 +3198,80 @@ class ResponsesClient(LLMClient):
         proxy_url: str | None = None,
         identity: ClientIdentity | None = None,
         compatibility_headers: Mapping[str, str] | None = None,
+        protocol_profile: str = LLM_PROTOCOL_PROFILE_STANDARD,
+        provider_scope: str | None = None,
     ):
         self._api_key = api_key
         self._base_url = normalize_base_url(base_url or "https://api.openai.com/v1")
         self._model = model
         self._proxy_url = proxy_url
         self._identity = identity
+        self._protocol_profile = resolve_protocol_profile(
+            LLM_API_FORMAT_RESPONSES,
+            protocol_profile,
+            base_url=self._base_url,
+            model=model,
+            infer_when_standard=True,
+        )
+        self._provider_scope = provider_scope or (
+            f"{self._base_url}|{self._protocol_profile.name}"
+        )
         self._compatibility_headers = dict(compatibility_headers or {})
-        request_session_id = str(uuid.uuid4())
-        if identity is not None and identity.profile == "codex_tui":
-            self._runtime_headers = {
-                "session-id": request_session_id,
-                "thread-id": request_session_id,
-                "x-client-request-id": request_session_id,
-            }
-        elif identity is not None and identity.profile == "codex_desktop":
-            self._runtime_headers = {
-                "session_id": request_session_id,
-                "x-client-request-id": request_session_id,
-            }
-        elif identity is not None and identity.profile == "grok_cli":
-            self._runtime_headers = {
-                "x-grok-conv-id": request_session_id,
-                "x-grok-session-id": request_session_id,
-                "x-grok-req-id": str(uuid.uuid4()),
-                "x-grok-agent-id": str(uuid.uuid4()),
-                "x-grok-turn-idx": "1",
-                "x-grok-model-override": model,
-            }
+
+    def _client_kwargs(self, timeout_seconds: int | None) -> dict[str, object]:
+        kwargs: dict[str, object] = {"timeout": _timeout_for_call(self._base_url, timeout_seconds)}
+        if self._proxy_url:
+            kwargs["proxy"] = self._proxy_url
         else:
-            self._runtime_headers = {}
+            kwargs["trust_env"] = False
+        return kwargs
+
+    def _runtime_headers(self, request: ModelRequest | None = None) -> dict[str, str]:
+        if self._identity is None:
+            return {}
+        context = ClientRuntimeContext.from_metadata(
+            request.metadata if request is not None else None,
+            provider_scope=self._provider_scope,
+        )
+        return context.headers_for_identity(
+            self._identity.profile,
+            model=request.model if request is not None else self._model,
+        )
+
+    def _capture_response_metadata(self, response: httpx.Response) -> None:
+        """Transport-specific clients may retain bounded diagnostic headers."""
+
+    def _http_error_diagnostic_kwargs(
+        self,
+        response: httpx.Response,
+        body: str,
+    ) -> dict[str, Any]:
+        self._capture_response_metadata(response)
+        fact = llm_diag.diagnose_http_error(
+            response.status_code,
+            body,
+            api_key=self._api_key,
+            base_url=self._base_url,
+        )
+        return {
+            "category": fact.category,
+            "upstream_status_code": fact.upstream_status_code,
+            "upstream_error_code": fact.upstream_error_code,
+            "upstream_error_message": fact.upstream_error_message,
+            "upstream_error_detail": fact.upstream_error_detail,
+            "upstream_request_id": fact.upstream_request_id,
+            "client_request_id": fact.client_request_id,
+            "upstream_summary": fact.upstream_summary,
+        }
+
+    def _network_error(self, exc: httpx.HTTPError) -> LLMError:
+        return LLMError(
+            _safe_error_message(
+                _describe_http_error(exc, self._base_url),
+                self._api_key,
+            ),
+            retryable=True,
+        )
 
     async def complete(
         self,
@@ -3217,12 +3285,22 @@ class ResponsesClient(LLMClient):
         reasoning_effort: str | None = None,
         timeout_seconds: int | None = None,
     ) -> LLMResult:
+        if images and "images" in self._protocol_profile.hard_disabled_capabilities:
+            raise LLMError(
+                f"{self._protocol_profile.name} 不支持图片输入",
+                scope=LLMErrorScope.CAPABILITY_MISMATCH,
+            )
+        if web_search and "web_search" in self._protocol_profile.hard_disabled_capabilities:
+            raise LLMError(
+                f"{self._protocol_profile.name} 不支持原生联网搜索",
+                scope=LLMErrorScope.CAPABILITY_MISMATCH,
+            )
         url = provider_endpoint(self._base_url, LLM_API_FORMAT_RESPONSES)
         headers = _llm_headers(
             identity=self._identity,
             accept="application/json",
             compatibility_headers=self._compatibility_headers,
-            runtime_headers=self._runtime_headers,
+            runtime_headers=self._runtime_headers(),
         )
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
@@ -3258,33 +3336,28 @@ class ResponsesClient(LLMClient):
                 size = "medium"
             body["tools"] = [{"type": "web_search", "search_context_size": size}]
             body["include"] = ["web_search_call.action.sources"]
+        body = plan_responses_body(body, self._protocol_profile)
 
-        client_kwargs: dict[str, object] = {"timeout": _timeout_for_call(self._base_url, timeout_seconds)}
-        if self._proxy_url:
-            client_kwargs["proxy"] = self._proxy_url
-        else:
-            client_kwargs["trust_env"] = False
+        client_kwargs = self._client_kwargs(timeout_seconds)
         try:
             async with httpx.AsyncClient(**client_kwargs) as cli:
                 resp = await _post_responses_compatible(cli, url, headers=headers, body=body)
         except httpx.HTTPError as exc:
-            raise LLMError(
-                _safe_error_message(
-                    _describe_http_error(exc, self._base_url),
-                    self._api_key,
-                ),
-                retryable=True,
-            ) from None
+            raise self._network_error(exc) from None
+
+        self._capture_response_metadata(resp)
 
         if resp.status_code >= 400:
+            response_body = _response_text(resp)
             raise LLMError(
                 _safe_error_message(
-                    f"Responses 接口返回 {resp.status_code}: {_response_text(resp)[:200]}{_hint_for_status(resp.status_code)}",
+                    f"Responses 接口返回 {resp.status_code}: {response_body[:200]}{_diagnostic_hint(resp.status_code, response_body)}",
                     self._api_key,
                 ),
                 retryable=_is_retryable_status(resp.status_code),
-                scope=_error_scope_for_http(resp.status_code, _response_text(resp)),
+                scope=_error_scope_for_http(resp.status_code, response_body),
                 status_code=resp.status_code,
+                **self._http_error_diagnostic_kwargs(resp, response_body),
             )
 
         data = _decode_responses_payload("Responses", resp, self._api_key)
@@ -3314,8 +3387,9 @@ class ResponsesClient(LLMClient):
             provider_status=normalized.provider_status,
         )
 
+
     async def invoke(self, request: ModelRequest) -> ModelResponse:
-        capabilities_for_api_format(LLM_API_FORMAT_RESPONSES).validate(
+        _responses_capabilities_for_profile(self._protocol_profile).validate(
             request,
             LLM_API_FORMAT_RESPONSES,
         )
@@ -3325,7 +3399,7 @@ class ResponsesClient(LLMClient):
             identity=self._identity,
             accept="application/json",
             compatibility_headers=self._compatibility_headers,
-            runtime_headers=self._runtime_headers,
+            runtime_headers=self._runtime_headers(request),
         )
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
@@ -3360,29 +3434,26 @@ class ResponsesClient(LLMClient):
                 size = "medium"
             body.setdefault("tools", []).append({"type": "web_search", "search_context_size": size})
             body["include"] = ["web_search_call.action.sources"]
+        body = plan_responses_body(body, self._protocol_profile)
 
-        client_kwargs: dict[str, object] = {"timeout": _timeout_for_call(self._base_url, None)}
-        if self._proxy_url:
-            client_kwargs["proxy"] = self._proxy_url
-        else:
-            client_kwargs["trust_env"] = False
+        client_kwargs = self._client_kwargs(None)
         try:
             async with httpx.AsyncClient(**client_kwargs) as cli:
                 resp = await _post_responses_compatible(cli, url, headers=headers, body=body)
         except httpx.HTTPError as exc:
-            raise LLMError(
-                _safe_error_message(_describe_http_error(exc, self._base_url), self._api_key),
-                retryable=True,
-            ) from None
+            raise self._network_error(exc) from None
+        self._capture_response_metadata(resp)
         if resp.status_code >= 400:
+            response_body = _response_text(resp)
             raise LLMError(
                 _safe_error_message(
-                    f"Responses 接口返回 {resp.status_code}: {_response_text(resp)[:200]}{_hint_for_status(resp.status_code)}",
+                    f"Responses 接口返回 {resp.status_code}: {response_body[:200]}{_diagnostic_hint(resp.status_code, response_body)}",
                     self._api_key,
                 ),
                 retryable=_is_retryable_status(resp.status_code),
-                scope=_error_scope_for_http(resp.status_code, _response_text(resp)),
+                scope=_error_scope_for_http(resp.status_code, response_body),
                 status_code=resp.status_code,
+                **self._http_error_diagnostic_kwargs(resp, response_body),
             )
         data = _decode_responses_payload("Responses", resp, self._api_key)
         return _responses_structured_response(
@@ -3395,7 +3466,7 @@ class ResponsesClient(LLMClient):
     ) -> AsyncIterator[ModelStreamEvent]:
         """Expose real Responses API deltas while preserving function calls."""
 
-        capabilities_for_api_format(LLM_API_FORMAT_RESPONSES).validate(
+        _responses_capabilities_for_profile(self._protocol_profile).validate(
             replace(request, stream=True),
             LLM_API_FORMAT_RESPONSES,
         )
@@ -3405,7 +3476,7 @@ class ResponsesClient(LLMClient):
             identity=self._identity,
             accept="text/event-stream",
             compatibility_headers=self._compatibility_headers,
-            runtime_headers=self._runtime_headers,
+            runtime_headers=self._runtime_headers(request),
         )
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
@@ -3434,30 +3505,80 @@ class ResponsesClient(LLMClient):
             body["temperature"] = _normalize_temperature(request.temperature)
         if request.reasoning_effort:
             body["reasoning"] = {"effort": _normalize_reasoning_effort(request.reasoning_effort)}
+        if request.web_search:
+            size = (request.web_search_context_size or "medium").lower()
+            if size not in {"low", "medium", "high"}:
+                size = "medium"
+            body.setdefault("tools", []).append(
+                {"type": "web_search", "search_context_size": size}
+            )
+            body["include"] = ["web_search_call.action.sources"]
+        body = plan_responses_body(body, self._protocol_profile)
 
-        client_kwargs: dict[str, object] = {"timeout": _timeout_for_call(self._base_url, None)}
-        if self._proxy_url:
-            client_kwargs["proxy"] = self._proxy_url
-        else:
-            client_kwargs["trust_env"] = False
+        client_kwargs = self._client_kwargs(None)
 
         model_name = request.model or self._model
         text_parts: list[str] = []
         reasoning_parts: list[str] = []
         function_calls: dict[str, dict[str, Any]] = {}
         function_call_aliases: dict[str, str] = {}
+        indexed_output_items: dict[int, dict[str, Any]] = {}
+        unindexed_output_items: list[dict[str, Any]] = []
         last_response: dict[str, Any] | None = None
         terminal_sent = False
+
+        def recorded_output_items() -> list[dict[str, Any]]:
+            return [
+                *(
+                    dict(indexed_output_items[index])
+                    for index in sorted(indexed_output_items)
+                ),
+                *(dict(item) for item in unindexed_output_items),
+            ]
 
         def terminal_response(*, stream_fallback: bool = False) -> ModelResponse:
             if last_response is not None:
                 response = dict(last_response)
-                visible = "".join(text_parts) or "".join(reasoning_parts)
+                visible = "".join(text_parts)
                 if visible and not response.get("output_text"):
                     response["output_text"] = visible
+                existing_output = response.get("output")
+                merged_output = (
+                    list(existing_output)
+                    if isinstance(existing_output, list) and existing_output
+                    else recorded_output_items()
+                )
+                reasoning_text = "".join(reasoning_parts)
+                if reasoning_text:
+                    reasoning_item = next(
+                        (
+                            item
+                            for item in merged_output
+                            if isinstance(item, dict) and item.get("type") == "reasoning"
+                        ),
+                        None,
+                    )
+                    if reasoning_item is None:
+                        merged_output.insert(
+                            0,
+                            {
+                                "type": "reasoning",
+                                "content": [
+                                    {
+                                        "type": "reasoning_text",
+                                        "text": reasoning_text,
+                                    }
+                                ],
+                            },
+                        )
+                    elif not _responses_reasoning_text_from_item(reasoning_item):
+                        reasoning_item["content"] = [
+                            {
+                                "type": "reasoning_text",
+                                "text": reasoning_text,
+                            }
+                        ]
                 if function_calls:
-                    existing_output = response.get("output")
-                    merged_output = list(existing_output) if isinstance(existing_output, list) else []
                     seen_keys: set[str] = set()
                     for item in merged_output:
                         if not isinstance(item, dict) or item.get("type") != "function_call":
@@ -3478,13 +3599,34 @@ class ResponsesClient(LLMClient):
                                 item["name"] = current.get("name") or ""
                             seen_keys.add(key)
                     merged_output.extend(item for key, item in function_calls.items() if key not in seen_keys)
+                if merged_output:
                     response["output"] = merged_output
             else:
+                output = recorded_output_items()
+                reasoning_text = "".join(reasoning_parts)
+                if reasoning_text and not any(
+                    item.get("type") == "reasoning" for item in output
+                ):
+                    output.insert(
+                        0,
+                        {
+                            "type": "reasoning",
+                            "content": [
+                                {
+                                    "type": "reasoning_text",
+                                    "text": reasoning_text,
+                                }
+                            ],
+                        },
+                    )
+                output.extend(
+                    item for item in function_calls.values() if item not in output
+                )
                 response = {
                     "model": model_name,
                     "status": "completed",
-                    "output_text": "".join(text_parts) or "".join(reasoning_parts),
-                    "output": list(function_calls.values()),
+                    "output_text": "".join(text_parts),
+                    "output": output,
                 }
             return _responses_structured_response(
                 response,
@@ -3497,6 +3639,7 @@ class ResponsesClient(LLMClient):
         try:
             async with httpx.AsyncClient(**client_kwargs) as cli:
                 async with cli.stream("POST", url, headers=headers, json=body) as resp:
+                    self._capture_response_metadata(resp)
                     if resp.status_code >= 400:
                         error_body = ""
                         async for chunk in resp.aiter_text():
@@ -3506,12 +3649,13 @@ class ResponsesClient(LLMClient):
                         raise LLMError(
                             _safe_error_message(
                                 f"Responses streaming 接口返回 {resp.status_code}: "
-                                f"{error_body[:200]}{_hint_for_status(resp.status_code)}",
+                                f"{error_body[:200]}{_diagnostic_hint(resp.status_code, error_body)}",
                                 self._api_key,
                             ),
                             retryable=_is_retryable_status(resp.status_code),
                             scope=_error_scope_for_http(resp.status_code, error_body),
                             status_code=resp.status_code,
+                            **self._http_error_diagnostic_kwargs(resp, error_body),
                         )
                     content_type = str(getattr(resp, "headers", {}).get("content-type") or "")
                     if "json" in content_type.lower():
@@ -3559,11 +3703,10 @@ class ResponsesClient(LLMClient):
                             event_type = str(payload.get("type") or current_event or "")
                             if event_type in {"error", "response.error"}:
                                 error = payload.get("error") or payload
-                                raise LLMError(
-                                    _safe_error_message(
-                                        f"Responses streaming 返回错误事件: {str(error)[:200]}",
-                                        self._api_key,
-                                    )
+                                raise _responses_event_error(
+                                    "Responses streaming 返回错误事件",
+                                    error,
+                                    self._api_key,
                                 )
                             response = payload.get("response")
                             if isinstance(response, dict):
@@ -3580,21 +3723,31 @@ class ResponsesClient(LLMClient):
                                     status == "incomplete"
                                     and incomplete_reason not in _RESPONSES_ALLOWED_INCOMPLETE_REASONS
                                 ):
-                                    raise LLMError(
-                                        _safe_error_message(
-                                            f"Responses streaming 结束状态异常: {status}: {str(incomplete or response.get('error') or '')[:200]}",
-                                            self._api_key,
-                                        )
+                                    raise _responses_event_error(
+                                        f"Responses streaming 结束状态异常: {status}",
+                                        payload,
+                                        self._api_key,
                                     )
-                                if event_type == "response.completed":
+                                if event_type in {"response.completed", "response.incomplete"}:
                                     terminal_sent = True
                                     yield ModelStreamEvent(response=terminal_response())
                                     return
+                                if event_type == "response.failed":
+                                    raise _responses_event_error(
+                                        "Responses streaming 返回失败事件",
+                                        payload,
+                                        self._api_key,
+                                    )
                             if event_type == "response.output_text.delta":
                                 delta = payload.get("delta")
                                 if isinstance(delta, str) and delta:
                                     text_parts.append(delta)
                                     yield ModelStreamEvent(delta=delta)
+                            elif event_type == "response.output_text.done":
+                                text = payload.get("text")
+                                if isinstance(text, str) and text and not text_parts:
+                                    text_parts.append(text)
+                                    yield ModelStreamEvent(delta=text)
                             elif event_type in {
                                 "response.reasoning_summary_text.delta",
                                 "response.reasoning_text.delta",
@@ -3604,10 +3757,28 @@ class ResponsesClient(LLMClient):
                                     reasoning_parts.append(delta)
                                     yield ModelStreamEvent(reasoning_delta=delta)
                             elif event_type in {
+                                "response.reasoning_summary_text.done",
+                                "response.reasoning_text.done",
+                            }:
+                                text = payload.get("text")
+                                if isinstance(text, str) and text and not reasoning_parts:
+                                    reasoning_parts.append(text)
+                                    yield ModelStreamEvent(reasoning_delta=text)
+                            elif event_type in {
                                 "response.output_item.added",
                                 "response.output_item.done",
                             }:
                                 item = payload.get("item")
+                                if (
+                                    event_type == "response.output_item.done"
+                                    and isinstance(item, dict)
+                                    and item.get("type")
+                                ):
+                                    output_index = payload.get("output_index")
+                                    if isinstance(output_index, int):
+                                        indexed_output_items[output_index] = dict(item)
+                                    else:
+                                        unindexed_output_items.append(dict(item))
                                 if isinstance(item, dict) and item.get("type") == "function_call":
                                     item_id = str(item.get("id") or "")
                                     call_id = str(item.get("call_id") or "")
@@ -3654,14 +3825,12 @@ class ResponsesClient(LLMClient):
         except LLMError:
             raise
         except httpx.HTTPError as exc:
-            raise LLMError(
-                _safe_error_message(_describe_http_error(exc, self._base_url), self._api_key),
-                retryable=True,
-            ) from None
+            raise self._network_error(exc) from None
 
         if not terminal_sent:
             raise LLMError(
-                "Responses streaming 响应提前结束，缺少 response.completed 终态",
+                "Responses streaming 响应提前结束，缺少 response.completed / "
+                "response.incomplete 终态",
                 retryable=True,
             )
 
@@ -3677,12 +3846,22 @@ class ResponsesClient(LLMClient):
         reasoning_effort: str | None = None,
         timeout_seconds: int | None = None,
     ) -> AsyncIterator[LLMStreamChunk]:
+        if images and "images" in self._protocol_profile.hard_disabled_capabilities:
+            raise LLMError(
+                f"{self._protocol_profile.name} 不支持图片输入",
+                scope=LLMErrorScope.CAPABILITY_MISMATCH,
+            )
+        if web_search and "web_search" in self._protocol_profile.hard_disabled_capabilities:
+            raise LLMError(
+                f"{self._protocol_profile.name} 不支持原生联网搜索",
+                scope=LLMErrorScope.CAPABILITY_MISMATCH,
+            )
         url = provider_endpoint(self._base_url, LLM_API_FORMAT_RESPONSES)
         headers = _llm_headers(
             identity=self._identity,
             accept="text/event-stream",
             compatibility_headers=self._compatibility_headers,
-            runtime_headers=self._runtime_headers,
+            runtime_headers=self._runtime_headers(),
         )
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
@@ -3714,21 +3893,20 @@ class ResponsesClient(LLMClient):
                 size = "medium"
             body["tools"] = [{"type": "web_search", "search_context_size": size}]
             body["include"] = ["web_search_call.action.sources"]
+        body = plan_responses_body(body, self._protocol_profile)
 
-        client_kwargs: dict[str, object] = {"timeout": _timeout_for_call(self._base_url, timeout_seconds)}
-        if self._proxy_url:
-            client_kwargs["proxy"] = self._proxy_url
-        else:
-            client_kwargs["trust_env"] = False
+        client_kwargs = self._client_kwargs(timeout_seconds)
 
         model_name = self._model
         input_tokens = 0
         output_tokens = 0
         final_sent = False
+        saw_output_text = False
 
         try:
             async with httpx.AsyncClient(**client_kwargs) as cli:
                 async with cli.stream("POST", url, headers=headers, json=body) as resp:
+                    self._capture_response_metadata(resp)
                     if resp.status_code >= 400:
                         error_body = ""
                         async for chunk in resp.aiter_text():
@@ -3737,12 +3915,13 @@ class ResponsesClient(LLMClient):
                                 break
                         raise LLMError(
                             _safe_error_message(
-                                f"Responses streaming 接口返回 {resp.status_code}: {error_body[:200]}{_hint_for_status(resp.status_code)}",
+                                f"Responses streaming 接口返回 {resp.status_code}: {error_body[:200]}{_diagnostic_hint(resp.status_code, error_body)}",
                                 self._api_key,
                             ),
                             retryable=_is_retryable_status(resp.status_code),
                             scope=_error_scope_for_http(resp.status_code, error_body),
                             status_code=resp.status_code,
+                            **self._http_error_diagnostic_kwargs(resp, error_body),
                         )
 
                     response_headers = getattr(resp, "headers", {})
@@ -3789,11 +3968,10 @@ class ResponsesClient(LLMClient):
                             payload_type = str(payload.get("type") or current_event or "")
                             if payload_type in {"error", "response.error"}:
                                 error = payload.get("error") or payload
-                                raise LLMError(
-                                    _safe_error_message(
-                                        f"Responses streaming 返回错误事件: {str(error)[:200]}",
-                                        self._api_key,
-                                    )
+                                raise _responses_event_error(
+                                    "Responses streaming 返回错误事件",
+                                    error,
+                                    self._api_key,
                                 )
                             response = payload.get("response")
                             if isinstance(response, dict):
@@ -3803,13 +3981,12 @@ class ResponsesClient(LLMClient):
                                 output_tokens = int(usage.get("output_tokens") or output_tokens or 0)
                                 status = str(response.get("status") or "")
                                 if status in {"failed", "cancelled"}:
-                                    raise LLMError(
-                                        _safe_error_message(
-                                            f"Responses streaming 结束状态异常: {status}",
-                                            self._api_key,
-                                        )
+                                    raise _responses_event_error(
+                                        f"Responses streaming 结束状态异常: {status}",
+                                        payload,
+                                        self._api_key,
                                     )
-                                if payload_type == "response.completed":
+                                if payload_type in {"response.completed", "response.incomplete"}:
                                     final_sent = True
                                     yield LLMStreamChunk(
                                         model=model_name,
@@ -3818,32 +3995,43 @@ class ResponsesClient(LLMClient):
                                         done=True,
                                     )
                                     return
+                                if payload_type == "response.failed":
+                                    raise _responses_event_error(
+                                        "Responses streaming 返回失败事件",
+                                        payload,
+                                        self._api_key,
+                                    )
                             if payload_type == "response.output_text.delta":
                                 delta = payload.get("delta")
                                 if isinstance(delta, str) and delta:
+                                    saw_output_text = True
                                     yield LLMStreamChunk(delta=delta, model=model_name)
                             elif payload_type == "response.output_text.done":
                                 text = payload.get("text")
-                                if isinstance(text, str) and text and not final_sent:
-                                    # done 事件只用于兼容不发送 completed 的反代；不重复输出文本。
-                                    continue
+                                if (
+                                    isinstance(text, str)
+                                    and text
+                                    and not saw_output_text
+                                    and not final_sent
+                                ):
+                                    saw_output_text = True
+                                    yield LLMStreamChunk(
+                                        delta=text,
+                                        model=model_name,
+                                        stream_fallback=True,
+                                    )
                             continue
                         if not line:
                             current_event = ""
         except LLMError:
             raise
         except httpx.HTTPError as exc:
-            raise LLMError(
-                _safe_error_message(
-                    _describe_http_error(exc, self._base_url),
-                    self._api_key,
-                ),
-                retryable=True,
-            ) from None
+            raise self._network_error(exc) from None
 
         if not final_sent:
             raise LLMError(
-                "Responses streaming 响应提前结束，缺少 response.completed 终态",
+                "Responses streaming 响应提前结束，缺少 response.completed / "
+                "response.incomplete 终态",
                 retryable=True,
             )
 
@@ -3872,12 +4060,17 @@ class ResponsesClient(LLMClient):
         """
         if web_search:
             raise LLMError("图片生成不支持联网搜索，请关闭 web_search")
+        if "images" in self._protocol_profile.hard_disabled_capabilities:
+            raise LLMError(
+                f"{self._protocol_profile.name} 不支持图片生成",
+                scope=LLMErrorScope.CAPABILITY_MISMATCH,
+            )
         url = provider_endpoint(self._base_url, LLM_API_FORMAT_RESPONSES)
         headers = _llm_headers(
             identity=self._identity,
             accept="application/json",
             compatibility_headers=self._compatibility_headers,
-            runtime_headers=self._runtime_headers,
+            runtime_headers=self._runtime_headers(),
         )
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
@@ -3913,12 +4106,9 @@ class ResponsesClient(LLMClient):
         normalized_effort = _normalize_reasoning_effort(reasoning_effort)
         if normalized_effort is not None:
             body["reasoning"] = {"effort": normalized_effort}
+        body = plan_responses_body(body, self._protocol_profile)
 
-        client_kwargs: dict[str, object] = {"timeout": _timeout_for_call(self._base_url, timeout_seconds)}
-        if self._proxy_url:
-            client_kwargs["proxy"] = self._proxy_url
-        else:
-            client_kwargs["trust_env"] = False
+        client_kwargs = self._client_kwargs(timeout_seconds)
         try:
             async with httpx.AsyncClient(**client_kwargs) as cli:
                 resp = await _post_responses_compatible(cli, url, headers=headers, body=body)
@@ -3934,7 +4124,7 @@ class ResponsesClient(LLMClient):
         if resp.status_code >= 400:
             raise LLMError(
                 _safe_error_message(
-                    f"Responses 生图接口返回 {resp.status_code}: {_response_text(resp)[:200]}{_hint_for_status(resp.status_code)}",
+                    f"Responses 生图接口返回 {resp.status_code}: {_response_text(resp)[:200]}{_diagnostic_hint(resp.status_code, _response_text(resp))}",
                     self._api_key,
                 ),
                 retryable=_is_retryable_status(resp.status_code),
@@ -3959,6 +4149,315 @@ class ResponsesClient(LLMClient):
         )
 
 
+class GatewayResponsesClient(ResponsesClient):
+    """复用 Responses codec，仅把 transport 与内部路由元数据切到 Unix Socket。"""
+
+    def __init__(
+        self,
+        *,
+        provider_id: int,
+        model: str,
+        socket_path: str,
+        request_scope: str = REQUEST_SCOPE_INFERENCE,
+    ) -> None:
+        super().__init__(
+            api_key="",
+            base_url="http://gateway/v1",
+            model=model,
+            protocol_profile="codex_responses",
+            provider_scope=f"gateway-provider:{provider_id}",
+            identity=None,
+            compatibility_headers=None,
+        )
+        self._gateway_provider_id = int(provider_id)
+        self._gateway_socket_path = socket_path
+        self._gateway_request_scope = request_scope
+        self._last_gateway_version: str | None = None
+        self._last_gateway_request_id: str | None = None
+        self._last_gateway_stage: str | None = None
+        self._last_outbound_request_id: str | None = None
+        self._gateway_response_seen = False
+
+    def _reset_gateway_diagnostics(self) -> None:
+        self._last_gateway_request_id = None
+        self._last_gateway_stage = None
+        self._last_outbound_request_id = None
+        self._gateway_response_seen = False
+        try:
+            from .gateway_runtime import gateway_runtime_manager
+
+            self._last_gateway_version = gateway_runtime_manager.status().version
+        except Exception:  # noqa: BLE001 - diagnostics must never block a call
+            self._last_gateway_version = None
+
+    def _runtime_headers(self, request: ModelRequest | None = None) -> dict[str, str]:
+        context = ClientRuntimeContext.from_metadata(
+            request.metadata if request is not None else None,
+            provider_scope=self._provider_scope,
+        )
+        self._last_outbound_request_id = context.request_id
+        return {
+            "X-TelePilot-Provider-ID": str(self._gateway_provider_id),
+            "X-TelePilot-Request-Scope": self._gateway_request_scope,
+            "X-TelePilot-Request-ID": context.request_id,
+            "X-TelePilot-Session-ID": context.session_id,
+            "X-TelePilot-Run-ID": context.run_id,
+            "X-TelePilot-Turn-ID": context.turn_id,
+            "X-TelePilot-Turn-Index": str(context.turn_index),
+        }
+
+    def _client_kwargs(self, timeout_seconds: int | None) -> dict[str, object]:
+        return {
+            "timeout": _timeout_for_call(self._base_url, timeout_seconds),
+            "transport": httpx.AsyncHTTPTransport(uds=self._gateway_socket_path),
+            "trust_env": False,
+        }
+
+    @property
+    def execution_backend(self) -> str:
+        return LLM_EXECUTION_BACKEND_CODEX_GATEWAY
+
+    @property
+    def gateway_version(self) -> str | None:
+        return self._last_gateway_version
+
+    @property
+    def gateway_request_id(self) -> str | None:
+        return self._last_gateway_request_id or self._last_outbound_request_id
+
+    @property
+    def gateway_stage(self) -> str | None:
+        return self._last_gateway_stage
+
+    def _capture_response_metadata(self, response: httpx.Response) -> None:
+        self._gateway_response_seen = True
+        headers = response.headers
+        version = str(headers.get("X-TelePilot-Gateway-Version") or "").strip()
+        request_id = str(headers.get("X-TelePilot-Gateway-Request-ID") or "").strip()
+        stage = str(headers.get("X-TelePilot-Gateway-Stage") or "").strip()
+        if version:
+            self._last_gateway_version = version[:64]
+        if request_id:
+            self._last_gateway_request_id = request_id[:128]
+        if stage:
+            self._last_gateway_stage = stage[:64]
+
+    def _http_error_diagnostic_kwargs(
+        self,
+        response: httpx.Response,
+        body: str,
+    ) -> dict[str, Any]:
+        self._capture_response_metadata(response)
+        payload: str | Mapping[str, Any] = body
+        try:
+            decoded = json.loads(body)
+            if isinstance(decoded, Mapping):
+                payload = decoded
+                error = decoded.get("error")
+                source = error if isinstance(error, Mapping) else decoded
+                request_id = str(source.get("request_id") or "").strip()
+                stage = str(source.get("gateway_stage") or "").strip()
+                if request_id:
+                    self._last_gateway_request_id = request_id[:128]
+                if stage:
+                    self._last_gateway_stage = stage[:64]
+        except (TypeError, ValueError):
+            pass
+        fact = llm_diag.diagnose_http_error(
+            response.status_code,
+            payload,
+            request_id=self._last_gateway_request_id or self._last_outbound_request_id,
+            gateway_stage=self._last_gateway_stage,
+        )
+        return {
+            "category": fact.category,
+            "upstream_status_code": fact.upstream_status_code,
+            "upstream_error_code": fact.upstream_error_code,
+            "upstream_error_message": fact.upstream_error_message,
+            "upstream_error_detail": fact.upstream_error_detail,
+            "upstream_request_id": fact.upstream_request_id,
+            "client_request_id": fact.client_request_id,
+            "request_id": fact.request_id,
+            "gateway_stage": fact.gateway_stage,
+            "gateway_version": self._last_gateway_version,
+            "execution_backend": LLM_EXECUTION_BACKEND_CODEX_GATEWAY,
+            "upstream_summary": fact.upstream_summary,
+        }
+
+    def _network_error(self, exc: httpx.HTTPError) -> LLMError:
+        return LLMError(
+            _safe_error_message(_describe_http_error(exc, self._base_url), None),
+            retryable=True,
+            scope=LLMErrorScope.TRANSIENT,
+            category=llm_diag.DIAG_GATEWAY_UNAVAILABLE,
+            request_id=self._last_outbound_request_id,
+            gateway_stage="transport",
+            gateway_version=self._last_gateway_version,
+            execution_backend=LLM_EXECUTION_BACKEND_CODEX_GATEWAY,
+        )
+
+    def _enrich_gateway_error(self, exc: LLMError) -> LLMError:
+        exc.request_id = exc.request_id or self._last_gateway_request_id or self._last_outbound_request_id
+        exc.gateway_stage = (
+            exc.gateway_stage
+            or self._last_gateway_stage
+            or ("upstream" if self._gateway_response_seen else "transport")
+        )
+        exc.gateway_version = exc.gateway_version or self._last_gateway_version
+        exc.execution_backend = LLM_EXECUTION_BACKEND_CODEX_GATEWAY
+        if not self._gateway_response_seen and exc.category == llm_diag.DIAG_NETWORK_ERROR:
+            exc.category = llm_diag.DIAG_GATEWAY_UNAVAILABLE
+            exc.scope = LLMErrorScope.TRANSIENT
+            exc.retryable = True
+        return exc
+
+    def _decorate_result(self, result: LLMResult) -> LLMResult:
+        result.execution_backend = LLM_EXECUTION_BACKEND_CODEX_GATEWAY
+        result.gateway_version = self._last_gateway_version
+        result.gateway_request_id = self._last_gateway_request_id or self._last_outbound_request_id
+        result.gateway_stage = None
+        return result
+
+    def _decorate_response(self, response: ModelResponse) -> ModelResponse:
+        return replace(
+            response,
+            execution_backend=LLM_EXECUTION_BACKEND_CODEX_GATEWAY,
+            gateway_version=self._last_gateway_version,
+            gateway_request_id=self._last_gateway_request_id or self._last_outbound_request_id,
+            gateway_stage=None,
+        )
+
+    async def transcribe(self, audio: bytes, model: str) -> str:
+        del audio, model
+        raise NotImplementedError("Codex 客户端兼容模式（Gateway）暂不支持语音转写")
+
+    async def generate_image(
+        self,
+        system: str,
+        user: str,
+        max_tokens: int = 512,
+        images: list[bytes] | None = None,
+        web_search: bool = False,
+        web_search_context_size: str | None = None,
+        temperature: float | None = None,
+        reasoning_effort: str | None = None,
+        timeout_seconds: int | None = None,
+    ) -> LLMResult:
+        del (
+            system,
+            user,
+            max_tokens,
+            images,
+            web_search,
+            web_search_context_size,
+            temperature,
+            reasoning_effort,
+            timeout_seconds,
+        )
+        raise NotImplementedError("Codex 客户端兼容模式（Gateway）暂不支持图片生成")
+
+    async def complete(self, *args: Any, **kwargs: Any) -> LLMResult:
+        self._reset_gateway_diagnostics()
+        try:
+            return self._decorate_result(await super().complete(*args, **kwargs))
+        except LLMError as exc:
+            raise self._enrich_gateway_error(exc) from None
+
+    async def invoke(self, request: ModelRequest) -> ModelResponse:
+        self._reset_gateway_diagnostics()
+        try:
+            return self._decorate_response(await super().invoke(request))
+        except LLMError as exc:
+            raise self._enrich_gateway_error(exc) from None
+
+    async def stream_invoke(
+        self,
+        request: ModelRequest,
+    ) -> AsyncIterator[ModelStreamEvent]:
+        self._reset_gateway_diagnostics()
+        try:
+            async for event in super().stream_invoke(request):
+                if event.response is not None:
+                    event = replace(event, response=self._decorate_response(event.response))
+                yield event
+        except LLMError as exc:
+            raise self._enrich_gateway_error(exc) from None
+
+    async def stream_complete(self, *args: Any, **kwargs: Any) -> AsyncIterator[LLMStreamChunk]:
+        self._reset_gateway_diagnostics()
+        try:
+            async for chunk in super().stream_complete(*args, **kwargs):
+                if chunk.done:
+                    chunk = replace(
+                        chunk,
+                        execution_backend=LLM_EXECUTION_BACKEND_CODEX_GATEWAY,
+                        gateway_version=self._last_gateway_version,
+                        gateway_request_id=(self._last_gateway_request_id or self._last_outbound_request_id),
+                        gateway_stage=None,
+                    )
+                yield chunk
+        except LLMError as exc:
+            raise self._enrich_gateway_error(exc) from None
+
+    async def list_models(self) -> list[str]:
+        """List upstream models through the same Provider-bound Unix Socket."""
+
+        self._reset_gateway_diagnostics()
+        headers = _llm_headers(
+            accept="application/json",
+            runtime_headers=self._runtime_headers(),
+        )
+        try:
+            async with httpx.AsyncClient(**self._client_kwargs(15)) as client:
+                response = await client.get(f"{self._base_url}/models", headers=headers)
+        except httpx.HTTPError as exc:
+            raise self._network_error(exc) from None
+        self._capture_response_metadata(response)
+        if response.status_code >= 400:
+            body = _response_text(response)
+            raise LLMError(
+                _safe_error_message(
+                    f"Gateway 模型列表返回 {response.status_code}: {body[:200]}",
+                    None,
+                ),
+                retryable=_is_retryable_status(response.status_code),
+                scope=_error_scope_for_http(response.status_code, body),
+                status_code=response.status_code,
+                **self._http_error_diagnostic_kwargs(response, body),
+            )
+        try:
+            payload = response.json()
+        except ValueError:
+            raise LLMError(
+                "Gateway 模型列表响应不是合法 JSON",
+                category=llm_diag.DIAG_INVALID_RESPONSE,
+                request_id=self._last_gateway_request_id or self._last_outbound_request_id,
+                gateway_stage="response",
+                gateway_version=self._last_gateway_version,
+                execution_backend=LLM_EXECUTION_BACKEND_CODEX_GATEWAY,
+            ) from None
+        items = payload.get("data") if isinstance(payload, Mapping) else None
+        if not isinstance(items, list):
+            raise LLMError(
+                "Gateway 模型列表响应缺少 data 数组",
+                category=llm_diag.DIAG_INVALID_RESPONSE,
+                request_id=self._last_gateway_request_id or self._last_outbound_request_id,
+                gateway_stage="response",
+                gateway_version=self._last_gateway_version,
+                execution_backend=LLM_EXECUTION_BACKEND_CODEX_GATEWAY,
+            )
+        seen: set[str] = set()
+        models: list[str] = []
+        for item in items:
+            model = str(item.get("id") or "").strip() if isinstance(item, Mapping) else ""
+            if model and len(model) <= 128 and model not in seen:
+                seen.add(model)
+                models.append(model)
+            if len(models) >= 200:
+                break
+        return models
+
+
 # ────────────────────────────────────────────────────────────
 # 工厂 & 安全工具
 # ────────────────────────────────────────────────────────────
@@ -3979,6 +4478,44 @@ class LLMErrorScope(StrEnum):
     UNKNOWN = "unknown"
 
 
+def _diagnostic_body_for_error(
+    message: str,
+    *,
+    upstream_status_code: int | None,
+    upstream_error_code: str | None,
+    upstream_error_message: str | None,
+    upstream_error_detail: str | None,
+    upstream_request_id: str | None,
+    client_request_id: str | None,
+) -> str | Mapping[str, Any]:
+    structured_values = (
+        upstream_status_code,
+        upstream_error_code,
+        upstream_error_message,
+        upstream_error_detail,
+        upstream_request_id,
+        client_request_id,
+    )
+    if not any(value is not None for value in structured_values):
+        try:
+            payload = json.loads(message)
+        except (TypeError, ValueError):
+            payload = None
+        if isinstance(payload, Mapping):
+            return payload
+    return {
+        "error": {
+            "message": message,
+            "upstream_status_code": upstream_status_code,
+            "upstream_error_code": upstream_error_code,
+            "upstream_error_message": upstream_error_message,
+            "upstream_error_detail": upstream_error_detail,
+            "upstream_request_id": upstream_request_id,
+            "client_request_id": client_request_id,
+        }
+    }
+
+
 class LLMError(Exception):
     """LLM 调用层统一异常；message 已脱敏。"""
 
@@ -3989,11 +4526,73 @@ class LLMError(Exception):
         retryable: bool = False,
         scope: LLMErrorScope | str | None = None,
         status_code: int | None = None,
+        category: str | None = None,
+        upstream_status_code: int | None = None,
+        upstream_error_code: str | None = None,
+        upstream_error_message: str | None = None,
+        upstream_error_detail: str | None = None,
+        upstream_request_id: str | None = None,
+        client_request_id: str | None = None,
+        request_id: str | None = None,
+        gateway_stage: str | None = None,
+        gateway_version: str | None = None,
+        execution_backend: str | None = None,
+        upstream_summary: str | None = None,
     ):
         super().__init__(message)
-        self.retryable = retryable  # 是否可重试（timeout/429/5xx/网络错误）
-        self.scope = LLMErrorScope(scope or (LLMErrorScope.TRANSIENT if retryable else LLMErrorScope.UNKNOWN))
+        diagnostic_body = _diagnostic_body_for_error(
+            message,
+            upstream_status_code=upstream_status_code,
+            upstream_error_code=upstream_error_code,
+            upstream_error_message=upstream_error_message,
+            upstream_error_detail=upstream_error_detail,
+            upstream_request_id=upstream_request_id,
+            client_request_id=client_request_id,
+        )
+        fact = (
+            llm_diag.diagnose_http_error(
+                status_code,
+                diagnostic_body,
+                request_id=request_id,
+                gateway_stage=gateway_stage,
+            )
+            if status_code is not None
+            else None
+        )
+        inferred_category = (
+            fact.category
+            if fact is not None
+            else llm_diag.classify_message(message, retryable=retryable)
+        )
+        self.category = category or inferred_category
+        self.retryable = fact.retryable if fact is not None else retryable
+        self.scope = LLMErrorScope(
+            (fact.scope if fact else None)
+            or scope
+            or (LLMErrorScope.TRANSIENT if self.retryable else LLMErrorScope.UNKNOWN)
+        )
         self.status_code = status_code
+        self.upstream_status_code = upstream_status_code or (
+            fact.upstream_status_code if fact else None
+        )
+        self.upstream_error_code = upstream_error_code or (fact.upstream_error_code if fact else None)
+        self.upstream_error_message = upstream_error_message or (
+            fact.upstream_error_message if fact else None
+        )
+        self.upstream_error_detail = upstream_error_detail or (
+            fact.upstream_error_detail if fact else None
+        )
+        self.upstream_request_id = upstream_request_id or (
+            fact.upstream_request_id if fact else None
+        )
+        self.client_request_id = client_request_id or (
+            fact.client_request_id if fact else None
+        )
+        self.request_id = request_id or (fact.request_id if fact else None)
+        self.gateway_stage = gateway_stage or (fact.gateway_stage if fact else None)
+        self.gateway_version = (gateway_version or "").strip()[:64] or None
+        self.execution_backend = (execution_backend or "").strip()[:32] or None
+        self.upstream_summary = upstream_summary or (fact.upstream_summary if fact else None)
 
 
 class LLMCallFailed(Exception):
@@ -4008,14 +4607,67 @@ class LLMCallFailed(Exception):
         status_code: int | None = None,
         retryable: bool = False,
         scope: LLMErrorScope | str | None = None,
+        category: str | None = None,
+        upstream_status_code: int | None = None,
+        upstream_error_code: str | None = None,
+        upstream_error_message: str | None = None,
+        upstream_error_detail: str | None = None,
+        upstream_request_id: str | None = None,
+        client_request_id: str | None = None,
+        request_id: str | None = None,
+        gateway_stage: str | None = None,
+        gateway_version: str | None = None,
+        execution_backend: str | None = None,
+        upstream_summary: str | None = None,
     ):
         super().__init__(message)
         self.provider_id = provider_id
         self.provider_name = provider_name
         self.error_type = error_type  # "timeout" / "network" / "rate_limit" / "auth" / "server_error"
         self.status_code = status_code
-        self.retryable = retryable
-        self.scope = LLMErrorScope(scope or LLMErrorScope.UNKNOWN)
+        diagnostic_body = _diagnostic_body_for_error(
+            message,
+            upstream_status_code=upstream_status_code,
+            upstream_error_code=upstream_error_code,
+            upstream_error_message=upstream_error_message,
+            upstream_error_detail=upstream_error_detail,
+            upstream_request_id=upstream_request_id,
+            client_request_id=client_request_id,
+        )
+        fact = (
+            llm_diag.diagnose_http_error(
+                status_code,
+                diagnostic_body,
+                request_id=request_id,
+                gateway_stage=gateway_stage,
+            )
+            if status_code is not None
+            else None
+        )
+        self.category = category or (fact.category if fact else error_type) or llm_diag.DIAG_INVALID_RESPONSE
+        self.retryable = fact.retryable if fact is not None else retryable
+        self.scope = LLMErrorScope((fact.scope if fact else None) or scope or LLMErrorScope.UNKNOWN)
+        self.upstream_status_code = upstream_status_code or (
+            fact.upstream_status_code if fact else None
+        )
+        self.upstream_error_code = upstream_error_code or (fact.upstream_error_code if fact else None)
+        self.upstream_error_message = upstream_error_message or (
+            fact.upstream_error_message if fact else None
+        )
+        self.upstream_error_detail = upstream_error_detail or (
+            fact.upstream_error_detail if fact else None
+        )
+        self.upstream_request_id = upstream_request_id or (
+            fact.upstream_request_id if fact else None
+        )
+        self.client_request_id = client_request_id or (
+            fact.client_request_id if fact else None
+        )
+        self.request_id = request_id or (fact.request_id if fact else None)
+        self.gateway_stage = gateway_stage or (fact.gateway_stage if fact else None)
+        self.gateway_version = (gateway_version or "").strip()[:64] or None
+        self.execution_backend = (execution_backend or "").strip()[:32] or None
+        self.upstream_summary = upstream_summary or (fact.upstream_summary if fact else None)
 
 
 def _is_retryable_status(status_code: int) -> bool:
@@ -4036,15 +4688,6 @@ def _error_scope_for_http(status_code: int, body: str = "") -> LLMErrorScope:
             return LLMErrorScope.ACCOUNT_POLICY
         return LLMErrorScope.PROVIDER_LOCAL
     if status_code == 400:
-        if any(
-            word in normalized
-            for word in (
-                "upstream request failed",
-                "upstream service failed",
-                "error from provider",
-            )
-        ):
-            return LLMErrorScope.PROVIDER_LOCAL
         if any(
             word in normalized
             for word in (
@@ -4099,31 +4742,12 @@ def _safe_error_message(
     return out
 
 
-# Cloudflare 5xx 错误码的人话翻译（用户最常碰到 520，且不是应用问题）
-_CF_5XX_HINTS: dict[int, str] = {
-    520: "上游返回异常（Cloudflare 520 = 反代连不上目标 / 上游崩了；不是本项目代码问题）",
-    521: "上游服务器拒绝连接（Cloudflare 521）",
-    522: "上游连接超时（Cloudflare 522）",
-    523: "上游不可达（Cloudflare 523）",
-    524: "上游处理超时（Cloudflare 524；常见于慢模型 + 反代严格超时）",
-    525: "SSL 握手失败（Cloudflare 525）",
-    526: "SSL 证书无效（Cloudflare 526）",
-}
+def _diagnostic_hint(status: int, body: str) -> str:
+    """只从统一诊断事实生成提示，禁止各 Client 自行解释状态码。"""
 
-
-def _hint_for_status(status: int) -> str:
-    """根据 HTTP 状态码给一句人话提示，便于用户区分"我配错了"还是"反代/上游挂了"。"""
-    if status in _CF_5XX_HINTS:
-        return f"  ↳ {_CF_5XX_HINTS[status]}"
-    if status == 401 or status == 403:
-        return "  ↳ api_key 无效 / 权限不够"
-    if status == 404:
-        return "  ↳ model 名不对 / 端点不存在；试试 Fetch 模型列表选一条已支持的"
-    if status == 429:
-        return "  ↳ 限流，等会儿再试 / 或换一条不那么紧的反代"
-    if 500 <= status < 600:
-        return "  ↳ 服务器侧错误（不是 api_key / model 问题）"
-    return ""
+    category = llm_diag.classify_status_code(status, body)
+    suggestion = llm_diag.suggestion_for(category)
+    return f"  ↳ [{category}] {suggestion}" if suggestion else f"  ↳ [{category}]"
 
 
 def _describe_http_error(exc: BaseException, base_url: str | None) -> str:
@@ -4179,9 +4803,6 @@ def build_client(
       ``identity_override`` 供协议检测按顺序显式指定身份使用，正式业务调用留空
       即用 Provider 配置的 ``client_identity_profile``。
     """
-    api_key = ""
-    if provider_row.api_key_enc:
-        api_key = decrypt_str(provider_row.api_key_enc)
     model = (override_model or provider_row.default_model or "").strip()
     if not model:
         raise ValueError("LLM provider 没配 default_model，且当次调用也未提供 model 覆盖")
@@ -4192,8 +4813,34 @@ def build_client(
         or getattr(provider_row, "api_format", None)
         or default_api_format_for(provider_row.provider)
     )
+    execution_backend = getattr(provider_row, "execution_backend", "direct") or "direct"
+    if execution_backend == LLM_EXECUTION_BACKEND_CODEX_GATEWAY:
+        if fmt != LLM_API_FORMAT_RESPONSES:
+            raise ValueError("Codex 客户端兼容模式（Gateway）仅支持 Responses")
+        from .gateway_runtime import DEFAULT_GATEWAY_SOCKET
+
+        return GatewayResponsesClient(
+            provider_id=int(provider_row.id),
+            model=model,
+            socket_path=os.getenv("TELEPILOT_GATEWAY_SOCKET", DEFAULT_GATEWAY_SOCKET),
+            request_scope=request_scope,
+        )
+    api_key = ""
+    if provider_row.api_key_enc:
+        api_key = decrypt_str(provider_row.api_key_enc)
+    protocol_profile = resolve_protocol_profile(
+        fmt,
+        getattr(provider_row, "protocol_profile", LLM_PROTOCOL_PROFILE_STANDARD),
+        base_url=getattr(provider_row, "base_url", None),
+        model=model,
+        infer_when_standard=True,
+    )
     configured_identity = identity_override or getattr(provider_row, "client_identity_profile", None)
-    identity = resolve_identity(configured_identity, fmt)
+    identity = resolve_identity(
+        configured_identity,
+        fmt,
+        recommended_profile=protocol_profile.recommended_identity,
+    )
     compatibility_headers = request_headers_for_scope(
         getattr(provider_row, "request_headers_enc", None),
         request_scope,
@@ -4218,6 +4865,8 @@ def build_client(
             base_url=provider_row.base_url,
             model=model,
             proxy_url=proxy_url,
+            protocol_profile=protocol_profile.name,
+            provider_scope=f"provider:{provider_row.id}|{protocol_profile.name}",
             identity=identity,
             compatibility_headers=compatibility_headers,
         )
@@ -4227,11 +4876,8 @@ def build_client(
             base_url=provider_row.base_url,
             model=model,
             proxy_url=proxy_url,
-            protocol_profile=getattr(
-                provider_row,
-                "protocol_profile",
-                LLM_PROTOCOL_PROFILE_STANDARD,
-            ),
+            protocol_profile=protocol_profile.name,
+            provider_scope=f"provider:{provider_row.id}|{protocol_profile.name}",
             identity=identity,
             compatibility_headers=compatibility_headers,
         )
@@ -4257,21 +4903,43 @@ def build_client_from_dto(
         proxy_url: 代理 URL（优先于 dto.proxy_url）
         identity_override: 显式身份档案（协议检测用）；留空用 dto 配置。
     """
-    api_key = ""
-    if dto.api_key_enc:
-        api_key = decrypt_str(dto.api_key_enc)
     model = (override_model or dto.default_model or "").strip()
     if not model:
         raise ValueError("LLM provider 没配 default_model，且当次调用也未提供 model 覆盖")
 
     # api_format_override 用于联网搜索等单次调用协议覆盖；否则按 provider 配置。
     fmt = api_format_override or dto.api_format or default_api_format_for(dto.provider)
+    if dto.execution_backend == LLM_EXECUTION_BACKEND_CODEX_GATEWAY:
+        if fmt != LLM_API_FORMAT_RESPONSES:
+            raise ValueError("Codex 客户端兼容模式（Gateway）仅支持 Responses")
+        from .gateway_runtime import DEFAULT_GATEWAY_SOCKET
+
+        return GatewayResponsesClient(
+            provider_id=dto.id,
+            model=model,
+            socket_path=os.getenv("TELEPILOT_GATEWAY_SOCKET", DEFAULT_GATEWAY_SOCKET),
+            request_scope=request_scope,
+        )
+    api_key = ""
+    if dto.api_key_enc:
+        api_key = decrypt_str(dto.api_key_enc)
+    protocol_profile = resolve_protocol_profile(
+        fmt,
+        dto.protocol_profile,
+        base_url=dto.base_url,
+        model=model,
+        infer_when_standard=True,
+    )
 
     # proxy 合并：参数传入 > dto 内置
     final_proxy = proxy_url if proxy_url else dto.proxy_url
     # 身份依据本次实际协议解析（override 生效后）。
     configured_identity = identity_override or dto.client_identity_profile
-    identity = resolve_identity(configured_identity, fmt)
+    identity = resolve_identity(
+        configured_identity,
+        fmt,
+        recommended_profile=protocol_profile.recommended_identity,
+    )
     compatibility_headers = request_headers_for_scope(
         dto.request_headers_enc,
         request_scope,
@@ -4295,6 +4963,8 @@ def build_client_from_dto(
             base_url=dto.base_url,
             model=model,
             proxy_url=final_proxy,
+            protocol_profile=protocol_profile.name,
+            provider_scope=f"provider:{dto.id}|{protocol_profile.name}",
             identity=identity,
             compatibility_headers=compatibility_headers,
         )
@@ -4304,7 +4974,8 @@ def build_client_from_dto(
             base_url=dto.base_url,
             model=model,
             proxy_url=final_proxy,
-            protocol_profile=dto.protocol_profile,
+            protocol_profile=protocol_profile.name,
+            provider_scope=f"provider:{dto.id}|{protocol_profile.name}",
             identity=identity,
             compatibility_headers=compatibility_headers,
         )
@@ -4313,6 +4984,7 @@ def build_client_from_dto(
 
 __all__ = [
     "AnthropicClient",
+    "GatewayResponsesClient",
     "LLMCallFailed",
     "LLMClient",
     "LLMError",

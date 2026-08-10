@@ -1,8 +1,43 @@
 /** 会话级本轮模型选择（localStorage，不写全局配置）。 */
 
+import type { SystemAgentModelSelection } from "@/api/systemAgent";
+import type {
+  AgentClientIdentity,
+  AgentExecutionBackend,
+} from "@/lib/assistantClientSelection";
+
 export type SessionModelSelection =
-  | { mode: "auto" }
-  | { mode: "pinned"; providerId: number; model: string };
+  | {
+      mode: "auto";
+      executionBackend: SessionExecutionBackend;
+      clientIdentityProfile?: SessionClientIdentity;
+    }
+  | {
+      mode: "pinned";
+      providerId: number;
+      model: string;
+      executionBackend: SessionExecutionBackend;
+      clientIdentityProfile?: SessionClientIdentity;
+    };
+
+export type SessionExecutionBackend = AgentExecutionBackend;
+export type SessionClientIdentity = AgentClientIdentity;
+
+export const DEFAULT_SESSION_MODEL_SELECTION: SessionModelSelection = {
+  mode: "auto",
+  executionBackend: "provider",
+};
+
+const CLIENT_IDENTITIES = new Set<SessionClientIdentity>([
+  "auto",
+  "minimal",
+  "openai_sdk",
+  "codex_tui",
+  "codex_desktop",
+  "claude_code",
+  "claude_desktop",
+  "grok_cli",
+]);
 
 const STORAGE_KEY = "telepilot.system-agent.session-model.v1";
 
@@ -27,13 +62,23 @@ function writeStore(store: Store): void {
 }
 
 export function loadSessionModelSelection(sessionId: string | null | undefined): SessionModelSelection {
-  if (!sessionId) return { mode: "auto" };
+  if (!sessionId) return DEFAULT_SESSION_MODEL_SELECTION;
   const value = readStore()[sessionId];
-  if (!value || typeof value !== "object") return { mode: "auto" };
+  if (!value || typeof value !== "object") return DEFAULT_SESSION_MODEL_SELECTION;
+  const executionBackend = ["provider", "direct", "codex_gateway"].includes(value.executionBackend)
+    ? value.executionBackend
+    : "provider";
+  const clientIdentityProfile = CLIENT_IDENTITIES.has(value.clientIdentityProfile)
+    ? value.clientIdentityProfile
+    : undefined;
+  const common = {
+    executionBackend,
+    clientIdentityProfile,
+  };
   if (value.mode === "pinned" && value.providerId > 0 && value.model) {
-    return { mode: "pinned", providerId: value.providerId, model: value.model };
+    return { mode: "pinned", providerId: value.providerId, model: value.model, ...common };
   }
-  return { mode: "auto" };
+  return { mode: "auto", ...common };
 }
 
 export function saveSessionModelSelection(
@@ -41,7 +86,11 @@ export function saveSessionModelSelection(
   selection: SessionModelSelection,
 ): void {
   const store = readStore();
-  if (selection.mode === "auto") {
+  if (
+    selection.mode === "auto"
+    && selection.executionBackend === "provider"
+    && !selection.clientIdentityProfile
+  ) {
     delete store[sessionId];
   } else {
     store[sessionId] = selection;
@@ -51,13 +100,18 @@ export function saveSessionModelSelection(
 
 export function toApiModelSelection(
   selection: SessionModelSelection,
-): { mode: "auto" } | { mode: "pinned"; provider_id: number; model: string } {
+): SystemAgentModelSelection {
+  const common = {
+    execution_backend: selection.executionBackend,
+    client_identity_profile: selection.clientIdentityProfile,
+  };
   if (selection.mode === "pinned") {
     return {
       mode: "pinned",
       provider_id: selection.providerId,
       model: selection.model,
+      ...common,
     };
   }
-  return { mode: "auto" };
+  return { mode: "auto", ...common };
 }

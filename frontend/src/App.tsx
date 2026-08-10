@@ -17,7 +17,7 @@ import {
 } from "@/lib/navigation";
 
 // 把不影响首屏的页面拆成 lazy chunk：
-//   - 用户最常进入的是 Dashboard 与账号列表，这些保持 eager；
+//   - Dashboard 保持 eager，确保概览首屏无需等待额外 chunk；
 //   - 插件中心、Logs（拖大 echarts）、设置子页、AI、模板、账号详情 / 向导 / 各
 //     feature 配置页都按需加载。
 //   - vite.config.ts 里另有 manualChunks 把 echarts / highlight.js / react-markdown

@@ -24,6 +24,10 @@ class LLMUsageItem(BaseModel):
     provider_name: str | None
     model: str | None
     client_identity_profile: str | None
+    execution_backend: str | None
+    gateway_version: str | None
+    gateway_request_id: str | None
+    gateway_stage: str | None
     source: str | None
     input_tokens: int
     output_tokens: int
@@ -44,6 +48,10 @@ class LLMUsageItem(BaseModel):
             provider_name=row.provider_name,
             model=row.model,
             client_identity_profile=row.client_identity_profile,
+            execution_backend=getattr(row, "execution_backend", None),
+            gateway_version=getattr(row, "gateway_version", None),
+            gateway_request_id=getattr(row, "gateway_request_id", None),
+            gateway_stage=getattr(row, "gateway_stage", None),
             source=row.source,
             input_tokens=int(row.input_tokens or 0),
             output_tokens=int(row.output_tokens or 0),

@@ -26,12 +26,11 @@ loader 在扫描目录阶段读取这个常量来决定加载方式、显示名�
 - ``permissions``：可信插件的能力说明（如 ``send_message`` / ``edit_message``），用于安装提示、审计和 UI 展示
 - ``allowed_hosts``：声明 ``external_http`` 能访问的外部域名白名单
 - ``http``：``ctx.http`` 的扩展策略元数据（如是否允许 direct 出口）
-- ``on_install``：可选的安装钩子模块路径（阶段 B/C 用，目前未启用）
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import InitVar, dataclass, field
 from typing import Any
 
 
@@ -47,7 +46,7 @@ class Manifest:
     author: str = "builtin"
     description: str = ""
     usage: str = ""
-    # 依赖其它插件的 key（先加载它们再加载本插件；阶段 A 暂不强制校验）
+    # 依赖其它插件的 key；loader 会拒绝加载缺少依赖的插件。
     requires_features: list[str] = field(default_factory=list)
     # 声明依赖的平台能力模块（ai / interaction_bot / webhooks / ledger / dispatch_debug）。
     # 旧插件未声明时继续加载；运行时由平台裁剪不可用入口。
@@ -89,8 +88,8 @@ class Manifest:
     # 交互动作发送通道元数据，例如 {"interaction_bot", "userbot_reply"}。
     # 插件可在动作里选择单通道或候选通道；平台负责执行、审计和能力边界。
     interaction_send_via: list[str] = field(default_factory=list)
-    # 可选：安装钩子（python module path），阶段 B/C 启用
-    on_install: str | None = None
+    # 仅保留旧第三方插件的构造参数兼容；loader 从未执行该钩子，实例不存储也不序列化。
+    on_install: InitVar[str | None] = None
 
     def to_dict(self) -> dict[str, Any]:
         """序列化成可写入 DB / JSON 的 dict。"""
@@ -122,7 +121,6 @@ class Manifest:
             "allowed_hosts": list(self.allowed_hosts),
             "http": self.http,
             "interaction_send_via": list(self.interaction_send_via),
-            "on_install": self.on_install,
         }
 
 

@@ -17,6 +17,9 @@ from ..db.models.system_agent import (
     MESSAGE_ROLE_ASSISTANT,
     MESSAGE_ROLE_USER,
     MESSAGE_RUN_FAILED,
+    RUN_INPUT_APPROVAL,
+    RUN_INPUT_STEER,
+    RUN_INPUT_USER,
     SESSION_STATUS_ACTIVE,
     SystemAgentRun,
     SystemAgentSession,
@@ -31,16 +34,23 @@ from ..schemas.system_agent import (
     SystemAgentMessageCreate,
     SystemAgentMessageOut,
     SystemAgentMessageRetry,
+    SystemAgentQueueItemOut,
+    SystemAgentQueueItemPatch,
+    SystemAgentQueueMutationOut,
+    SystemAgentQueueReorder,
     SystemAgentRegenerateRunCreate,
     SystemAgentRetryRunCreate,
     SystemAgentRunCreate,
     SystemAgentRunEventOut,
+    SystemAgentRunInputCreate,
+    SystemAgentRunInputOut,
     SystemAgentRunOut,
     SystemAgentSecretInput,
     SystemAgentSecretInputOut,
     SystemAgentSessionCreate,
     SystemAgentSessionOut,
     SystemAgentSessionUpdate,
+    SystemAgentStopReplaceCreate,
     SystemAgentUserMemoryCreate,
     SystemAgentUserMemoryOut,
     SystemAgentUserMemoryPatch,
@@ -86,11 +96,15 @@ async def _owned_run(db: DBSession, run_id: str, web_user_id: int) -> SystemAgen
         select(SystemAgentRun).where(
             SystemAgentRun.id == run_id,
             SystemAgentRun.web_user_id == web_user_id,
+            SystemAgentRun.channel == CHANNEL_WEB,
         )
     )
     row = result.scalar_one_or_none()
     if row is None:
         raise _err("RUN_NOT_FOUND", "助手运行不存在", 404)
+    # 后续 Durable Run Manager 使用独立 session；先释放所有权查询占用的连接，
+    # 避免小连接池下多个并发请求互相等待第二条连接。
+    await db.commit()
     return row
 
 
@@ -383,6 +397,9 @@ async def stream_message(
     session = await svc.get_session(db, session_id, web_user_id=user.id)
     if session is None:
         raise _err("SESSION_NOT_FOUND", "会话不存在", 404)
+    content = payload.content.strip()
+    if not content:
+        raise _err("EMPTY_MESSAGE", "消息不能为空", 422)
 
     # 可选更新账号上下文
     if payload.account_id is not None and session.account_id != payload.account_id:
@@ -394,7 +411,7 @@ async def stream_message(
             session_id=session_id,
             web_user_id=user.id,
             client_request_id=str(uuid.uuid4()),
-            text=payload.content,
+            text=content,
             model_selection=(
                 payload.model_selection.model_dump() if payload.model_selection else None
             ),
@@ -449,11 +466,15 @@ async def list_system_agent_runs(
     user: CurrentUser,
     status: str | None = Query(
         default=None,
-        pattern="^(queued|running|succeeded|failed|cancelled)$",
+        pattern=(
+            "^(queued|running|waiting_input|waiting_approval|"
+            "succeeded|failed|cancelled)$"
+        ),
     ),
     since: datetime | None = Query(default=None),
     until: datetime | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=500),
+    include_bot: bool = Query(default=False),
 ) -> list[SystemAgentRunOut]:
     rows = await get_system_agent_run_manager().list_runs(
         web_user_id=user.id,
@@ -461,8 +482,122 @@ async def list_system_agent_runs(
         since=since,
         until=until,
         limit=limit,
+        include_bot=include_bot,
     )
     return [_run_out(row) for row in rows]
+
+
+@router.get("/queue", response_model=list[SystemAgentQueueItemOut])
+async def list_system_agent_queue(
+    user: CurrentUser,
+    session_id: str | None = Query(default=None),
+    include_bot: bool = Query(default=False),
+) -> list[SystemAgentQueueItemOut]:
+    rows = await get_system_agent_run_manager().list_queue(
+        web_user_id=user.id,
+        session_id=session_id,
+        include_bot=include_bot,
+    )
+    return [SystemAgentQueueItemOut(**row) for row in rows]
+
+
+@router.patch("/queue/{turn_id}", response_model=SystemAgentQueueItemOut)
+async def update_system_agent_queue_item(
+    turn_id: str,
+    payload: SystemAgentQueueItemPatch,
+    user: CurrentUser,
+) -> SystemAgentQueueItemOut:
+    try:
+        row = await get_system_agent_run_manager().update_queue_item(
+            turn_id,
+            web_user_id=user.id,
+            content=payload.content,
+            pinned=payload.pinned,
+        )
+    except RunNotFoundError:
+        raise _err("QUEUE_ITEM_NOT_FOUND", "排队消息不存在或已开始执行", 404) from None
+    except RunConflictError as exc:
+        raise _err("QUEUE_CONFLICT", str(exc), 409) from None
+    return SystemAgentQueueItemOut(**row)
+
+
+@router.delete("/queue/{turn_id}", response_model=SystemAgentRunOut)
+async def delete_system_agent_queue_item(
+    turn_id: str,
+    user: CurrentUser,
+) -> SystemAgentRunOut:
+    try:
+        row = await get_system_agent_run_manager().delete_queue_item(
+            turn_id,
+            web_user_id=user.id,
+        )
+    except RunNotFoundError:
+        raise _err("QUEUE_ITEM_NOT_FOUND", "排队消息不存在或已开始执行", 404) from None
+    return _run_out(row)
+
+
+@router.post(
+    "/sessions/{session_id}/queue/reorder",
+    response_model=list[SystemAgentQueueItemOut],
+)
+async def reorder_system_agent_queue(
+    session_id: str,
+    payload: SystemAgentQueueReorder,
+    user: CurrentUser,
+) -> list[SystemAgentQueueItemOut]:
+    try:
+        rows = await get_system_agent_run_manager().reorder_queue(
+            session_id=session_id,
+            web_user_id=user.id,
+            turn_ids=payload.turn_ids,
+        )
+    except RunNotFoundError:
+        raise _err("SESSION_NOT_FOUND", "会话不存在", 404) from None
+    except RunConflictError as exc:
+        raise _err("QUEUE_CONFLICT", str(exc), 409) from None
+    return [SystemAgentQueueItemOut(**row) for row in rows]
+
+
+@router.delete(
+    "/sessions/{session_id}/queue",
+    response_model=SystemAgentQueueMutationOut,
+)
+async def clear_system_agent_queue(
+    session_id: str,
+    db: DBSession,
+    user: CurrentUser,
+) -> SystemAgentQueueMutationOut:
+    session = await get_system_agent_service().get_session(
+        db,
+        session_id,
+        web_user_id=user.id,
+    )
+    if session is None:
+        raise _err("SESSION_NOT_FOUND", "会话不存在", 404)
+    await db.commit()
+    count = await get_system_agent_run_manager().clear_queue(
+        session_id=session_id,
+        web_user_id=user.id,
+    )
+    return SystemAgentQueueMutationOut(count=count)
+
+
+@router.post(
+    "/sessions/{session_id}/queue/resume",
+    response_model=SystemAgentQueueMutationOut,
+)
+async def resume_system_agent_queue(
+    session_id: str,
+    user: CurrentUser,
+) -> SystemAgentQueueMutationOut:
+    try:
+        count = await get_system_agent_run_manager().resume_queue(
+            session_id=session_id,
+            web_user_id=user.id,
+        )
+    except RunNotFoundError:
+        raise _err("SESSION_NOT_FOUND", "会话不存在", 404) from None
+    return SystemAgentQueueMutationOut(count=count)
 
 
 @router.post(
@@ -480,6 +615,9 @@ async def start_system_agent_run(
     session = await svc.get_session(db, session_id, web_user_id=user.id)
     if session is None:
         raise _err("SESSION_NOT_FOUND", "会话不存在", 404)
+    content = payload.content.strip()
+    if not content:
+        raise _err("EMPTY_MESSAGE", "消息不能为空", 422)
     if payload.account_id is not None and session.account_id != payload.account_id:
         await svc.update_session(db, session, account_id=payload.account_id)
     await db.commit()
@@ -488,7 +626,7 @@ async def start_system_agent_run(
             session_id=session_id,
             web_user_id=user.id,
             client_request_id=payload.client_request_id,
-            text=payload.content,
+            text=content,
             model_selection=(
                 payload.model_selection.model_dump() if payload.model_selection else None
             ),
@@ -649,6 +787,117 @@ async def stream_system_agent_run(
 ) -> StreamingResponse:
     await _owned_run(db, run_id, user.id)
     return _run_stream_response(run_id, after_seq=after_seq)
+
+
+@router.post("/runs/{run_id}/steer", response_model=SystemAgentRunInputOut)
+async def steer_system_agent_run(
+    run_id: str,
+    payload: SystemAgentRunInputCreate,
+    db: DBSession,
+    user: CurrentUser,
+) -> SystemAgentRunInputOut:
+    await _owned_run(db, run_id, user.id)
+    content = str(payload.content or "").strip()
+    if not content:
+        raise _err("EMPTY_STEER", "Steer 内容不能为空", 422)
+    try:
+        row = await get_system_agent_run_manager().add_run_input(
+            run_id,
+            kind=RUN_INPUT_STEER,
+            client_request_id=payload.client_request_id,
+            payload={"content": content},
+        )
+    except RunNotFoundError:
+        raise _err("RUN_NOT_FOUND", "助手运行不存在", 404) from None
+    except RunConflictError as exc:
+        raise _err("RUN_INPUT_CONFLICT", str(exc), 409) from None
+    return SystemAgentRunInputOut.model_validate(row)
+
+
+@router.post("/runs/{run_id}/input", response_model=SystemAgentRunInputOut)
+async def resume_system_agent_run_with_input(
+    run_id: str,
+    payload: SystemAgentRunInputCreate,
+    db: DBSession,
+    user: CurrentUser,
+) -> SystemAgentRunInputOut:
+    await _owned_run(db, run_id, user.id)
+    content = str(payload.content or "").strip()
+    if not content and payload.fallback_provider_id is None:
+        raise _err("EMPTY_RUN_INPUT", "请提供补充说明或备用模型供应商", 422)
+    try:
+        row = await get_system_agent_run_manager().add_run_input(
+            run_id,
+            kind=RUN_INPUT_USER,
+            client_request_id=payload.client_request_id,
+            payload={
+                "content": content,
+                "fallback_provider_id": payload.fallback_provider_id,
+            },
+        )
+    except RunNotFoundError:
+        raise _err("RUN_NOT_FOUND", "助手运行不存在", 404) from None
+    except RunConflictError as exc:
+        raise _err("RUN_INPUT_CONFLICT", str(exc), 409) from None
+    return SystemAgentRunInputOut.model_validate(row)
+
+
+@router.post("/runs/{run_id}/approval", response_model=SystemAgentRunInputOut)
+async def approve_system_agent_run(
+    run_id: str,
+    payload: SystemAgentRunInputCreate,
+    db: DBSession,
+    user: CurrentUser,
+) -> SystemAgentRunInputOut:
+    await _owned_run(db, run_id, user.id)
+    approved_tools = [item.strip() for item in payload.approved_tools if item.strip()]
+    approved = payload.approved is not False
+    if approved and not approved_tools:
+        raise _err("EMPTY_APPROVAL", "请选择要批准的工具，或明确拒绝本次调用", 422)
+    try:
+        row = await get_system_agent_run_manager().add_run_input(
+            run_id,
+            kind=RUN_INPUT_APPROVAL,
+            client_request_id=payload.client_request_id,
+            payload={
+                "approved": approved,
+                "approved_tools": approved_tools,
+                "content": str(payload.content or "").strip(),
+            },
+        )
+    except RunNotFoundError:
+        raise _err("RUN_NOT_FOUND", "助手运行不存在", 404) from None
+    except RunConflictError as exc:
+        raise _err("RUN_INPUT_CONFLICT", str(exc), 409) from None
+    return SystemAgentRunInputOut.model_validate(row)
+
+
+@router.post("/runs/{run_id}/stop-and-replace", response_model=SystemAgentRunOut)
+async def stop_and_replace_system_agent_run(
+    run_id: str,
+    payload: SystemAgentStopReplaceCreate,
+    db: DBSession,
+    user: CurrentUser,
+) -> SystemAgentRunOut:
+    await _owned_run(db, run_id, user.id)
+    content = payload.content.strip()
+    if not content:
+        raise _err("EMPTY_REPLACEMENT", "替代消息不能为空", 422)
+    try:
+        row = await get_system_agent_run_manager().stop_and_replace(
+            run_id,
+            web_user_id=user.id,
+            client_request_id=payload.client_request_id,
+            text=content,
+            model_selection=(
+                payload.model_selection.model_dump() if payload.model_selection else None
+            ),
+        )
+    except RunNotFoundError:
+        raise _err("RUN_NOT_FOUND", "助手运行不存在", 404) from None
+    except RunConflictError as exc:
+        raise _err("RUN_CONFLICT", str(exc), 409) from None
+    return _run_out(row)
 
 
 @router.post("/runs/{run_id}/cancel", response_model=SystemAgentRunOut)

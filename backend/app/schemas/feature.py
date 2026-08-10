@@ -258,11 +258,6 @@ class AccountFeatureItem(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
-class FeatureMatrixCell(BaseModel):
-    """功能矩阵的单元格状态。"""
-    state: str  # active | failed | disabled
-
-
 class FeatureMatrixRow(BaseModel):
     id: int
     name: str

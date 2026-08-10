@@ -2,6 +2,8 @@
 
 WARNING: default replay dispatch loads account plugins through the normal
 ``AsyncSessionLocal`` path. Run it only against a development database.
+The replay runtime temporarily replaces several module-level integrations and
+must run in the dedicated ``tp_replay`` CLI process, never inside Web or worker.
 
 Replay is intentionally isolated from Telegram and durable ledgers:
 - inbound recording is disabled while replaying;
@@ -26,6 +28,7 @@ from typing import Any
 from ..services import account_bot_runtime, account_bot_service, action_tap
 from ..services.interaction import delivery as delivery_mod
 from .plugins import loader
+from .plugins.http_facade import block_plugin_http_requests
 
 ReplayDispatch = Callable[[dict[str, Any]], Awaitable[None]]
 
@@ -462,11 +465,12 @@ async def _replay_runtime_patches(capture: _ActionEventCapture):
     _patch(account_bot_service, "answer_callback", _answer_callback)
     _patch(account_bot_service, "answer_inline_query", _answer_inline_query)
 
-    try:
-        yield
-    finally:
-        for obj, name, original in reversed(patches):
-            setattr(obj, name, original)
+    with block_plugin_http_requests("回放模式禁止插件 HTTP 请求"):
+        try:
+            yield
+        finally:
+            for obj, name, original in reversed(patches):
+                setattr(obj, name, original)
 
 
 @asynccontextmanager

@@ -1,7 +1,7 @@
 FROM python:3.12-alpine
 
 RUN apk add --no-cache \
-    bash ca-certificates curl docker-cli docker-cli-buildx docker-cli-compose git openssh-client
+    bash ca-certificates curl docker-cli docker-cli-buildx docker-cli-compose git github-cli openssh-client
 
 # updater 以 root 在挂载的宿主项目目录（属主通常是普通用户）执行 git，
 # 不显式信任会因 "dubious ownership" 直接失败。写入系统级 /etc/gitconfig：

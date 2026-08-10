@@ -28,7 +28,8 @@ from collections.abc import Callable
 from datetime import date, datetime
 from datetime import time as datetime_time
 from pathlib import Path
-from typing import Any
+from statistics import median
+from typing import Any, Literal
 
 from fastapi import APIRouter, Body, File, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
@@ -65,8 +66,7 @@ _APP_STARTED_AT = time.time()
 class VersionInfo(BaseModel):
     """``GET /api/system/version`` 响应。
 
-    前端启动时拉一次 + 每 60s 轮询，对比前端 ``APP_VERSION`` 检测前后端版本是否一致；
-    不一致时 sidebar 顶部弹红条提示用户 `make restart` + 硬刷浏览器。
+    前端启动时拉取并定时刷新，以运行中服务为准展示发布版本与部署 commit。
 
     public 接口（**无鉴权**）：未登录页也要能调，否则发现"前端是新版后端是旧版"
     会一直登不上去（旧 schema 拒新登录字段之类）。返回的字段都是公开的版本元数据。
@@ -76,6 +76,50 @@ class VersionInfo(BaseModel):
     """SemVer 形式，如 ``0.4.2``"""
     stage: str | None = None
     """非正式标签，如 ``Sprint 4``；达到 1.0.0 后通常 None"""
+    revision: str | None = None
+    """当前成功部署的 Git commit；不可用时为 None。"""
+    channel: Literal["beta", "stable", "dev"]
+    """当前发布渠道。"""
+
+
+def _runtime_revision() -> str | None:
+    env_revision = os.getenv("TELEPILOT_GIT_REVISION", "").strip()
+    if re.fullmatch(r"[0-9a-fA-F]{7,64}", env_revision):
+        return env_revision.lower()
+
+    backend_root = Path(__file__).resolve().parents[2]
+    for marker in (
+        backend_root / "runtime-content" / "REVISION",
+        backend_root / ".telepilot-runtime-commit",
+    ):
+        try:
+            revision = marker.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if re.fullmatch(r"[0-9a-fA-F]{7,64}", revision):
+            return revision.lower()
+
+    repo_root = Path(__file__).resolve().parents[3]
+    if not (repo_root / ".git").exists():
+        return None
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    revision = result.stdout.strip()
+    return revision.lower() if re.fullmatch(r"[0-9a-fA-F]{7,64}", revision) else None
+
+
+def _release_channel(revision: str | None) -> Literal["beta", "stable", "dev"]:
+    override = os.getenv("TELEPILOT_RELEASE_CHANNEL", "").strip().lower()
+    if override in {"beta", "stable", "dev"}:
+        return override  # type: ignore[return-value]
+    if "-" in __version__:
+        return "beta"
+    return "stable" if revision else "dev"
 
 
 @router.get("/version", response_model=VersionInfo)
@@ -83,7 +127,13 @@ async def get_version() -> VersionInfo:
     """返回后端版本号（无鉴权）。"""
     from .. import APP_STAGE
 
-    return VersionInfo(version=__version__, stage=APP_STAGE)
+    revision = _runtime_revision()
+    return VersionInfo(
+        version=__version__,
+        stage=APP_STAGE,
+        revision=revision,
+        channel=_release_channel(revision),
+    )
 
 
 # ════════════════════════════════════════════════════════════
@@ -130,7 +180,7 @@ class ProvidersStatus(BaseModel):
 class ProxiesStatus(BaseModel):
     total: int = 0
     by_type: dict[str, int] = Field(default_factory=dict)
-    """如 ``{"socks5":2,"http":1}``。mtproxy 也算在内；前端展示"可用于 LLM 的"由前端过滤。"""
+    """按数据库记录类型统计；可能包含已停止支持、仅供迁移识别的历史类型。"""
     used_by_llm: int = 0
     """被某个 LLMProvider.proxy_id 引用的代理数量（去重）。"""
 
@@ -154,6 +204,44 @@ class WorkersStatus(BaseModel):
     db_capacity_warning: str | None = None
 
 
+class CodexGatewayStatus(BaseModel):
+    state: Literal["not_required", "ready", "degraded"] = "not_required"
+    required: bool = False
+    provider_count: int = 0
+    revision: int = 0
+    version: str | None = None
+    protocol_version: str | None = None
+    upstream_commit: str | None = None
+    build_commit: str | None = None
+    codex_client_version: str | None = None
+    codex_version_source: Literal["builtin_default", "manual_override"] = "builtin_default"
+    contract_review_date: str | None = None
+    error: str | None = None
+
+
+def _snapshot_codex_gateway() -> CodexGatewayStatus:
+    """返回进程内 Gateway 摘要，不主动启动或访问上游。"""
+
+    from ..services.gateway_runtime import gateway_runtime_manager
+
+    status = gateway_runtime_manager.status()
+    state = status.state if status.state in {"not_required", "ready", "degraded"} else "degraded"
+    return CodexGatewayStatus(
+        state=state,
+        required=status.required,
+        provider_count=status.provider_count,
+        revision=status.revision,
+        version=status.version,
+        protocol_version=status.protocol_version,
+        upstream_commit=status.upstream_commit,
+        build_commit=status.build_commit,
+        codex_client_version=status.codex_client_version,
+        codex_version_source=status.codex_version_source,
+        contract_review_date=status.contract_review_date,
+        error=status.error,
+    )
+
+
 class HealthOverview(BaseModel):
     """前端 Dashboard 用的一次性聚合状态。"""
 
@@ -163,6 +251,7 @@ class HealthOverview(BaseModel):
     providers: ProvidersStatus
     proxies: ProxiesStatus
     workers: WorkersStatus
+    codex_gateway: CodexGatewayStatus
 
 
 class HostResource(BaseModel):
@@ -212,6 +301,24 @@ class RuntimeLogStats(BaseModel):
     last_5m_error: int = 0
 
 
+class WorkerMemorySummary(BaseModel):
+    sample_count: int = 0
+    basis: Literal["uss", "rss", "mixed", "unavailable"] = "unavailable"
+    total_mb: float | None = None
+    average_mb: float | None = None
+    median_mb: float | None = None
+    max_mb: float | None = None
+
+
+class ResourceCapacityAlert(BaseModel):
+    key: str
+    resource: str
+    level: Literal["warning", "critical"]
+    percent: float
+    threshold_percent: float
+    message: str
+
+
 class ResourceDashboard(BaseModel):
     host: HostResource
     main_process: ProcessResource
@@ -226,6 +333,8 @@ class ResourceDashboard(BaseModel):
     workers: list[WorkerRuntimeResource] = Field(default_factory=list)
     worker_alive: int = 0
     worker_desired_running: int = 0
+    worker_memory: WorkerMemorySummary = Field(default_factory=WorkerMemorySummary)
+    capacity_alerts: list[ResourceCapacityAlert] = Field(default_factory=list)
     logs: RuntimeLogStats
 
 
@@ -706,6 +815,82 @@ def _sum_project_resource(
         rss_mb=_sum_resource_values([main.rss_mb, *(w.rss_mb for w in workers), *(p.rss_mb for p in extras)]),
         uss_mb=_sum_resource_values([main.uss_mb, *(w.uss_mb for w in workers), *(p.uss_mb for p in extras)]),
     )
+
+
+def _worker_memory_summary(workers: list[WorkerRuntimeResource]) -> WorkerMemorySummary:
+    values: list[float] = []
+    bases: set[str] = set()
+    for worker in workers:
+        if not worker.alive:
+            continue
+        if worker.uss_mb is not None:
+            values.append(worker.uss_mb)
+            bases.add("uss")
+        elif worker.rss_mb is not None:
+            values.append(worker.rss_mb)
+            bases.add("rss")
+    if not values:
+        return WorkerMemorySummary()
+    basis: Literal["uss", "rss", "mixed", "unavailable"]
+    if bases == {"uss"}:
+        basis = "uss"
+    elif bases == {"rss"}:
+        basis = "rss"
+    else:
+        basis = "mixed"
+    return WorkerMemorySummary(
+        sample_count=len(values),
+        basis=basis,
+        total_mb=round(sum(values), 2),
+        average_mb=round(sum(values) / len(values), 2),
+        median_mb=round(float(median(values)), 2),
+        max_mb=round(max(values), 2),
+    )
+
+
+def _capacity_alerts(
+    host: HostResource,
+    containers: list[ContainerResource],
+) -> list[ResourceCapacityAlert]:
+    alerts: list[ResourceCapacityAlert] = []
+
+    def add(key: str, resource: str, value: float | None, warning: float, critical: float) -> None:
+        if value is None or value < warning:
+            return
+        level: Literal["warning", "critical"] = "critical" if value >= critical else "warning"
+        threshold = critical if level == "critical" else warning
+        level_label = "严重" if level == "critical" else "警告"
+        alerts.append(
+            ResourceCapacityAlert(
+                key=key,
+                resource=resource,
+                level=level,
+                percent=round(value, 2),
+                threshold_percent=threshold,
+                message=f"{resource}已使用 {value:.1f}%（{level_label}阈值 {threshold:.0f}%）",
+            )
+        )
+
+    add("host-memory", "服务器内存", host.memory_used_percent, 80.0, 95.0)
+    add("host-disk", "服务器磁盘", host.disk_used_percent, 80.0, 90.0)
+    for container in containers:
+        percent = container.memory_percent
+        if (
+            percent is None
+            and container.memory_mb is not None
+            and container.memory_limit_mb is not None
+            and container.memory_limit_mb > 0
+        ):
+            percent = (container.memory_mb / container.memory_limit_mb) * 100.0
+        add(
+            f"container-{container.service or container.name}",
+            f"{container.service or container.name} 容器内存",
+            percent,
+            80.0,
+            95.0,
+        )
+    alerts.sort(key=lambda item: (item.level != "critical", -item.percent, item.key))
+    return alerts
 
 
 _DOCKER_RESOURCE_CACHE: tuple[
@@ -1207,6 +1392,7 @@ async def get_health_overview(_user: CurrentUser) -> HealthOverview:
         providers=providers,
         proxies=proxies,
         workers=workers,
+        codex_gateway=_snapshot_codex_gateway(),
     )
 
 
@@ -1236,6 +1422,8 @@ async def get_resource_dashboard(_user: CurrentUser) -> ResourceDashboard:
         workers=workers,
         worker_alive=sum(1 for w in workers if w.alive),
         worker_desired_running=sum(1 for w in workers if w.desired == "running"),
+        worker_memory=_worker_memory_summary(workers),
+        capacity_alerts=_capacity_alerts(host, containers),
         logs=logs,
     )
 
@@ -1479,6 +1667,7 @@ def _plan_text(
     services: list[str],
     file_sync_services: list[str],
     rebuild_services: list[str],
+    reasons: list[str],
     requires_full_update: bool,
     requires_backup: bool,
     requires_migration: bool,
@@ -1496,7 +1685,7 @@ def _plan_text(
             f"直接同步目标 commit 文件并重启：{', '.join(file_sync_services)}。"
         )
     if rebuild_services:
-        detail_parts.append(f"需要编译或镜像构建：{', '.join(rebuild_services)}。")
+        detail_parts.append(f"拉取预构建镜像并切换：{', '.join(rebuild_services)}。")
     if services and not file_sync_services and not rebuild_services:
         # 兼容尚未提供动作分类的旧 updater。
         detail_parts.append(f"仅切换服务：{', '.join(services)}；其余容器保持运行。")
@@ -1508,6 +1697,8 @@ def _plan_text(
         detail_parts.append("不执行数据库备份或迁移。")
     if requires_full_update:
         detail_parts.append("涉及部署/依赖关键文件，建议完整更新流程。")
+    if reasons:
+        detail_parts.append(f"分类依据：{'；'.join(reasons)}。")
 
     if runtime_mode == RUNTIME_LOCAL_SOURCE:
         if can_apply:
@@ -1564,6 +1755,7 @@ def _check_response_from_plan(
     services = [str(item) for item in plan.get("services") or []]
     file_sync_services = [str(item) for item in plan.get("file_sync_services") or []]
     rebuild_services = [str(item) for item in plan.get("rebuild_services") or []]
+    reasons = [str(item) for item in plan.get("reasons") or []]
     requires_full_update = bool(plan.get("requires_full_update"))
     requires_backup = bool(plan.get("requires_backup"))
     requires_migration = bool(plan.get("requires_migration"))
@@ -1580,6 +1772,7 @@ def _check_response_from_plan(
         services=services,
         file_sync_services=file_sync_services,
         rebuild_services=rebuild_services,
+        reasons=reasons,
         requires_full_update=requires_full_update,
         requires_backup=requires_backup,
         requires_migration=requires_migration,
@@ -1605,6 +1798,7 @@ def _check_response_from_plan(
         services=services,
         file_sync_services=file_sync_services,
         rebuild_services=rebuild_services,
+        reasons=reasons,
         requires_full_update=requires_full_update,
         requires_backup=requires_backup,
         requires_migration=requires_migration,
@@ -1636,6 +1830,7 @@ class CheckUpdateResponse(BaseModel):
     services: list[str] = Field(default_factory=list)
     file_sync_services: list[str] = Field(default_factory=list)
     rebuild_services: list[str] = Field(default_factory=list)
+    reasons: list[str] = Field(default_factory=list)
     requires_full_update: bool = False
     requires_backup: bool = False
     requires_migration: bool = False
@@ -1662,6 +1857,7 @@ class PullUpdateResponse(BaseModel):
     services: list[str] = Field(default_factory=list)
     file_sync_services: list[str] = Field(default_factory=list)
     rebuild_services: list[str] = Field(default_factory=list)
+    reasons: list[str] = Field(default_factory=list)
     requires_full_update: bool = False
     requires_backup: bool = False
     requires_migration: bool = False
@@ -1971,6 +2167,7 @@ async def check_update(
             services = update_plan.services
             file_sync_services = update_plan.file_sync_services
             rebuild_services = update_plan.rebuild_services
+            reasons = update_plan.reasons
             requires_full_update = update_plan.requires_full_update
             requires_backup = update_plan.requires_backup
             has_update = has_update and behind > 0
@@ -1990,6 +2187,7 @@ async def check_update(
                 services=services,
                 file_sync_services=file_sync_services,
                 rebuild_services=rebuild_services,
+                reasons=reasons,
                 requires_full_update=requires_full_update,
                 requires_backup=requires_backup,
                 requires_migration=update_plan.requires_migration,
@@ -2015,6 +2213,7 @@ async def check_update(
                 services=services,
                 file_sync_services=file_sync_services,
                 rebuild_services=rebuild_services,
+                reasons=reasons,
                 requires_full_update=requires_full_update,
                 requires_backup=requires_backup,
                 requires_migration=update_plan.requires_migration,

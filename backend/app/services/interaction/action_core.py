@@ -29,6 +29,7 @@ CANONICAL_ACTION_TYPES = frozenset(
         "edit_caption",
         "delete_message",
         "pin_message",
+        "click_callback_button",
         "answer_callback",
         "answer_inline_query",
         "payout",
@@ -76,6 +77,7 @@ class ActionKind(StrEnum):
     EDIT_CAPTION = "edit_caption"
     DELETE_MESSAGE = "delete_message"
     PIN_MESSAGE = "pin_message"
+    CLICK_CALLBACK_BUTTON = "click_callback_button"
     ANSWER_CALLBACK = "answer_callback"
     ANSWER_INLINE_QUERY = "answer_inline_query"
     DEPRECATED_SEND_VIA = "deprecated_send_via"
@@ -117,6 +119,8 @@ def classify_action(action: dict[str, Any]) -> ActionKind:
         return ActionKind.DELETE_MESSAGE
     if action_type == "pin_message":
         return ActionKind.PIN_MESSAGE
+    if action_type == "click_callback_button":
+        return ActionKind.CLICK_CALLBACK_BUTTON
     if action_type == "answer_callback":
         return ActionKind.ANSWER_CALLBACK
     if action_type == "answer_inline_query":
@@ -141,6 +145,7 @@ class ActionHandlers:
     on_edit_caption: ActionHandler | None = None
     on_delete_message: ActionHandler | None = None
     on_pin_message: ActionHandler | None = None
+    on_click_callback_button: ActionHandler | None = None
     on_answer_callback: ActionHandler | None = None
     on_answer_inline_query: ActionHandler | None = None
     on_deprecated_send_via: ActionHandler | None = None
@@ -172,6 +177,7 @@ def _handler_for(kind: ActionKind, handlers: ActionHandlers) -> ActionHandler | 
         ActionKind.EDIT_CAPTION: handlers.on_edit_caption,
         ActionKind.DELETE_MESSAGE: handlers.on_delete_message,
         ActionKind.PIN_MESSAGE: handlers.on_pin_message,
+        ActionKind.CLICK_CALLBACK_BUTTON: handlers.on_click_callback_button,
         ActionKind.ANSWER_CALLBACK: handlers.on_answer_callback,
         ActionKind.ANSWER_INLINE_QUERY: handlers.on_answer_inline_query,
         ActionKind.DEPRECATED_SEND_VIA: handlers.on_deprecated_send_via,

@@ -26,6 +26,7 @@ import type {
   ChatTestTurn,
   LLMApiFormat,
   LLMClientIdentityProfile,
+  LLMExecutionBackend,
   LLMProviderOut,
   ProviderModel,
 } from "@/api/types";
@@ -33,6 +34,7 @@ import { ModelRunMeta } from "@/components/ai/ModelRunMeta";
 import { FullLivenessPanel } from "@/components/ai/FullLivenessPanel";
 import { RuntimeHealthBar } from "@/components/ai/RuntimeHealthBar";
 import { StreamingText } from "@/components/ai/StreamingText";
+import { UpstreamErrorFacts } from "@/components/ai/UpstreamErrorFacts";
 import { PageHeader, PageShell } from "@/components/layout/PageScaffold";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
@@ -55,6 +57,7 @@ import {
   livenessStatusTone,
 } from "@/lib/livenessStatus";
 import { cn } from "@/lib/utils";
+import { executionBackendLabel, isGatewayBackend } from "@/lib/providerExecutionBackend";
 
 const DEFAULT_MESSAGE = "你怎么又不行啦？";
 const DEFAULT_SYSTEM_PROMPT =
@@ -156,13 +159,14 @@ const IDENTITY_LABELS: Record<string, string> = {
   auto: "自动选择",
   minimal: "最小身份",
   openai_sdk: "OpenAI SDK（标准 API）",
-  codex_tui: "Codex TUI",
-  codex_cli: "Codex TUI（旧配置）",
-  codex_exec: "Codex TUI（旧配置）",
+  codex_tui: "Codex 兼容请求头（非官方运行时）",
+  codex_cli: "Codex 兼容请求头（旧配置）",
+  codex_exec: "Codex 兼容请求头（旧配置）",
   codex_desktop: "Codex Desktop",
   claude_code: "Claude Code CLI",
   claude_desktop: "Claude Code CLI（旧 Desktop 配置）",
   grok_cli: "Grok CLI",
+  gateway_managed: "由 Gateway 管理",
 };
 
 function identityLabel(value?: string | null): string {
@@ -226,11 +230,17 @@ const IDENTITY_OPTIONS: Array<{ value: LLMClientIdentityProfile; label: string }
   { value: "auto", label: "自动选择" },
   { value: "minimal", label: "最小身份" },
   { value: "openai_sdk", label: "OpenAI SDK（标准 API）" },
-  { value: "codex_tui", label: "Codex TUI" },
+  { value: "codex_tui", label: "Codex 兼容请求头（非官方运行时）" },
   { value: "codex_desktop", label: "Codex Desktop" },
   { value: "claude_code", label: "Claude Code CLI" },
   { value: "grok_cli", label: "Grok CLI" },
 ];
+
+function editableIdentity(value?: string | null): LLMClientIdentityProfile {
+  return IDENTITY_OPTIONS.some((option) => option.value === value)
+    ? value as LLMClientIdentityProfile
+    : "auto";
+}
 
 function ChatResponseBranch({
   result,
@@ -238,6 +248,7 @@ function ChatResponseBranch({
 }: {
   result: ChatDisplayResult;
   onRetry: (
+    executionBackend: LLMExecutionBackend,
     apiFormat: LLMApiFormat,
     identity: LLMClientIdentityProfile,
   ) => Promise<void>;
@@ -248,12 +259,16 @@ function ChatResponseBranch({
   }, [result.response]);
   const [expanded, setExpanded] = useState(result.pending || result.ok);
   const [showOverrides, setShowOverrides] = useState(false);
+  const [executionBackend, setExecutionBackend] = useState<LLMExecutionBackend>(
+    isGatewayBackend(result.execution_backend) ? "codex_gateway" : "direct",
+  );
   const [apiFormat, setApiFormat] = useState<LLMApiFormat>(
     (result.effective_api_format as LLMApiFormat) || "chat_completions",
   );
   const [identity, setIdentity] = useState<LLMClientIdentityProfile>(
-    (result.client_identity_profile as LLMClientIdentityProfile) || "auto",
+    editableIdentity(result.client_identity_profile),
   );
+  const gatewayResult = isGatewayBackend(result.execution_backend);
 
   useEffect(() => {
     if (result.pending || result.ok) setExpanded(true);
@@ -262,17 +277,21 @@ function ChatResponseBranch({
 
   useEffect(() => {
     if (result.pending) return;
+    setExecutionBackend(isGatewayBackend(result.execution_backend) ? "codex_gateway" : "direct");
     if (result.effective_api_format) {
       setApiFormat(result.effective_api_format as LLMApiFormat);
     }
     if (result.client_identity_profile) {
-      setIdentity(result.client_identity_profile as LLMClientIdentityProfile);
+      setIdentity(editableIdentity(result.client_identity_profile));
     }
   }, [result.pending, result.effective_api_format, result.client_identity_profile]);
 
   const statusKey = classifyChatResult(result);
   const statusTone = livenessStatusTone(statusKey);
-  const httpStatus = extractHttpStatusCode(result.status_code, result.error);
+  const httpStatus = extractHttpStatusCode(
+    result.upstream_status_code ?? result.status_code,
+    result.error,
+  );
   const statusLabel =
     statusKey === "pending"
       ? result.streaming
@@ -345,7 +364,7 @@ function ChatResponseBranch({
           <MetaBadge tone="outline">已回退完整响应</MetaBadge>
         ) : null}
         {result.effective_api_format ? (
-          result.ok || result.pending ? (
+          result.ok || result.pending || gatewayResult ? (
             <MetaBadge tone="outline">协议 {protocolLabel(result.effective_api_format)}</MetaBadge>
           ) : (
             <button
@@ -358,7 +377,9 @@ function ChatResponseBranch({
             </button>
           )
         ) : null}
-        {result.client_identity_profile ? (
+        {gatewayResult ? (
+          <MetaBadge tone="info">客户端 由 Gateway 管理</MetaBadge>
+        ) : result.client_identity_profile ? (
           result.ok || result.pending ? (
             <MetaBadge tone="info">客户端 {identityLabel(result.client_identity_profile)}</MetaBadge>
           ) : (
@@ -371,6 +392,17 @@ function ChatResponseBranch({
               <MetaBadge tone="info">客户端 {identityLabel(result.client_identity_profile)}</MetaBadge>
             </button>
           )
+        ) : null}
+        {result.execution_backend ? (
+          <MetaBadge
+            mono
+            tone={isGatewayBackend(result.execution_backend) ? "info" : "neutral"}
+            title={isGatewayBackend(result.execution_backend)
+              ? [result.gateway_version, result.gateway_stage, result.gateway_request_id].filter(Boolean).join(" · ") || "实际通过内置 Gateway 调用"
+              : "实际通过标准 API 直连调用"}
+          >
+            实际后端 {executionBackendLabel(result.execution_backend)}
+          </MetaBadge>
         ) : null}
       </div>
 
@@ -388,12 +420,39 @@ function ChatResponseBranch({
             正在等待上游返回首段内容
           </div>
         )
-      ) : expanded && result.ok && result.response ? (
-        <StreamingText
-          text={streamed.text}
-          fallback={Boolean(result.stream_fallback)}
-          className="mt-3 text-sm leading-7 text-foreground"
-        />
+      ) : expanded && result.ok ? (
+        <>
+          {result.response ? (
+            <StreamingText
+              text={streamed.text}
+              fallback={Boolean(result.stream_fallback)}
+              className="mt-3 text-sm leading-7 text-foreground"
+            />
+          ) : null}
+          <div className="mt-3 border-t pt-3">
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-8 px-2 text-xs"
+              onClick={() => setShowOverrides((value) => !value)}
+            >
+              <SlidersHorizontal className="mr-1 h-3.5 w-3.5" />
+              {showOverrides ? "收起临时配置" : "临时配置并再次测试"}
+            </Button>
+            {showOverrides ? (
+              <LivenessOverrideFields
+                executionBackend={executionBackend}
+                apiFormat={apiFormat}
+                identity={identity}
+                onExecutionBackendChange={setExecutionBackend}
+                onApiFormatChange={setApiFormat}
+                onIdentityChange={setIdentity}
+                onRetry={() => void onRetry(executionBackend, apiFormat, identity)}
+              />
+            ) : null}
+          </div>
+        </>
       ) : expanded && !result.ok ? (
         <>
           {result.response ? (
@@ -405,6 +464,12 @@ function ChatResponseBranch({
             <XCircle className="mt-0.5 h-4 w-4 shrink-0" />
             <span className="min-w-0 break-words">{result.error || "没有拿到可展示文本。"}</span>
           </div>
+          <UpstreamErrorFacts value={result} className="mt-2" />
+          {result.suggestion && result.suggestion !== result.error ? (
+            <div className="mt-2 break-words text-sm text-muted-foreground">
+              建议：{result.suggestion}
+            </div>
+          ) : null}
           <div className="mt-3 border-t pt-3">
             <Button
               type="button"
@@ -414,43 +479,87 @@ function ChatResponseBranch({
               onClick={() => setShowOverrides((value) => !value)}
             >
               <SlidersHorizontal className="mr-1 h-3.5 w-3.5" />
-              {showOverrides ? "收起临时配置" : "换协议或客户端重试"}
+              {showOverrides ? "收起临时配置" : "临时配置并重试"}
             </Button>
             {showOverrides ? (
-              <div className="mt-2 grid gap-2 rounded-md bg-muted/35 p-3 sm:grid-cols-2">
-                <div className="space-y-1.5">
-                  <Label className="text-xs">临时协议</Label>
-                  <Select value={apiFormat} onChange={(event) => setApiFormat(event.target.value as LLMApiFormat)}>
-                    {API_FORMAT_OPTIONS.map((option) => (
-                      <option key={option.value} value={option.value}>{option.label}</option>
-                    ))}
-                  </Select>
-                </div>
-                <div className="space-y-1.5">
-                  <Label className="text-xs">临时客户端</Label>
-                  <Select value={identity} onChange={(event) => setIdentity(event.target.value as LLMClientIdentityProfile)}>
-                    {IDENTITY_OPTIONS.map((option) => (
-                      <option key={option.value} value={option.value}>{option.label}</option>
-                    ))}
-                  </Select>
-                </div>
-                <Button
-                  type="button"
-                  size="sm"
-                  className="sm:col-span-2"
-                  onClick={() => void onRetry(apiFormat, identity)}
-                >
-                  使用临时配置重试此模型
-                </Button>
-                <p className="text-[11px] leading-5 text-muted-foreground sm:col-span-2">
-                  只影响这次重试，不会保存到 Provider 配置。
-                </p>
-              </div>
+              <LivenessOverrideFields
+                executionBackend={executionBackend}
+                apiFormat={apiFormat}
+                identity={identity}
+                onExecutionBackendChange={setExecutionBackend}
+                onApiFormatChange={setApiFormat}
+                onIdentityChange={setIdentity}
+                onRetry={() => void onRetry(executionBackend, apiFormat, identity)}
+              />
             ) : null}
           </div>
         </>
       ) : null}
     </article>
+  );
+}
+
+function LivenessOverrideFields({
+  executionBackend,
+  apiFormat,
+  identity,
+  onExecutionBackendChange,
+  onApiFormatChange,
+  onIdentityChange,
+  onRetry,
+}: {
+  executionBackend: LLMExecutionBackend;
+  apiFormat: LLMApiFormat;
+  identity: LLMClientIdentityProfile;
+  onExecutionBackendChange: (value: LLMExecutionBackend) => void;
+  onApiFormatChange: (value: LLMApiFormat) => void;
+  onIdentityChange: (value: LLMClientIdentityProfile) => void;
+  onRetry: () => void;
+}) {
+  const gateway = executionBackend === "codex_gateway";
+  return (
+    <div className="mt-2 grid gap-2 rounded-md bg-muted/35 p-3 sm:grid-cols-2">
+      <div className="space-y-1.5 sm:col-span-2">
+        <Label className="text-xs">临时调用客户端</Label>
+        <Select
+          value={executionBackend}
+          onChange={(event) => onExecutionBackendChange(event.target.value as LLMExecutionBackend)}
+        >
+          <option value="direct">标准 API 直连</option>
+          <option value="codex_gateway">Codex 客户端兼容模式（Gateway）</option>
+        </Select>
+      </div>
+      <div className="space-y-1.5">
+        <Label className="text-xs">临时协议</Label>
+        <Select
+          value={gateway ? "responses" : apiFormat}
+          disabled={gateway}
+          onChange={(event) => onApiFormatChange(event.target.value as LLMApiFormat)}
+        >
+          {API_FORMAT_OPTIONS.map((option) => (
+            <option key={option.value} value={option.value}>{option.label}</option>
+          ))}
+        </Select>
+      </div>
+      <div className="space-y-1.5">
+        <Label className="text-xs">临时客户端身份</Label>
+        <Select
+          value={identity}
+          disabled={gateway}
+          onChange={(event) => onIdentityChange(event.target.value as LLMClientIdentityProfile)}
+        >
+          {IDENTITY_OPTIONS.map((option) => (
+            <option key={option.value} value={option.value}>{option.label}</option>
+          ))}
+        </Select>
+      </div>
+      <Button type="button" size="sm" className="sm:col-span-2" onClick={onRetry}>
+        使用临时配置重试此模型
+      </Button>
+      <p className="text-[11px] leading-5 text-muted-foreground sm:col-span-2">
+        只影响这次重试，不会保存到 Provider 配置。Gateway 固定使用 Responses，身份由 Gateway 管理。
+      </p>
+    </div>
   );
 }
 
@@ -794,6 +903,10 @@ export function LLMLivenessPage() {
               streaming: true,
               effective_api_format: event.effective_api_format,
               client_identity_profile: event.client_identity_profile,
+              execution_backend: event.execution_backend,
+              gateway_version: event.gateway_version,
+              gateway_request_id: event.gateway_request_id,
+              gateway_stage: event.gateway_stage,
             }));
             return;
           }
@@ -852,6 +965,7 @@ export function LLMLivenessPage() {
   const retryModel = async (
     roundId: string,
     modelId: string,
+    executionBackend: LLMExecutionBackend,
     apiFormat: LLMApiFormat,
     identity: LLMClientIdentityProfile,
   ) => {
@@ -870,6 +984,7 @@ export function LLMLivenessPage() {
       pending: true,
       effective_api_format: apiFormat,
       client_identity_profile: identity,
+      execution_backend: executionBackend,
     });
     try {
       await streamChatTestProviderModels(
@@ -881,6 +996,7 @@ export function LLMLivenessPage() {
           system_prompt: round.systemPrompt,
           max_tokens: round.maxTokens,
           timeout_seconds: round.timeoutSeconds,
+          execution_backend_override: executionBackend,
           api_format_override: apiFormat,
           client_identity_profile_override: identity,
         },
@@ -893,6 +1009,10 @@ export function LLMLivenessPage() {
               streaming: true,
               effective_api_format: event.effective_api_format,
               client_identity_profile: event.client_identity_profile,
+              execution_backend: event.execution_backend,
+              gateway_version: event.gateway_version,
+              gateway_request_id: event.gateway_request_id,
+              gateway_stage: event.gateway_stage,
             }));
             return;
           }
@@ -935,6 +1055,7 @@ export function LLMLivenessPage() {
         error: getErrMsg(error),
         effective_api_format: apiFormat,
         client_identity_profile: identity,
+        execution_backend: executionBackend,
       } : current);
     } finally {
       if (abortRef.current === controller) abortRef.current = null;
@@ -1430,9 +1551,10 @@ export function LLMLivenessPage() {
                               <ChatResponseBranch
                                 key={`${round.id}:${result.requested_model}`}
                                 result={result}
-                                onRetry={(apiFormat, identity) => retryModel(
+                                onRetry={(executionBackend, apiFormat, identity) => retryModel(
                                   round.id,
                                   result.requested_model,
+                                  executionBackend,
                                   apiFormat,
                                   identity,
                                 )}

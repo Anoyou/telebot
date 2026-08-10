@@ -24,7 +24,6 @@ from telethon.tl.types import PeerUser
 
 from app.db.models.feature import (
     FEATURE_FORWARD,
-    FEATURE_SCHEDULER,
 )
 from app.services.interaction.dedupe import interaction_message_claim_key
 from app.worker.plugins import loader as loader_mod
@@ -33,7 +32,6 @@ from app.worker.plugins.events import TelePilotEvent
 from app.worker.plugins.loader import (
     _BUILTIN_MODULES,
     _clear_installed_module_cache,
-    _import_builtins,
     _load_dir,
     _manifest_compatible,
     _missing_plugin_error,
@@ -146,6 +144,49 @@ def test_direct_passthrough_account_opt_in_requires_strict_true(value: object, e
     )
 
     assert loader_mod._plugin_direct_passthrough_enabled(ctx) is expected  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_owner_only_gate_uses_direction_or_message_out_not_event_outgoing() -> None:
+    state = loader_mod._AccountState(account_id=901)
+    state.owner_tg_user_id = 123
+
+    # Telethon 1.44 NewMessage.Event：没有 outgoing 属性，原生方向在 message.out。
+    native_outgoing = SimpleNamespace(
+        sender_id=999,
+        message=SimpleNamespace(out=True, sender_id=999),
+        chat_id=-1001,
+    )
+    assert await loader_mod._event_allowed_for_owner_only(state, native_outgoing) is True
+    assert await loader_mod._event_allowed_for_owner_only(
+        state,
+        native_outgoing,
+        direction="outgoing",
+    ) is True
+
+    # incoming 事件不能因为旧版/自定义对象残留 outgoing=True 就越过 owner gate。
+    misleading_incoming = SimpleNamespace(
+        outgoing=True,
+        sender_id=999,
+        message=SimpleNamespace(out=False, sender_id=999),
+        chat_id=-1001,
+    )
+    assert await loader_mod._event_allowed_for_owner_only(
+        state,
+        misleading_incoming,
+        direction="incoming",
+    ) is False
+
+    owner_incoming = SimpleNamespace(
+        sender_id=123,
+        message=SimpleNamespace(out=False, sender_id=123),
+        chat_id=-1001,
+    )
+    assert await loader_mod._event_allowed_for_owner_only(
+        state,
+        owner_incoming,
+        direction="incoming",
+    ) is True
 
 
 @pytest.mark.parametrize(
@@ -325,21 +366,6 @@ class _FakeScalars:
 @asynccontextmanager
 async def _fake_session_factory(db: _FakeDB):
     yield db
-
-
-# ─────────────────────────────────────────────────────
-# 用例 1：核心内置 plugin 都能被注册
-# ─────────────────────────────────────────────────────
-def test_import_builtins_registers_all_three() -> None:
-    _import_builtins()
-    from app.worker.plugins.base import all_plugins
-
-    reg = all_plugins()
-    for key in (
-        FEATURE_FORWARD,
-        FEATURE_SCHEDULER,
-    ):
-        assert key in reg, f"plugin {key} 未注册"
 
 
 def test_builtin_modules_constant_is_complete() -> None:
@@ -1504,6 +1530,17 @@ def test_manifest_min_telepilot_version_is_preferred() -> None:
     assert "当前 TelePilot 版本太旧" in reason
     assert "插件至少需要 999.0.0" in reason
     assert "请先更新 TelePilot，再重新启用插件" in reason
+
+
+def test_manifest_accepts_legacy_install_hook_without_storing_it() -> None:
+    manifest = Manifest(
+        key="_test_manifest_contract",
+        display_name="Manifest contract",
+        on_install="legacy.install_hook",
+    )
+
+    assert "on_install" not in manifest.__dict__
+    assert "on_install" not in manifest.to_dict()
 
 
 def test_manifest_min_telebot_version_kept_as_legacy_alias() -> None:
@@ -3241,6 +3278,28 @@ async def test_interaction_entry_messages_apply_executes_with_logical_default_ch
 
 
 @pytest.mark.asyncio
+async def test_interaction_entry_messages_apply_rejects_callback_click_bypass() -> None:
+    message_ops = loader_mod._InteractionEntryMessageOps(
+        loader_mod._AccountState(account_id=1521),
+        plugin_key="demo",
+        entry_key="main",
+    )
+
+    with pytest.raises(RuntimeError, match="Interaction Bot 插件入口不支持.*answer_callback"):
+        await message_ops.apply(
+            [
+                {
+                    "type": "click_callback_button",
+                    "chat_id": -100123,
+                    "message_id": 7,
+                    "row": 0,
+                    "column": 0,
+                }
+            ]
+        )
+
+
+@pytest.mark.asyncio
 async def test_invoke_interaction_entry_uses_call_scoped_contexts() -> None:
     seen: list[tuple[str, bool, bool]] = []
     ready: asyncio.Queue[None] = asyncio.Queue()
@@ -3873,6 +3932,86 @@ async def test_direct_passthrough_consumes_raw_event_before_event_bus(monkeypatc
     finally:
         loader_mod._STATES.pop(14, None)
         _REGISTRY.pop("_test_direct_enabled", None)
+
+
+@pytest.mark.asyncio
+async def test_installed_direct_passthrough_receives_sandboxed_button_view(monkeypatch) -> None:
+    from telethon.tl.custom.messagebutton import MessageButton
+    from telethon.tl.types import KeyboardButtonCallback
+
+    from app.worker.plugins.sandbox import SandboxClient, SandboxEvent
+
+    seen_events: list[Any] = []
+
+    class _InstalledDirectPlugin(Plugin):
+        key = "_test_installed_direct_sandbox"
+        display_name = "installed 直通按钮沙箱"
+        owner_only = False
+
+        async def on_direct_message(self, ctx: PluginContext, event: Any) -> dict[str, str]:
+            seen_events.append(event)
+            with pytest.raises(PermissionError, match="click_callback_button"):
+                await event.message.buttons[0][0].click()
+            return {"status": "consumed"}
+
+    _InstalledDirectPlugin._source = "installed"
+    _InstalledDirectPlugin._manifest = Manifest(
+        key=_InstalledDirectPlugin.key,
+        display_name=_InstalledDirectPlugin.display_name,
+        capabilities={
+            "telegram_direct_passthrough": {
+                "enabled": True,
+                "reason": "验证 installed 直通事件包装",
+                "sources": ["userbot"],
+                "directions": ["incoming"],
+            }
+        },
+    )
+    real_client = SimpleNamespace()
+    raw_button = MessageButton(
+        real_client,
+        KeyboardButtonCallback(text="确认", data=b"secret"),
+        chat=-100123,
+        bot=456,
+        msg_id=7,
+    )
+    raw_event = SimpleNamespace(
+        chat_id=-100123,
+        sender_id=456,
+        raw_text="按钮",
+        message=SimpleNamespace(buttons=[[raw_button]]),
+    )
+    state = loader_mod._AccountState(account_id=1401)
+    state.instances[_InstalledDirectPlugin.key] = _InstalledDirectPlugin()
+    state.contexts[_InstalledDirectPlugin.key] = PluginContext(
+        account_id=state.account_id,
+        feature_key=_InstalledDirectPlugin.key,
+        client=SandboxClient(real_client, [], plugin_key=_InstalledDirectPlugin.key),
+        account_config={"direct_passthrough": {"enabled": True}},
+        generation=state.generation,
+    )
+    monkeypatch.setattr(
+        loader_mod,
+        "_start_userbot_direct_passthrough_trace",
+        AsyncMock(return_value=None),
+    )
+    monkeypatch.setattr(loader_mod, "record_span", AsyncMock())
+    monkeypatch.setattr(loader_mod, "finish_trace", AsyncMock())
+    monkeypatch.setattr(loader_mod, "update_plugin_runtime_status", AsyncMock())
+
+    consumed = await loader_mod._dispatch_userbot_direct_passthrough(
+        state,
+        raw_event,
+        direction="incoming",
+        edited=False,
+        event_label="incoming",
+        redis=_FakeRedis(),
+    )
+
+    assert consumed is True
+    assert len(seen_events) == 1
+    assert isinstance(seen_events[0], SandboxEvent)
+    assert seen_events[0] is not raw_event
 
 
 @pytest.mark.asyncio
@@ -6433,6 +6572,62 @@ async def test_userbot_send_message_degrades_buttons_and_synthetic_callback_is_s
 
 
 @pytest.mark.asyncio
+async def test_userbot_delete_undeletable_message_records_skipped_action(monkeypatch) -> None:
+    state = loader_mod._AccountState(account_id=80)
+    state.client = AsyncMock()
+    state.client.delete_messages = AsyncMock(
+        side_effect=RuntimeError("Bad Request: message can't be deleted")
+    )
+    record_action = AsyncMock()
+    monkeypatch.setattr(loader_mod, "record_action", record_action)
+
+    ok = await loader_mod._apply_userbot_delete_message_action(
+        state,
+        SimpleNamespace(chat_id=-100),
+        {
+            "type": "delete_message",
+            "send_via": "userbot_reply",
+            "message_id": 42,
+        },
+    )
+
+    assert ok is True
+    record_action.assert_awaited_once()
+    assert record_action.await_args.args[2] == loader_mod.TRACE_STATUS_SKIPPED
+    assert record_action.await_args.kwargs["error_code"] == "message_not_deletable"
+
+
+@pytest.mark.asyncio
+async def test_userbot_expired_callback_records_skipped_action(monkeypatch) -> None:
+    state = loader_mod._AccountState(account_id=80)
+    record_action = AsyncMock()
+    monkeypatch.setattr(loader_mod, "record_action", record_action)
+    monkeypatch.setattr(
+        loader_mod,
+        "_interaction_bot_token_for_account",
+        AsyncMock(return_value="123:token"),
+    )
+    monkeypatch.setattr(
+        loader_mod.account_bot_service,
+        "answer_callback",
+        AsyncMock(side_effect=RuntimeError("query is too old and response timeout expired")),
+    )
+
+    ok = await loader_mod._apply_userbot_answer_callback_action(
+        state,
+        {
+            "type": "answer_callback",
+            "callback_query_id": "cb-expired",
+        },
+    )
+
+    assert ok is True
+    record_action.assert_awaited_once()
+    assert record_action.await_args.args[2] == loader_mod.TRACE_STATUS_SKIPPED
+    assert record_action.await_args.kwargs["error_code"] == "callback_query_expired"
+
+
+@pytest.mark.asyncio
 async def test_scan_userbot_expired_sessions_invokes_entry_and_deletes(monkeypatch) -> None:
     redis = _FakeRedis()
     state = loader_mod._AccountState(account_id=81)
@@ -6596,3 +6791,1038 @@ async def test_plugin_invoke_deadline_and_circuit_are_scoped_per_plugin(monkeypa
         assert actions[0]["text"] == "ok"
     finally:
         loader_mod._STATES.pop(183, None)
+
+
+@pytest.mark.asyncio
+async def test_userbot_click_callback_button_uses_platform_read_data(monkeypatch):
+    from telethon.tl.types import KeyboardButtonCallback, KeyboardButtonRow, ReplyInlineMarkup
+
+    class Redis:
+        def __init__(self):
+            self.sets = []
+            self.evals = []
+            self.values = {}
+
+        async def set(self, key, value, **kwargs):
+            self.sets.append((key, value, kwargs))
+            self.values[str(key)] = value
+            return True
+
+        async def eval(self, script, numkeys, *args):
+            self.evals.append((script, numkeys, args))
+            key, token, _ttl = args
+            return 1 if self.values.get(str(key)) == token else 0
+
+    class Client:
+        def __init__(self):
+            self.request = None
+            self.read_count = 0
+
+        async def get_messages(self, chat_id, *, ids):
+            assert chat_id == -100123
+            assert ids == 77
+            self.read_count += 1
+            callback_data = b"stale-before-rate-limit" if self.read_count == 1 else b"server-owned"
+            return SimpleNamespace(
+                id=77,
+                empty=False,
+                sender=SimpleNamespace(id=456, bot=True),
+                sender_id=456,
+                reply_markup=ReplyInlineMarkup(
+                    rows=[
+                        KeyboardButtonRow(
+                            buttons=[KeyboardButtonCallback(text="确认", data=callback_data)]
+                        )
+                    ]
+                ),
+            )
+
+        async def __call__(self, request):
+            self.request = request
+            return SimpleNamespace(
+                cache_time=0,
+                message="ok",
+                alert=False,
+                url="https://example.test/login?token=must-not-enter-audit",
+            )
+
+    client = Client()
+    redis = Redis()
+    state = SimpleNamespace(
+        account_id=1,
+        client=client,
+        engine=None,
+        redis=redis,
+        contexts={},
+    )
+    monkeypatch.setattr(
+        loader_mod,
+        "_acquire_userbot_action_rate_limit",
+        AsyncMock(return_value=True),
+    )
+    record = AsyncMock()
+    monkeypatch.setattr(loader_mod, "record_action", record)
+    monkeypatch.setattr(loader_mod, "_emit_userbot_action_tap", AsyncMock())
+
+    ok = await loader_mod._apply_userbot_click_callback_button_action(
+        state,
+        {
+            "type": "click_callback_button",
+            "chat_id": -100123,
+            "message_id": 77,
+            "row": 0,
+            "column": 0,
+            "expected_bot_id": 456,
+            "expected_button_text": "确认",
+        },
+        plugin_key="demo",
+        redis=redis,
+    )
+
+    assert ok is True
+    assert client.read_count == 2
+    assert client.request.data == b"server-owned"
+    assert len(redis.sets) == 1
+    _key, claim_token, lock_options = redis.sets[0]
+    assert claim_token != "1"
+    assert len(claim_token) >= 18
+    assert lock_options == {"nx": True, "ex": 300}
+    assert len(redis.evals) == 1
+    _script, numkeys, eval_args = redis.evals[0]
+    assert numkeys == 1
+    assert eval_args == (_key, claim_token, 20)
+    assert record.await_args.kwargs["actual_send_via"] == "userbot_callback"
+    recorded_result = record.await_args.kwargs["result"]
+    assert recorded_result["url_present"] is True
+    assert recorded_result["message_present"] is True
+    assert "url" not in recorded_result
+    assert "message" not in recorded_result
+
+
+@pytest.mark.asyncio
+async def test_userbot_callback_click_does_not_audit_sensitive_request_exception(monkeypatch):
+    from telethon.tl.types import KeyboardButtonCallback, KeyboardButtonRow, ReplyInlineMarkup
+
+    class Client:
+        async def get_messages(self, _chat_id, *, ids):
+            assert ids == 77
+            return SimpleNamespace(
+                empty=False,
+                sender=SimpleNamespace(id=456, bot=True),
+                sender_id=456,
+                reply_markup=ReplyInlineMarkup(
+                    rows=[
+                        KeyboardButtonRow(
+                            buttons=[KeyboardButtonCallback(text="确认", data=b"server-secret")]
+                        )
+                    ]
+                ),
+            )
+
+        async def __call__(self, _request):
+            raise RuntimeError("callback_data=server-secret")
+
+    redis = _FakeRedis()
+    state = SimpleNamespace(
+        account_id=1,
+        client=Client(),
+        engine=None,
+        redis=redis,
+        contexts={},
+    )
+    failure = AsyncMock(return_value={})
+    monkeypatch.setattr(loader_mod, "_record_userbot_action_failure", failure)
+    monkeypatch.setattr(
+        loader_mod,
+        "_acquire_userbot_action_rate_limit",
+        AsyncMock(return_value=True),
+    )
+
+    ok = await loader_mod._apply_userbot_click_callback_button_action(
+        state,
+        {
+            "type": "click_callback_button",
+            "chat_id": -100123,
+            "message_id": 77,
+            "row": 0,
+            "column": 0,
+        },
+        plugin_key="demo",
+        redis=redis,
+    )
+
+    assert ok is False
+    assert failure.await_args.kwargs["error_code"] == "telegram_api_error"
+    assert "server-secret" not in failure.await_args.kwargs["error"]
+
+
+@pytest.mark.asyncio
+async def test_userbot_click_callback_button_rejects_negative_index(monkeypatch):
+    state = SimpleNamespace(account_id=1, client=AsyncMock(), engine=None, redis=AsyncMock(), contexts={})
+    failure = AsyncMock(return_value={})
+    monkeypatch.setattr(loader_mod, "_record_userbot_action_failure", failure)
+
+    ok = await loader_mod._apply_userbot_click_callback_button_action(
+        state,
+        {
+            "type": "click_callback_button",
+            "chat_id": -100123,
+            "message_id": 77,
+            "row": -1,
+            "column": 0,
+        },
+        plugin_key="demo",
+        redis=state.redis,
+    )
+
+    assert ok is False
+    assert failure.await_args.kwargs["error_code"] == "invalid_button_index"
+    assert failure.await_args.kwargs["channel"] == "userbot_callback"
+    state.client.get_messages.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_userbot_click_callback_button_rejects_missing_callback_data(monkeypatch):
+    from telethon.tl.types import KeyboardButtonCallback, KeyboardButtonRow, ReplyInlineMarkup
+
+    client = AsyncMock()
+    client.get_messages.return_value = SimpleNamespace(
+        empty=False,
+        sender=SimpleNamespace(id=456, bot=True),
+        sender_id=456,
+        reply_markup=ReplyInlineMarkup(
+            rows=[KeyboardButtonRow(buttons=[KeyboardButtonCallback(text="确认", data=b"")])]
+        ),
+    )
+    state = SimpleNamespace(
+        account_id=1,
+        client=client,
+        engine=None,
+        redis=_FakeRedis(),
+        contexts={},
+    )
+    failure = AsyncMock(return_value={})
+    monkeypatch.setattr(loader_mod, "_record_userbot_action_failure", failure)
+
+    ok = await loader_mod._apply_userbot_click_callback_button_action(
+        state,
+        {
+            "type": "click_callback_button",
+            "chat_id": -100123,
+            "message_id": 77,
+            "row": 0,
+            "column": 0,
+        },
+        plugin_key="demo",
+        redis=state.redis,
+    )
+
+    assert ok is False
+    assert failure.await_args.kwargs["error_code"] == "callback_data_missing"
+    client.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_installed_plugin_callback_click_requires_explicit_permission(monkeypatch) -> None:
+    class _InstalledClickPlugin(Plugin):
+        key = "_test_installed_callback_click_permission"
+        display_name = "installed callback click permission"
+
+    _InstalledClickPlugin._source = "installed"
+    _InstalledClickPlugin._manifest = Manifest(
+        key=_InstalledClickPlugin.key,
+        display_name=_InstalledClickPlugin.display_name,
+        permissions=["send_message"],
+    )
+    state = loader_mod._AccountState(account_id=713)
+    state.redis = _FakeRedis()
+    state.instances[_InstalledClickPlugin.key] = _InstalledClickPlugin()
+    apply_click = AsyncMock(return_value=True)
+    record_action = AsyncMock()
+    monkeypatch.setattr(loader_mod, "_apply_userbot_click_callback_button_action", apply_click)
+    monkeypatch.setattr(loader_mod, "record_action", record_action)
+    monkeypatch.setattr(loader_mod, "_emit_userbot_action_tap", AsyncMock())
+    monkeypatch.setattr(loader_mod, "_log", AsyncMock())
+
+    failed = await loader_mod._apply_userbot_event_bus_actions(
+        state,
+        "evt_missing_callback_click_permission",
+        SimpleNamespace(chat_id=-100777),
+        plugin_key=_InstalledClickPlugin.key,
+        entry_key="main",
+        actions=[
+            {
+                "type": "click_callback_button",
+                "chat_id": -100777,
+                "message_id": 9,
+                "row": 0,
+                "column": 0,
+            }
+        ],
+        redis=state.redis,
+    )
+
+    assert failed is True
+    apply_click.assert_not_awaited()
+    assert record_action.await_args.kwargs["error_code"] == "permission_denied"
+    assert record_action.await_args.kwargs["actual_send_via"] == "userbot_callback"
+
+
+@pytest.mark.asyncio
+async def test_installed_plugin_callback_click_accepts_explicit_permission(monkeypatch) -> None:
+    class _InstalledClickPlugin(Plugin):
+        key = "_test_installed_callback_click_permission_allowed"
+        display_name = "installed callback click permission allowed"
+
+    _InstalledClickPlugin._source = "installed"
+    _InstalledClickPlugin._manifest = Manifest(
+        key=_InstalledClickPlugin.key,
+        display_name=_InstalledClickPlugin.display_name,
+        permissions=["click_bot_button"],
+    )
+    state = loader_mod._AccountState(account_id=714)
+    state.redis = _FakeRedis()
+    state.instances[_InstalledClickPlugin.key] = _InstalledClickPlugin()
+    apply_click = AsyncMock(return_value=True)
+    monkeypatch.setattr(loader_mod, "_apply_userbot_click_callback_button_action", apply_click)
+
+    failed = await loader_mod._apply_userbot_event_bus_actions(
+        state,
+        "evt_declared_callback_click_permission",
+        SimpleNamespace(chat_id=-100777),
+        plugin_key=_InstalledClickPlugin.key,
+        entry_key="main",
+        actions=[
+            {
+                "type": "click_callback_button",
+                "chat_id": -100777,
+                "message_id": 9,
+                "row": 0,
+                "column": 0,
+            }
+        ],
+        redis=state.redis,
+    )
+
+    assert failed is False
+    apply_click.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_callback_click_rejects_stale_message_ops_after_plugin_unload(monkeypatch) -> None:
+    state = loader_mod._AccountState(account_id=7141)
+    state.redis = _FakeRedis()
+    apply_click = AsyncMock(return_value=True)
+    record_action = AsyncMock()
+    monkeypatch.setattr(loader_mod, "_apply_userbot_click_callback_button_action", apply_click)
+    monkeypatch.setattr(loader_mod, "record_action", record_action)
+    monkeypatch.setattr(loader_mod, "_emit_userbot_action_tap", AsyncMock())
+
+    failed = await loader_mod._apply_userbot_event_bus_actions(
+        state,
+        "evt_stale_callback_click",
+        SimpleNamespace(chat_id=-100777),
+        plugin_key="removed_plugin",
+        entry_key="background",
+        actions=[
+            {
+                "type": "click_callback_button",
+                "chat_id": -100777,
+                "message_id": 9,
+                "row": 0,
+                "column": 0,
+            }
+        ],
+        redis=state.redis,
+    )
+
+    assert failed is True
+    apply_click.assert_not_awaited()
+    assert record_action.await_args.kwargs["error_code"] == "plugin_not_active"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("message_factory", "action_extra", "error_code"),
+    [
+        (
+            lambda: SimpleNamespace(
+                empty=False,
+                sender=SimpleNamespace(id=456, bot=True),
+                sender_id=456,
+                reply_markup=None,
+            ),
+            {},
+            "inline_keyboard_missing",
+        ),
+        (
+            lambda: SimpleNamespace(
+                empty=False,
+                sender=SimpleNamespace(id=456, bot=True),
+                sender_id=456,
+                reply_markup=__import__(
+                    "telethon.tl.types",
+                    fromlist=["ReplyInlineMarkup"],
+                ).ReplyInlineMarkup(rows=[]),
+            ),
+            {},
+            "button_index_out_of_range",
+        ),
+        (
+            lambda: SimpleNamespace(
+                empty=False,
+                sender=SimpleNamespace(id=456, bot=True),
+                sender_id=456,
+                reply_markup=__import__(
+                    "telethon.tl.types",
+                    fromlist=["ReplyInlineMarkup", "KeyboardButtonRow", "KeyboardButtonUrl"],
+                ).ReplyInlineMarkup(
+                    rows=[
+                        __import__(
+                            "telethon.tl.types",
+                            fromlist=["KeyboardButtonRow"],
+                        ).KeyboardButtonRow(
+                            buttons=[
+                                __import__(
+                                    "telethon.tl.types",
+                                    fromlist=["KeyboardButtonUrl"],
+                                ).KeyboardButtonUrl(text="打开", url="https://example.test")
+                            ]
+                        )
+                    ]
+                ),
+            ),
+            {},
+            "button_type_not_allowed",
+        ),
+        (
+            lambda: SimpleNamespace(
+                empty=False,
+                sender=SimpleNamespace(id=456, bot=False),
+                sender_id=456,
+                reply_markup=__import__(
+                    "telethon.tl.types",
+                    fromlist=["ReplyInlineMarkup", "KeyboardButtonRow", "KeyboardButtonCallback"],
+                ).ReplyInlineMarkup(
+                    rows=[
+                        __import__(
+                            "telethon.tl.types",
+                            fromlist=["KeyboardButtonRow"],
+                        ).KeyboardButtonRow(
+                            buttons=[
+                                __import__(
+                                    "telethon.tl.types",
+                                    fromlist=["KeyboardButtonCallback"],
+                                ).KeyboardButtonCallback(text="确认", data=b"owned")
+                            ]
+                        )
+                    ]
+                ),
+            ),
+            {},
+            "sender_not_bot",
+        ),
+        (
+            lambda: SimpleNamespace(
+                empty=False,
+                sender=SimpleNamespace(id=456, bot=True),
+                sender_id=456,
+                reply_markup=__import__(
+                    "telethon.tl.types",
+                    fromlist=["ReplyInlineMarkup", "KeyboardButtonRow", "KeyboardButtonCallback"],
+                ).ReplyInlineMarkup(
+                    rows=[
+                        __import__(
+                            "telethon.tl.types",
+                            fromlist=["KeyboardButtonRow"],
+                        ).KeyboardButtonRow(
+                            buttons=[
+                                __import__(
+                                    "telethon.tl.types",
+                                    fromlist=["KeyboardButtonCallback"],
+                                ).KeyboardButtonCallback(text="确认", data=b"owned")
+                            ]
+                        )
+                    ]
+                ),
+            ),
+            {"expected_bot_id": 999},
+            "expected_bot_mismatch",
+        ),
+        (
+            lambda: SimpleNamespace(
+                empty=False,
+                sender=SimpleNamespace(id=456, bot=True),
+                sender_id=456,
+                reply_markup=__import__(
+                    "telethon.tl.types",
+                    fromlist=["ReplyInlineMarkup", "KeyboardButtonRow", "KeyboardButtonCallback"],
+                ).ReplyInlineMarkup(
+                    rows=[
+                        __import__(
+                            "telethon.tl.types",
+                            fromlist=["KeyboardButtonRow"],
+                        ).KeyboardButtonRow(
+                            buttons=[
+                                __import__(
+                                    "telethon.tl.types",
+                                    fromlist=["KeyboardButtonCallback"],
+                                ).KeyboardButtonCallback(text="确认", data=b"owned")
+                            ]
+                        )
+                    ]
+                ),
+            ),
+            {"expected_button_text": "取消"},
+            "expected_button_text_mismatch",
+        ),
+    ],
+)
+async def test_userbot_callback_click_rejects_unsafe_or_mismatched_target(
+    monkeypatch,
+    message_factory,
+    action_extra,
+    error_code,
+) -> None:
+    client = AsyncMock()
+    client.get_messages.return_value = message_factory()
+    state = SimpleNamespace(
+        account_id=1,
+        client=client,
+        engine=None,
+        redis=_FakeRedis(),
+        contexts={},
+    )
+    failure = AsyncMock(return_value={})
+    monkeypatch.setattr(loader_mod, "_record_userbot_action_failure", failure)
+
+    ok = await loader_mod._apply_userbot_click_callback_button_action(
+        state,
+        {
+            "type": "click_callback_button",
+            "chat_id": -100123,
+            "message_id": 77,
+            "row": 0,
+            "column": 0,
+            **action_extra,
+        },
+        plugin_key="demo",
+        redis=state.redis,
+    )
+
+    assert ok is False
+    assert failure.await_args.kwargs["error_code"] == error_code
+    assert failure.await_args.kwargs["channel"] == "userbot_callback"
+
+
+@pytest.mark.asyncio
+async def test_userbot_callback_click_dry_run_does_not_claim_or_send(monkeypatch) -> None:
+    from telethon.tl.types import KeyboardButtonCallback, KeyboardButtonRow, ReplyInlineMarkup
+
+    redis = _FakeRedis()
+    client = AsyncMock()
+    client.get_messages.return_value = SimpleNamespace(
+        empty=False,
+        sender=SimpleNamespace(id=456, bot=True),
+        sender_id=456,
+        reply_markup=ReplyInlineMarkup(
+            rows=[KeyboardButtonRow(buttons=[KeyboardButtonCallback(text="确认", data=b"owned")])]
+        ),
+    )
+    state = SimpleNamespace(
+        account_id=1,
+        client=client,
+        engine=None,
+        redis=redis,
+        contexts={},
+    )
+    dry_run = AsyncMock()
+    monkeypatch.setattr(loader_mod, "_action_dev_mode_dry_run_enabled", lambda *_args: True)
+    monkeypatch.setattr(loader_mod, "_record_userbot_dry_run", dry_run)
+
+    ok = await loader_mod._apply_userbot_click_callback_button_action(
+        state,
+        {
+            "type": "click_callback_button",
+            "chat_id": -100123,
+            "message_id": 77,
+            "row": 0,
+            "column": 0,
+        },
+        plugin_key="demo",
+        redis=redis,
+    )
+
+    assert ok is True
+    assert redis.sets == []
+    client.assert_not_awaited()
+    assert dry_run.await_args.kwargs["channel"] == "userbot_callback"
+
+
+@pytest.mark.asyncio
+async def test_userbot_callback_click_rate_limit_rejection_does_not_claim_dedupe(monkeypatch) -> None:
+    from telethon.tl.types import KeyboardButtonCallback, KeyboardButtonRow, ReplyInlineMarkup
+
+    redis = _FakeRedis()
+    client = AsyncMock()
+    client.get_messages.return_value = SimpleNamespace(
+        empty=False,
+        sender=SimpleNamespace(id=456, bot=True),
+        sender_id=456,
+        reply_markup=ReplyInlineMarkup(
+            rows=[KeyboardButtonRow(buttons=[KeyboardButtonCallback(text="确认", data=b"owned")])]
+        ),
+    )
+    state = SimpleNamespace(
+        account_id=1,
+        client=client,
+        engine=SimpleNamespace(
+            acquire=AsyncMock(
+                return_value=SimpleNamespace(
+                    allowed=False,
+                    outcome="limited",
+                    reason="too fast",
+                    wait_seconds=3,
+                )
+            )
+        ),
+        redis=redis,
+        contexts={},
+    )
+    record_action = AsyncMock()
+    action_tap = AsyncMock()
+    monkeypatch.setattr(loader_mod, "record_action", record_action)
+    monkeypatch.setattr(loader_mod, "_emit_userbot_action_tap", action_tap)
+
+    ok = await loader_mod._apply_userbot_click_callback_button_action(
+        state,
+        {
+            "type": "click_callback_button",
+            "chat_id": -100123,
+            "message_id": 77,
+            "row": 0,
+            "column": 0,
+        },
+        plugin_key="demo",
+        redis=redis,
+    )
+
+    assert ok is False
+    assert redis.sets == []
+    assert redis.values == {}
+    assert client.get_messages.await_count == 1
+    client.assert_not_awaited()
+    assert record_action.await_args.args[2] == loader_mod.TRACE_STATUS_SKIPPED
+    assert record_action.await_args.kwargs["actual_send_via"] == "userbot_callback"
+    assert action_tap.await_args.kwargs["channel"] == "userbot_callback"
+
+
+@pytest.mark.asyncio
+async def test_userbot_callback_click_revalidates_edited_button_after_rate_limit(monkeypatch) -> None:
+    from telethon.tl.types import KeyboardButtonCallback, KeyboardButtonRow, ReplyInlineMarkup
+
+    redis = _FakeRedis()
+    client = AsyncMock()
+    client.get_messages.side_effect = [
+        SimpleNamespace(
+            empty=False,
+            sender=SimpleNamespace(id=456, bot=True),
+            sender_id=456,
+            reply_markup=ReplyInlineMarkup(
+                rows=[KeyboardButtonRow(buttons=[KeyboardButtonCallback(text="确认", data=b"old")])]
+            ),
+        ),
+        SimpleNamespace(
+            empty=False,
+            sender=SimpleNamespace(id=456, bot=True),
+            sender_id=456,
+            reply_markup=ReplyInlineMarkup(
+                rows=[KeyboardButtonRow(buttons=[KeyboardButtonCallback(text="取消", data=b"new")])]
+            ),
+        ),
+    ]
+    state = SimpleNamespace(
+        account_id=1,
+        client=client,
+        engine=None,
+        redis=redis,
+        contexts={},
+    )
+    failure = AsyncMock(return_value={})
+    monkeypatch.setattr(loader_mod, "_record_userbot_action_failure", failure)
+    monkeypatch.setattr(
+        loader_mod,
+        "_acquire_userbot_action_rate_limit",
+        AsyncMock(return_value=True),
+    )
+
+    ok = await loader_mod._apply_userbot_click_callback_button_action(
+        state,
+        {
+            "type": "click_callback_button",
+            "chat_id": -100123,
+            "message_id": 77,
+            "row": 0,
+            "column": 0,
+            "expected_bot_id": 456,
+            "expected_button_text": "确认",
+        },
+        plugin_key="demo",
+        redis=redis,
+    )
+
+    assert ok is False
+    assert client.get_messages.await_count == 2
+    assert failure.await_args.kwargs["error_code"] == "expected_button_text_mismatch"
+    assert redis.sets == []
+    client.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_userbot_callback_click_rechecks_plugin_after_dedupe_await(monkeypatch) -> None:
+    from telethon.tl.types import KeyboardButtonCallback, KeyboardButtonRow, ReplyInlineMarkup
+
+    class _ActiveClickPlugin(Plugin):
+        key = "demo"
+        display_name = "active click"
+
+    instance = _ActiveClickPlugin()
+    message = SimpleNamespace(
+        empty=False,
+        sender=SimpleNamespace(id=456, bot=True),
+        sender_id=456,
+        reply_markup=ReplyInlineMarkup(
+            rows=[KeyboardButtonRow(buttons=[KeyboardButtonCallback(text="确认", data=b"owned")])]
+        ),
+    )
+
+    class Client:
+        def __init__(self) -> None:
+            self.requests = []
+
+        async def get_messages(self, _chat_id, *, ids):
+            assert ids == 77
+            return message
+
+        async def __call__(self, request):
+            self.requests.append(request)
+            return SimpleNamespace(cache_time=0, message="ok", alert=False, url=None)
+
+    state = SimpleNamespace(
+        account_id=1,
+        client=Client(),
+        engine=None,
+        contexts={},
+        instances={"demo": instance},
+    )
+
+    class ReloadingRedis(_FakeRedis):
+        async def set(self, key: str, value: str, **kwargs):
+            claimed = await super().set(key, value, **kwargs)
+            state.instances.pop("demo", None)
+            return claimed
+
+    redis = ReloadingRedis()
+    failure = AsyncMock(return_value={})
+    monkeypatch.setattr(loader_mod, "_record_userbot_action_failure", failure)
+    monkeypatch.setattr(
+        loader_mod,
+        "_acquire_userbot_action_rate_limit",
+        AsyncMock(return_value=True),
+    )
+
+    ok = await loader_mod._apply_userbot_click_callback_button_action(
+        state,
+        {
+            "type": "click_callback_button",
+            "chat_id": -100123,
+            "message_id": 77,
+            "row": 0,
+            "column": 0,
+        },
+        plugin_key="demo",
+        redis=redis,
+        expected_plugin_instance=instance,
+    )
+
+    assert ok is False
+    assert failure.await_args.kwargs["error_code"] == "plugin_not_active"
+    assert state.client.requests == []
+
+
+@pytest.mark.asyncio
+async def test_userbot_callback_click_concurrent_requests_only_click_once(monkeypatch) -> None:
+    from telethon.tl.types import KeyboardButtonCallback, KeyboardButtonRow, ReplyInlineMarkup
+
+    message = SimpleNamespace(
+        empty=False,
+        sender=SimpleNamespace(id=456, bot=True),
+        sender_id=456,
+        reply_markup=ReplyInlineMarkup(
+            rows=[KeyboardButtonRow(buttons=[KeyboardButtonCallback(text="确认", data=b"owned")])]
+        ),
+    )
+
+    class Client:
+        def __init__(self) -> None:
+            self.read_counts: dict[asyncio.Task, int] = {}
+            self.read_barriers = {1: asyncio.Event(), 2: asyncio.Event()}
+            self.read_waiters = {1: 0, 2: 0}
+            self.requests = []
+
+        async def get_messages(self, chat_id, *, ids):
+            assert chat_id == -100123
+            assert ids == 77
+            task = asyncio.current_task()
+            assert task is not None
+            read_number = self.read_counts.get(task, 0) + 1
+            self.read_counts[task] = read_number
+            self.read_waiters[read_number] += 1
+            if self.read_waiters[read_number] == 2:
+                self.read_barriers[read_number].set()
+            await self.read_barriers[read_number].wait()
+            return message
+
+        async def __call__(self, request):
+            self.requests.append(request)
+            return SimpleNamespace(cache_time=0, message="ok", alert=False, url=None)
+
+    redis = _FakeRedis()
+    client = Client()
+    state = SimpleNamespace(
+        account_id=1,
+        client=client,
+        engine=None,
+        redis=redis,
+        contexts={},
+    )
+    failures = []
+
+    async def record_failure(*_args, **kwargs):
+        failures.append(kwargs["error_code"])
+        return {}
+
+    monkeypatch.setattr(loader_mod, "_record_userbot_action_failure", record_failure)
+    monkeypatch.setattr(
+        loader_mod,
+        "_acquire_userbot_action_rate_limit",
+        AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(loader_mod, "record_action", AsyncMock())
+    monkeypatch.setattr(loader_mod, "_emit_userbot_action_tap", AsyncMock())
+    action = {
+        "type": "click_callback_button",
+        "chat_id": -100123,
+        "message_id": 77,
+        "row": 0,
+        "column": 0,
+        "expected_bot_id": 456,
+        "expected_button_text": "确认",
+    }
+
+    results = await asyncio.gather(
+        loader_mod._apply_userbot_click_callback_button_action(
+            state,
+            dict(action),
+            plugin_key="demo",
+            redis=redis,
+        ),
+        loader_mod._apply_userbot_click_callback_button_action(
+            state,
+            dict(action),
+            plugin_key="demo_other",
+            redis=redis,
+        ),
+    )
+
+    assert sorted(results) == [False, True]
+    assert len(redis.sets) == 1
+    assert len(client.requests) == 1
+    assert failures == ["duplicate_button_click"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("distributed_engine_fails", [False, True])
+async def test_userbot_callback_local_rate_limit_rejection_is_audited(
+    monkeypatch,
+    distributed_engine_fails,
+) -> None:
+    from app.worker import command as command_mod
+
+    engine = (
+        SimpleNamespace(acquire=AsyncMock(side_effect=RuntimeError("distributed down")))
+        if distributed_engine_fails
+        else None
+    )
+    state = SimpleNamespace(
+        account_id=1,
+        engine=engine,
+        redis=_FakeRedis(),
+    )
+    local_acquire = AsyncMock(
+        return_value=(
+            False,
+            {
+                "outcome": "rejected",
+                "wait_seconds": 2.5,
+                "rate_limit_action": "callback_query",
+                "rate_limit_backend": "local_fallback",
+                "reason": "local_fallback_throttled",
+            },
+        )
+    )
+    record_action = AsyncMock()
+    action_tap = AsyncMock()
+    monkeypatch.setattr(command_mod, "acquire_userbot_action_rate_limit", local_acquire)
+    monkeypatch.setattr(loader_mod, "record_action", record_action)
+    monkeypatch.setattr(loader_mod, "_emit_userbot_action_tap", action_tap)
+    monkeypatch.setattr(loader_mod, "_log", AsyncMock())
+    action = {
+        "type": "click_callback_button",
+        "chat_id": -100123,
+        "context": {"trace_id": "trace-local-limit"},
+    }
+
+    allowed = await loader_mod._acquire_userbot_action_rate_limit(
+        state,
+        action,
+        action_type="click_callback_button",
+        target_chat_id=-100123,
+    )
+
+    assert allowed is False
+    record_action.assert_awaited_once()
+    assert record_action.await_args.args[2] == loader_mod.TRACE_STATUS_SKIPPED
+    assert record_action.await_args.kwargs["actual_send_via"] == "userbot_callback"
+    assert record_action.await_args.kwargs["result"]["rate_limit_backend"] == "local_fallback"
+    action_tap.assert_awaited_once()
+    assert action_tap.await_args.kwargs["channel"] == "userbot_callback"
+
+
+@pytest.mark.asyncio
+async def test_userbot_callback_click_dedupe_and_redis_fail_closed(monkeypatch) -> None:
+    from telethon.tl.types import KeyboardButtonCallback, KeyboardButtonRow, ReplyInlineMarkup
+
+    message = SimpleNamespace(
+        empty=False,
+        sender=SimpleNamespace(id=456, bot=True),
+        sender_id=456,
+        reply_markup=ReplyInlineMarkup(
+            rows=[KeyboardButtonRow(buttons=[KeyboardButtonCallback(text="确认", data=b"owned")])]
+        ),
+    )
+
+    class BrokenRedis:
+        async def set(self, *_args, **_kwargs):
+            raise RuntimeError("redis down")
+
+    for redis, expected_code in (
+        (_FakeRedis(), "duplicate_button_click"),
+        (BrokenRedis(), "dedupe_unavailable"),
+    ):
+        client = AsyncMock()
+        client.get_messages.return_value = message
+        state = SimpleNamespace(
+            account_id=1,
+            client=client,
+            engine=None,
+            redis=redis,
+            contexts={},
+        )
+        failure = AsyncMock(return_value={})
+        monkeypatch.setattr(loader_mod, "_record_userbot_action_failure", failure)
+        if isinstance(redis, _FakeRedis):
+            redis.values["tp:plugin:callback-click:1:-100123:77:0:0"] = "1"
+
+        ok = await loader_mod._apply_userbot_click_callback_button_action(
+            state,
+            {
+                "type": "click_callback_button",
+                "chat_id": -100123,
+                "message_id": 77,
+                "row": 0,
+                "column": 0,
+            },
+            plugin_key="demo",
+            redis=redis,
+        )
+
+        assert ok is False
+        assert failure.await_args.kwargs["error_code"] == expected_code
+        assert failure.await_args.kwargs["channel"] == "userbot_callback"
+        client.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_interaction_bot_entry_rejects_callback_click() -> None:
+    state = loader_mod._AccountState(account_id=715)
+    message_ops = loader_mod._InteractionEntryMessageOps(
+        state,
+        plugin_key="demo",
+        entry_key="main",
+    )
+
+    with pytest.raises(RuntimeError, match="Interaction Bot 插件入口不支持.*answer_callback"):
+        await message_ops.click_callback_button(
+            chat_id=-100123,
+            message_id=77,
+            row=0,
+            column=0,
+        )
+
+    userbot_message_ops = loader_mod._InteractionEntryMessageOps(
+        state,
+        plugin_key="demo",
+        entry_key="main",
+        allow_userbot_callback_click=True,
+    )
+    action = await userbot_message_ops.click_callback_button(
+        chat_id=-100123,
+        message_id=77,
+        row=0,
+        column=0,
+    )
+    assert action["type"] == "click_callback_button"
+
+
+@pytest.mark.asyncio
+async def test_live_message_ops_routes_background_callback_click_through_executor(
+    monkeypatch,
+) -> None:
+    """后台/调度上下文不能绕开统一 UserBot action 执行器。"""
+
+    state = loader_mod._AccountState(account_id=716)
+    state.redis = _FakeRedis()
+    apply_actions = AsyncMock(return_value=False)
+    monkeypatch.setattr(loader_mod, "_apply_userbot_event_bus_actions", apply_actions)
+    message_ops = loader_mod._LiveMessageOps(
+        state,
+        plugin_key="demo",
+        entry_key="scheduled",
+    )
+
+    action = await message_ops.click_callback_button(
+        chat_id=-100123,
+        message_id=77,
+        row=0,
+        column=0,
+        expected_bot_id=456,
+        expected_button_text="确认",
+    )
+
+    assert action["type"] == "click_callback_button"
+    assert action["expected_bot_id"] == 456
+    assert action["expected_button_text"] == "确认"
+    apply_actions.assert_awaited_once()
+    assert apply_actions.await_args.kwargs["plugin_key"] == "demo"
+    assert apply_actions.await_args.kwargs["entry_key"] == "scheduled"
+    routed_action = apply_actions.await_args.kwargs["actions"][0]
+    assert {
+        key: value
+        for key, value in routed_action.items()
+        if key != "context"
+    } == action
+    assert routed_action["context"] == {
+        "plugin_key": "demo",
+        "entry_key": "scheduled",
+    }

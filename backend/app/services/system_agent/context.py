@@ -30,6 +30,8 @@ class ToolContext:
     action: Any | None = None
     # 阶段 3：当轮从用户消息提取的密钥明文（仅请求内存，不落库）
     chat_secrets: list[str] | None = None
+    # 仅在当前事务内使用，不进入 Action.arguments 或审计结果。
+    gateway_candidate_sync: bool = False
 
     def require_role(self, min_role: str) -> None:
         from .registry import role_at_least

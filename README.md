@@ -52,7 +52,7 @@ TelePilot 面向需要自托管 Telegram 自动化的个人用户和小团队。
 | 工作台 | 当前实现 |
 | --- | --- |
 | 插件 | 内置插件、本地导入、ZIP 安装和 Git 远程仓库；支持签名策略、权限声明、版本检查、全局安装、按账号启停、配置页和 Worker 热重载 |
-| AI | OpenAI Chat Completions、OpenAI Responses、Anthropic Messages 与 Ollama 兼容协议；支持模型发现、测活、路由标签、客户端身份、加密兼容请求头、调用记录、Token 与预算 |
+| AI | OpenAI Chat Completions、OpenAI Responses、Anthropic Messages 与 Ollama 兼容协议；Responses Provider 可选 Codex 客户端兼容模式（Gateway）；支持模型发现、测活、路由标签、客户端身份、加密兼容请求头、调用记录、Token 与预算 |
 | 系统助手与待确认 | Web 悬浮助手和管理 Bot `/agent` 共用可恢复 Durable Run；思考与正文分流、工具渐进披露、同 Provider 重试与 fallback、公开网页读取、源码只读诊断、长期记忆和写操作 Action 确认 |
 | 交互 | 独立 Interaction Bot manager 承接关键词、付款确认、按钮回调和群会话；会话状态持久化，命令入口仍可走用户账号通道 |
 | 指令与任务 | 消息模板、AI 指令、定时任务和自动命令白名单集中在一级工作台，支持按账号启用和立即执行 |
@@ -93,6 +93,7 @@ flowchart LR
 ```
 
 - FastAPI 负责 Web API、认证、配置、System Agent、两个 Bot manager 和 Worker Supervisor。
+- Codex 客户端兼容模式（Gateway）是最接近真实 Codex Responses 客户端公开请求契约的内置调用方式；它由 Web 按需拉起独立 Go 子进程，仅通过 Unix Socket 服务选择 Gateway 的 Responses Provider，不是额外 Compose 服务，也不接管 Agent 决策。
 - 每个运行中的账号对应一个独立 `multiprocessing.spawn` Worker，Worker 内运行 Telethon、插件、命令和调度器。
 - PostgreSQL 保存业务数据和加密后的敏感字段；Redis 用于 IPC、租约、去重、限速和短期状态。
 - FastAPI 启动时分别拉起 Supervisor、Account Bot manager 和 Interaction Bot manager。失败会进入后台重试，并让 `/readyz` 保持未就绪。
@@ -145,7 +146,7 @@ make down     # 停止服务，保留数据和依赖
 curl -fsSL https://raw.githubusercontent.com/Anoyou/telebot/main/scripts/install-server.sh | bash
 ```
 
-脚本默认安装到 `/opt/telepilot`，生成生产密钥并启动 PostgreSQL、Redis、FastAPI/Worker、前端 Nginx 和内网 Updater。公网使用前还要配置 HTTPS、反向代理和备份，详见 [公网部署指南](./docs/DEPLOY-PUBLIC.md)。
+脚本默认安装到 `/opt/telepilot`，生成生产密钥，从 GHCR 拉取预构建的 AMD64/ARM64 应用镜像，并启动 PostgreSQL、Redis、FastAPI/Worker、前端 Nginx 和内网 Updater。服务器不需要编译前端或应用镜像。公网使用前还要配置 HTTPS、反向代理和备份，详见 [公网部署指南](./docs/DEPLOY-PUBLIC.md)。
 
 已克隆仓库可以手动初始化生产配置：
 
@@ -203,6 +204,8 @@ make plugin-register dir=plugins/local_imports/my_game
 | 组件、数据流和生命周期 | [架构说明](./docs/TELEPILOT-ARCHITECTURE.md) |
 | 平台模块热关闭与恢复 | [平台能力](./docs/PLATFORM-CAPABILITIES.md) |
 | System Agent、Durable Run 与 Action | [系统助手](./docs/SYSTEM-AGENT.md) |
+| Codex 客户端兼容 Gateway 管理、健康与排障 | [Codex Gateway](./docs/CODEX-GATEWAY.md) |
+| 内部 HTTP API、认证、错误与类型生成 | [API 契约](./docs/API-CONTRACT.md) |
 | 插件开发入口 | [插件开发指南](./docs/PLUGIN-DEV-GUIDE.md) |
 | 插件字段、事件、action 和生命周期 | [插件 API 参考](./docs/PLUGIN-API-REFERENCE.md) |
 | 外部系统触发插件 | [Webhook Quickstart](./docs/PLUGIN-WEBHOOK-QUICKSTART.md) |
@@ -218,7 +221,7 @@ make plugin-register dir=plugins/local_imports/my_game
 
 TelePilot 仍处于 0.x 快速迭代阶段，主要面向单租户、自托管和个人可信环境。`main` 是稳定发布线，开发分支使用对应正式版本的 `beta.N` 预发布号；接口、页面和插件契约仍可能调整。升级前请阅读 [CHANGELOG](./CHANGELOG.md) 并完成备份。
 
-当前源码版本以 `backend/app/__init__.py`、`backend/pyproject.toml`、`frontend/package.json` 与 `frontend/src/lib/version.ts` 为准。仓库历史名称仍是 `Telebot`，部分数据库默认值、Docker volume 和兼容字段保留旧名称，避免已有部署升级后连接到空数据；产品名称和界面统一使用 TelePilot。
+当前源码版本以 `backend/app/__init__.py`、`backend/pyproject.toml`、`frontend/package.json` 与 `frontend/src/lib/version.ts` 四个源文件为准，并由 `make codegen` 同步到 `openapi/telepilot.openapi.json` 的 `info.version` 作为第五处发布校验。仓库历史名称仍是 `Telebot`，部分数据库默认值、Docker volume 和兼容字段保留旧名称，避免已有部署升级后连接到空数据；产品名称和界面统一使用 TelePilot。
 
 ## License
 

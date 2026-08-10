@@ -9,6 +9,7 @@ import type { LLMUsageRecord } from "@/api/llmUsage";
 import { listLLMProviders } from "@/api/commands";
 import { getErrMsg } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { executionBackendLabel, isGatewayBackend } from "@/lib/providerExecutionBackend";
 import { Spinner } from "@/components/ui/misc";
 import { Button } from "@/components/ui/button";
 import { MetaBadge } from "@/components/ui/meta-badge";
@@ -213,7 +214,7 @@ export function RecentUsageContent() {
         ) : (
           <>
           <div className="hidden overflow-x-auto md:block">
-            <Table className="min-w-[1040px]">
+            <Table className="min-w-[1140px]">
               <TableHeader>
                 <TableRow>
                   <TableHead>时间</TableHead>
@@ -221,6 +222,7 @@ export function RecentUsageContent() {
                   <TableHead>模型提供商</TableHead>
                   <TableHead>模型</TableHead>
                   <TableHead>客户端</TableHead>
+                  <TableHead>实际后端</TableHead>
                   <TableHead>Token</TableHead>
                   <TableHead>耗时</TableHead>
                   <TableHead>结果</TableHead>
@@ -245,7 +247,12 @@ export function RecentUsageContent() {
                         </TableCell>
                         <TableCell>{r.provider_name || (r.provider_id ? `#${r.provider_id}` : "-")}</TableCell>
                         <TableCell className="font-mono text-xs">{r.model || "-"}</TableCell>
-                        <TableCell>{clientIdentityLabel(r.client_identity_profile)}</TableCell>
+                        <TableCell>{isGatewayBackend(r.execution_backend) ? "由 Gateway 管理" : clientIdentityLabel(r.client_identity_profile)}</TableCell>
+                        <TableCell>
+                          <MetaBadge mono tone={isGatewayBackend(r.execution_backend) ? "info" : "neutral"}>
+                            {executionBackendLabel(r.execution_backend, "未记录")}
+                          </MetaBadge>
+                        </TableCell>
                         <TableCell>{tokens}</TableCell>
                         <TableCell>{r.latency_ms != null ? `${r.latency_ms}ms` : "-"}</TableCell>
                         <TableCell>
@@ -273,7 +280,7 @@ export function RecentUsageContent() {
                       </TableRow>
                       {expanded ? (
                         <TableRow>
-                          <TableCell colSpan={11} className="bg-muted/25 p-0">
+                          <TableCell colSpan={12} className="bg-muted/25 p-0">
                             <UsageDetailPanel record={r} />
                           </TableCell>
                         </TableRow>
@@ -335,7 +342,10 @@ function UsageRecordCard({
         </div>
         <div className="mt-3 flex items-center justify-between gap-2">
           <div className="flex flex-wrap gap-1.5">
-            <MetaBadge tone="info">客户端 {clientIdentityLabel(record.client_identity_profile)}</MetaBadge>
+            <MetaBadge tone="info">客户端 {isGatewayBackend(record.execution_backend) ? "由 Gateway 管理" : clientIdentityLabel(record.client_identity_profile)}</MetaBadge>
+            <MetaBadge mono tone={isGatewayBackend(record.execution_backend) ? "info" : "neutral"}>
+              实际后端 {executionBackendLabel(record.execution_backend, "未记录")}
+            </MetaBadge>
             {record.used_fallback ? <MetaBadge tone="outline">已 Fallback</MetaBadge> : null}
             {record.error_type ? <MetaBadge tone="warn">{usageErrorLabel(record.error_type)}</MetaBadge> : null}
           </div>
@@ -361,9 +371,17 @@ function UsageDetailPanel({ record }: { record: LLMUsageRecord }) {
         <InfoCell label="调用来源" value={usageSourceLabel(record.source)} />
         <InfoCell label="账号" value={record.account_id == null ? "-" : `#${record.account_id}`} />
         <InfoCell label="模型提供商" value={record.provider_name || (record.provider_id ? `#${record.provider_id}` : "-")} />
-        <InfoCell label="客户端" value={clientIdentityLabel(record.client_identity_profile)} />
+        <InfoCell label="客户端" value={isGatewayBackend(record.execution_backend) ? "由 Gateway 管理" : clientIdentityLabel(record.client_identity_profile)} />
+        <InfoCell label="实际后端" value={executionBackendLabel(record.execution_backend, "未记录")} />
         <InfoCell label="Token" value={`${record.input_tokens || 0} 输入 / ${record.output_tokens || 0} 输出`} />
       </div>
+      {isGatewayBackend(record.execution_backend) ? (
+        <div className="grid gap-2 text-xs sm:grid-cols-3">
+          <InfoCell label="Gateway 版本" value={record.gateway_version || "未记录"} />
+          <InfoCell label="Gateway 阶段" value={record.gateway_stage || "未记录"} />
+          <InfoCell label="Gateway Request ID" value={record.gateway_request_id || "未记录"} />
+        </div>
+      ) : null}
       <div className="grid gap-3 lg:grid-cols-2">
         <PreviewBlock title="请求预览" text={record.request_preview} empty="这条历史调用没有保存请求预览；更新后产生的新调用会显示截断脱敏内容。" />
         <PreviewBlock
@@ -454,9 +472,9 @@ function clientIdentityLabel(profile?: string | null): string {
     auto: "自动选择",
     minimal: "最小身份",
     openai_sdk: "OpenAI SDK（标准 API）",
-    codex_tui: "Codex TUI",
-    codex_cli: "Codex TUI（旧记录）",
-    codex_exec: "Codex TUI（旧记录）",
+    codex_tui: "Codex 兼容请求头（非官方运行时）",
+    codex_cli: "Codex 兼容请求头（旧记录）",
+    codex_exec: "Codex 兼容请求头（旧记录）",
     codex_desktop: "Codex Desktop",
     claude_code: "Claude Code CLI",
     claude_desktop: "Claude Code CLI（旧 Desktop 配置）",
@@ -469,13 +487,29 @@ function usageErrorLabel(errorType?: string | null): string {
   const value = errorType?.trim() || "";
   const labels: Record<string, string> = {
     auth: "鉴权失败",
+    auth_failed: "鉴权失败",
+    permission_denied: "权限不足",
+    client_rejected: "客户端受限",
+    official_account_required: "需要官方账号运行时",
+    account_policy: "账号或内容策略限制",
+    model_missing: "模型不存在",
+    endpoint_missing: "接口路径不存在",
+    request_invalid: "请求参数无效",
+    context_limit: "上下文超限",
+    quota_exhausted: "额度耗尽",
     budget_exceeded: "额度不足",
     cancelled: "调用已取消",
     consumer_closed: "连接已关闭",
     llmerror: "模型调用错误",
     network: "网络错误",
+    network_error: "网络错误",
     rate_limit: "请求过多",
+    rate_limited: "请求过多",
     server_error: "上游服务错误",
+    upstream_error: "上游服务错误",
+    gateway_unavailable: "Gateway 不可用",
+    gateway_overloaded: "Gateway 已过载",
+    invalid_response: "响应格式错误",
     timeout: "请求超时",
     unknown: "未知错误",
     valueerror: "响应格式错误",

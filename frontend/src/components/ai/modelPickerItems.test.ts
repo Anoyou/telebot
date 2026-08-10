@@ -24,6 +24,7 @@ test("matrixToPickerItems 默认只保留已启用模型", () => {
         provider_id: 2,
         provider_name: "OpenAI",
         model: "gpt-5.6-terra-max",
+        execution_backend: "codex_gateway",
         // 缺省 enabled 视为可用，兼容旧缓存
         declared_supports_tools: true,
       },
@@ -34,6 +35,10 @@ test("matrixToPickerItems 默认只保留已启用模型", () => {
   assert.deepEqual(
     items.map((item) => item.model),
     ["deepseek-chat", "gpt-5.6-terra-max"],
+  );
+  assert.deepEqual(
+    items.map((item) => item.executionBackend),
+    ["direct", "codex_gateway"],
   );
 });
 

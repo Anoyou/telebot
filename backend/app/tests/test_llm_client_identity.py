@@ -90,14 +90,14 @@ def _responses_response() -> _Response:
 
 def test_auto_identity_maps_by_effective_format() -> None:
     assert default_identity_for_format(LLM_API_FORMAT_CHAT_COMPLETIONS) == CLIENT_IDENTITY_OPENAI_SDK
-    assert default_identity_for_format(LLM_API_FORMAT_RESPONSES) == CLIENT_IDENTITY_CODEX_TUI
+    assert default_identity_for_format(LLM_API_FORMAT_RESPONSES) == CLIENT_IDENTITY_OPENAI_SDK
     assert default_identity_for_format(LLM_API_FORMAT_ANTHROPIC_MESSAGES) == CLIENT_IDENTITY_CLAUDE_CODE
 
 
 def test_resolve_auto_uses_effective_format_not_provider_default() -> None:
     # Provider 默认 chat_completions，但本次实际协议是 responses（联网搜索切协议）。
     identity = resolve_identity("auto", LLM_API_FORMAT_RESPONSES)
-    assert identity.profile == CLIENT_IDENTITY_CODEX_TUI
+    assert identity.profile == CLIENT_IDENTITY_OPENAI_SDK
 
 
 def test_fixed_identity_incompatible_falls_back_to_auto_for_format() -> None:
@@ -189,7 +189,7 @@ async def test_responses_client_sends_codex_identity() -> None:
     fake = AsyncMock()
     fake.__aenter__.return_value = fake
     fake.post = AsyncMock(return_value=_responses_response())
-    identity = resolve_identity("auto", LLM_API_FORMAT_RESPONSES)
+    identity = resolve_identity("codex_tui", LLM_API_FORMAT_RESPONSES)
     with patch("app.services.llm_client.httpx.AsyncClient", return_value=fake):
         await ResponsesClient("sk", "https://api.example/v1", "model", identity=identity).complete(
             "system", "hello"
@@ -200,7 +200,7 @@ async def test_responses_client_sends_codex_identity() -> None:
     assert headers.get("originator") == "codex-tui"
     assert headers.get("session-id")
     assert headers.get("thread-id") == headers["session-id"]
-    assert headers.get("x-client-request-id") == headers["session-id"]
+    assert headers.get("x-client-request-id") != headers["session-id"]
     assert "session_id" not in headers
     assert "conversation_id" not in headers
 
@@ -219,7 +219,7 @@ async def test_responses_client_sends_codex_desktop_identity() -> None:
     assert headers.get("User-Agent", "").startswith("Codex Desktop/")
     assert headers.get("originator") == "Codex Desktop"
     assert headers.get("session_id")
-    assert headers.get("x-client-request-id") == headers["session_id"]
+    assert headers.get("x-client-request-id") != headers["session_id"]
     assert "session-id" not in headers
     assert "thread-id" not in headers
 
@@ -241,7 +241,7 @@ async def test_responses_client_sends_minimal_grok_cli_identity() -> None:
     assert headers.get("x-grok-conv-id")
     assert headers.get("x-grok-session-id") == headers["x-grok-conv-id"]
     assert headers.get("x-grok-req-id")
-    assert headers.get("x-grok-agent-id")
+    assert "x-grok-agent-id" not in headers
     assert headers.get("x-grok-turn-idx") == "1"
     for forbidden in ("authorization", "x-xai-token-auth", "x-grok-conv-id"):
         assert forbidden not in {key.lower() for key in identity.extra_headers}
@@ -364,7 +364,7 @@ def test_build_client_recomputes_identity_after_api_format_override() -> None:
     dto = _dto(client_identity_profile="auto")
     client = build_client_from_dto(dto, api_format_override=LLM_API_FORMAT_RESPONSES)
     assert isinstance(client, ResponsesClient)
-    assert client._identity.profile == CLIENT_IDENTITY_CODEX_TUI
+    assert client._identity.profile == CLIENT_IDENTITY_OPENAI_SDK
 
 
 def test_build_client_uses_provider_default_format_identity() -> None:

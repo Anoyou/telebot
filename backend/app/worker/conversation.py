@@ -80,7 +80,7 @@ class Conversation:
         if not isinstance(markup, ReplyInlineMarkup):
             raise ValueError("消息没有 InlineKeyboard")
         rows = markup.rows
-        if row >= len(rows) or col >= len(rows[row].buttons):
+        if row < 0 or col < 0 or row >= len(rows) or col >= len(rows[row].buttons):
             raise IndexError(f"按钮索引越界: row={row}, col={col}")
         button = rows[row].buttons[col]
         data = getattr(button, "data", None)

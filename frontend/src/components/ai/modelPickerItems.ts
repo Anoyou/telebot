@@ -4,6 +4,8 @@ export type ModelMatrixRow = {
   provider_id: number;
   provider_name: string;
   model: string;
+  execution_backend?: string | null;
+  client_identity_profile?: string | null;
   enabled?: boolean | null;
   declared_supports_tools?: boolean | null;
   declared_supports_images?: boolean | null;
@@ -21,6 +23,7 @@ export type ModelPickerItemData = {
   providerId: number;
   providerName: string;
   model: string;
+  executionBackend?: "direct" | "codex_gateway" | null;
   declaredTools?: boolean | null;
   declaredVision?: boolean | null;
   declaredReasoning?: boolean | null;
@@ -52,6 +55,8 @@ export function matrixToPickerItems(
         providerId: row.provider_id,
         providerName: row.provider_name,
         model: row.model,
+        executionBackend:
+          row.execution_backend === "codex_gateway" ? "codex_gateway" : "direct",
         declaredTools: row.declared_supports_tools,
         declaredVision: row.declared_supports_images,
         declaredReasoning: Array.isArray(row.declared_reasoning_efforts)

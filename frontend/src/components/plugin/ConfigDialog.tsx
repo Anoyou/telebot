@@ -1,15 +1,5 @@
-/**
- * 插件配置弹窗组件。
- *
- * 根据插件的 config_schema 自动渲染表单：
- * - level: "global" 的字段 → 全局配置区
- * - level: "account" 的字段 → 账号配置区
- * - 无 level → 默认 account
- *
- * 配置合并顺序（前端用于展示）：
- * schema defaults < globalConfig < accountConfig
- */
-import { useState, useEffect, useCallback, useRef, type ReactNode } from "react";
+/** 根据 config_schema 渲染通用插件配置字段与预览。 */
+import { useEffect, useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import {
@@ -19,22 +9,18 @@ import {
   ChevronRight,
   Copy,
   GripVertical,
-    Pencil,
+  Pencil,
   Plus,
-  Save,
   Trash2,
   Wand,
 } from "lucide-react";
 import { toast } from "sonner";
 import { TelegramHtmlPreview, TelegramHtmlPreviewThread } from "@/components/TelegramHtmlPreview";
-import { listLLMProviders } from "@/api/commands";
 import { listIgnoredPeers } from "@/api/ignored_peers";
-import { getSystemSettings } from "@/api/system";
 import type { IgnoredPeer, LLMProviderOut } from "@/api/types";
 import { getErrMsg } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { queryKeys } from "@/lib/queryKeys";
-import { confirmDiscardChanges, useUnsavedChanges } from "@/lib/unsavedChanges";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -108,156 +94,6 @@ export interface ConfigSchema {
   "x-usage-instructions"?: unknown;
   "x-usage-steps"?: unknown;
   "x-help"?: unknown;
-}
-
-interface ConfigDialogProps {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  pluginKey: string;
-  pluginName: string;
-  schema: ConfigSchema | Record<string, unknown> | null;
-  accountName?: string;
-  accountId?: number;
-  globalConfig?: Record<string, unknown>;
-  accountConfig?: Record<string, unknown>;
-  /** 保存回调，返回更新后的 effective config */
-  onSave?: (globalVals: Record<string, unknown>, accountVals: Record<string, unknown>) => Promise<void>;
-}
-
-export function ConfigDialog({
-  open, onOpenChange, pluginKey, pluginName, schema, accountName,
-  accountId, globalConfig, accountConfig, onSave,
-}: ConfigDialogProps) {
-  const effectiveGlobalConfig = globalConfig ?? EMPTY_CONFIG;
-  const effectiveAccountConfig = accountConfig ?? EMPTY_CONFIG;
-  const [globalVals, setGlobalVals] = useState<Record<string, unknown>>({});
-  const [accountVals, setAccountVals] = useState<Record<string, unknown>>({});
-  const [saving, setSaving] = useState(false);
-  const initialValuesRef = useRef("");
-  const initializedDialogRef = useRef<string | null>(null);
-  const settingsQ = useQuery({
-    queryKey: ["system", "settings"],
-    queryFn: getSystemSettings,
-    enabled: open,
-  });
-  const hasLLMSelect = schemaHasLLMSelect(schema);
-  const llmProvidersQ = useQuery({
-    queryKey: ["llm-providers"],
-    queryFn: listLLMProviders,
-    enabled: open && hasLLMSelect,
-  });
-  const commandPrefix = settingsQ.data?.command_prefix || ",";
-
-  const handleSave = useCallback(async () => {
-    if (!onSave) return;
-    const properties = ((schema as ConfigSchema | null)?.properties ?? {}) as Record<string, ConfigField>;
-    const editableGlobalVals = withoutReadOnlyValues(globalVals, properties, effectiveGlobalConfig);
-    const editableAccountVals = withoutReadOnlyValues(accountVals, properties, effectiveAccountConfig);
-    setSaving(true);
-    try {
-      await onSave(editableGlobalVals, editableAccountVals);
-      toast.success("配置已保存");
-      onOpenChange(false);
-    } catch (err) {
-      toast.error(getErrMsg(err));
-    } finally {
-      setSaving(false);
-    }
-  }, [onSave, schema, globalVals, accountVals, effectiveGlobalConfig, effectiveAccountConfig, onOpenChange]);
-
-  const serializedValues = JSON.stringify([globalVals, accountVals]);
-  const dirty = Boolean(initialValuesRef.current) && serializedValues !== initialValuesRef.current;
-  useUnsavedChanges(open && dirty);
-
-  const requestClose = useCallback(() => {
-    if (saving || !confirmDiscardChanges(dirty)) return;
-    onOpenChange(false);
-  }, [dirty, onOpenChange, saving]);
-
-  // 每次打开只初始化一次，后台 refetch 不覆盖正在编辑的草稿。
-  useEffect(() => {
-    if (!open) {
-      initializedDialogRef.current = null;
-      return;
-    }
-    const dialogKey = `${pluginKey}:${accountId ?? "global"}`;
-    if (initializedDialogRef.current === dialogKey) return;
-    if (schema && typeof schema === "object" && "properties" in schema) {
-      const s = schema as ConfigSchema;
-      const { globalVals: gv, accountVals: av } = buildScopedConfigValues(s, effectiveGlobalConfig, effectiveAccountConfig);
-      setGlobalVals(gv);
-      setAccountVals(av);
-      initialValuesRef.current = JSON.stringify([gv, av]);
-      initializedDialogRef.current = dialogKey;
-    }
-  }, [accountId, open, pluginKey, schema, effectiveGlobalConfig, effectiveAccountConfig]);
-
-  const s = schema as ConfigSchema | null;
-  if (!s?.properties || Object.keys(s.properties).length === 0) {
-    return (
-      <Dialog open={open} onOpenChange={(next) => next ? onOpenChange(true) : requestClose()}>
-        <DialogContent className="max-w-2xl">
-          <DialogHeader>
-            <DialogTitle>{pluginName} — 配置</DialogTitle>
-            <DialogDescription>该插件没有可配置的选项。</DialogDescription>
-          </DialogHeader>
-          <DialogFooter><Button onClick={() => onOpenChange(false)}>关闭</Button></DialogFooter>
-        </DialogContent>
-      </Dialog>
-    );
-  }
-
-  const globalFields = Object.entries(s.properties).filter(([, f]) => f.level === "global");
-  const accountFields = Object.entries(s.properties).filter(([, f]) => f.level !== "global");
-
-  return (
-    <Dialog open={open} onOpenChange={(next) => next ? onOpenChange(true) : requestClose()}>
-      <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle>{pluginName} — 配置</DialogTitle>
-          <DialogDescription>
-            插件: <code className="text-xs">{pluginKey}</code>
-            {accountName && <> · 账号: {accountName}</>}
-          </DialogDescription>
-        </DialogHeader>
-        <div className="space-y-4">
-          {globalFields.length > 0 && (
-            <ConfigScopeSection
-              title="全局配置"
-              description="所有账号共享"
-              fields={globalFields}
-              values={globalVals}
-              accountId={accountId}
-              commandPrefix={commandPrefix}
-              llmProviders={llmProvidersQ.data}
-              llmProvidersLoading={llmProvidersQ.isLoading}
-              onChange={(key, value) => setGlobalVals((p) => ({ ...p, [key]: value }))}
-            />
-          )}
-          {accountFields.length > 0 && (
-            <ConfigScopeSection
-              title="账号配置"
-              description={accountName ? accountName + " 专属" : "按账号隔离"}
-              fields={accountFields}
-              values={accountVals}
-              accountId={accountId}
-              commandPrefix={commandPrefix}
-              llmProviders={llmProvidersQ.data}
-              llmProvidersLoading={llmProvidersQ.isLoading}
-              onChange={(key, value) => setAccountVals((p) => ({ ...p, [key]: value }))}
-            />
-          )}
-        </div>
-        <DialogFooter className="!flex !flex-row gap-2 sm:space-x-0 [&>*]:min-w-0 [&>*]:flex-1 sm:[&>*]:flex-none">
-          <Button variant="outline" onClick={requestClose} disabled={saving}>取消</Button>
-          <Button onClick={handleSave} loading={saving}>
-            {!saving ? <Save className="mr-2 h-4 w-4" /> : null}
-            {saving ? "保存中…" : "保存"}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
 }
 
 export type FieldEntry = [string, ConfigField];

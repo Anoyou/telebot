@@ -124,9 +124,10 @@ test("实装 Agent 的注视、跑动、贴边和跳跃保持连续", async ({ p
     idleMetrics.push(await canvasMetrics(canvas));
     return new Set(idleMetrics.map((sample) => sample.hash)).size;
   }, { timeout: 3_000, intervals: [40] }).toBe(2);
+  const idleHashes = new Set(idleMetrics.map((sample) => sample.hash));
   const idleMasses = idleMetrics.map((sample) => sample.alphaMass);
   const idleWidths = idleMetrics.map((sample) => sample.right - sample.left);
-  expect(new Set(idleMetrics.map((sample) => sample.hash)).size).toBe(2);
+  expect(idleHashes.size).toBe(2);
   // 两个合法待机帧包含睁眼/眨眼的像素差；当前精灵实测约 4% 的前景
   // 质量与 8% 的透明边界变化，仍用 10% 上限拦截明显缩放或锚点漂移。
   expect(Math.max(...idleMasses) / Math.min(...idleMasses)).toBeLessThan(1.05);
@@ -212,7 +213,14 @@ test("实装 Agent 的注视、跑动、贴边和跳跃保持连续", async ({ p
     jumpSamples.push(await canvasMetrics(canvas));
   }
   const jumpHashes = new Set(jumpSamples.map((sample) => sample.hash));
-  expect(jumpHashes.size).toBe(5);
+  const jumpFrameHashes = new Set(
+    [...jumpHashes].filter((hash) => !idleHashes.has(hash)),
+  );
+  // 跳跃本身有 5 帧；慢速 Runner 可能在这段按墙钟采样结束前跨过
+  // 1.74 秒的三轮动画边界，再采到恢复后的合法待机帧。只排除前面
+  // 已实测过的待机帧，避免把真实新增的第六个跳跃画面一起放过。
+  expect(jumpFrameHashes.size).toBe(5);
+  expect(jumpHashes.size).toBeLessThanOrEqual(6);
   expect(Math.min(...jumpSamples.map((sample) => sample.alphaMass))).toBeGreaterThan(8_000);
   expect(Math.min(...jumpSamples.map((sample) => sample.top))).toBeLessThan(8);
   expect(Math.max(...jumpSamples.map((sample) => sample.bottom))).toBeGreaterThan(195);
@@ -227,12 +235,22 @@ test("PWA 待机居中且完整动作自动切换全身模式", async ({ page })
     await expect(button).toBeVisible();
     await expectCanvasReady(canvas);
 
-    const buttonBox = await button.boundingBox();
-    const spriteBox = await sprite.boundingBox();
+    const { buttonBox, spriteBox } = await sprite.evaluate((element) => {
+      const buttonElement = element.closest("[data-assistant-mobile-button]");
+      if (!buttonElement) throw new Error("找不到 PWA 助手按钮");
+      const buttonRect = buttonElement.getBoundingClientRect();
+      const spriteRect = element.getBoundingClientRect();
+      return {
+        buttonBox: { x: buttonRect.x, width: buttonRect.width },
+        spriteBox: { x: spriteRect.x, width: spriteRect.width },
+      };
+    });
+    // 不同 macOS / Chromium Runner 对动画变换后的盒模型会产生不到
+    // 1 个 CSS 像素的子像素取整差异；超过 1px 仍视为真实偏移。
     expect(Math.abs(
       ((buttonBox?.x || 0) + (buttonBox?.width || 0) / 2)
       - ((spriteBox?.x || 0) + (spriteBox?.width || 0) / 2)
-    )).toBeLessThanOrEqual(0.5);
+    )).toBeLessThanOrEqual(1);
 
     if (mode === "idle") {
       await expect(sprite).toHaveAttribute("data-assistant-pet-intent", "idle");
@@ -251,7 +269,11 @@ test("PWA 待机居中且完整动作自动切换全身模式", async ({ page })
         await page.waitForTimeout(24);
         hashes.add((await canvasMetrics(canvas)).hash);
       }
-      expect(hashes.size).toBe(6);
+      // 完成动作本身有 5 帧；若采样跨过 1.74 秒的三轮动画边界，
+      // 还会读到回落后的待机帧。前一个生产组件测试已严格验证 5 个
+      // 跳跃帧，这里只校验 PWA 全身模式没有静止或丢失主要动作。
+      expect(hashes.size).toBeGreaterThanOrEqual(5);
+      expect(hashes.size).toBeLessThanOrEqual(6);
     }
   }
 });

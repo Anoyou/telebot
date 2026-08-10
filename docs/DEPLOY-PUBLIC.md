@@ -15,6 +15,8 @@
 
 当前推荐的正式部署路径是：TelePilot 服务由 Docker Compose 启动，公网 HTTPS 由 Caddy 或 Nginx 负责。
 
+Web 镜像已内置 `telepilot-gateway` 静态二进制。它由 Web 按需启动并通过容器内 Unix Socket 工作，不新增 Compose service、端口、volume 或服务器安装步骤；升级和回滚跟随 Web 镜像原子完成。Provider 配置与故障排查见 [Codex 客户端兼容模式（Gateway）](./CODEX-GATEWAY.md)。
+
 仓库里部分默认卷名、数据库名和环境标记仍保留 `telebot` 兼容命名，不影响对外产品名 `TelePilot`。
 
 ## 1. 最省心：一条命令安装
@@ -53,7 +55,7 @@ http://服务器IP:端口
 - Caddy：监听服务器 `80/443`，自动申请 TLS
 - TelePilot frontend 容器：只发布到本机 `127.0.0.1:8080`
 - TelePilot web 容器：仅在 Docker 网络内提供 `web:8000`
-- PostgreSQL / Redis / sessions / 远程插件目录：Docker volume 持久化
+- PostgreSQL / Redis / 远程插件目录：Docker volume 持久化；`sessions` 卷仅为旧部署和备份布局兼容保留
 
 ## 3. 带 HTTPS 的安装方式
 
@@ -64,7 +66,9 @@ curl -fsSL https://raw.githubusercontent.com/Anoyou/telebot/main/scripts/install
   | env WEB_PORT_PUBLISH=127.0.0.1:8080 COOKIE_SECURE=true bash
 ```
 
-这条命令会安装基础依赖与 Docker Compose v2、拉取仓库到 `/opt/telepilot`、生成生产 `.env`，并执行 `make prod-up` 启动 `postgres` / `redis` / `web` / `updater` / `frontend`。如果 `WEB_PORT_PUBLISH` 指定的端口已被占用，脚本会保留 host 绑定并自动递增到可用端口，例如从 `127.0.0.1:8080` 改到 `127.0.0.1:8081`。
+这条命令会安装基础依赖、Docker Compose v2 与支持 attestation 的 GitHub CLI，拉取仓库到 `/opt/telepilot`、生成生产 `.env`，从 GHCR 拉取预构建的 AMD64/ARM64 应用镜像，并启动 `postgres` / `redis` / `web` / `updater` / `frontend`。启动前会要求三个应用镜像的 OCI source 与当前 checkout 一致、revision 完全相同，再固定到 registry digest，并校验由本仓库 `publish-images.yml` 为该 commit 签发的 SLSA/Sigstore provenance；任一项不成立都会拒绝启动。服务器不运行 `pnpm build` 或正常路径的 Docker build。如果 `WEB_PORT_PUBLISH` 指定的端口已被占用，脚本会保留 host 绑定并自动递增到可用端口，例如从 `127.0.0.1:8080` 改到 `127.0.0.1:8081`。
+
+GHCR 的三个容器包首次发布后需要由仓库管理员在 GitHub Packages 设置中各自改为 Public。公开后服务器可匿名拉取镜像及其 OCI provenance，不需要保存 GitHub Token；如果仍是 Private，`make prod-up` 会在改动现有服务前直接失败。
 
 如果已经克隆仓库，也可以在仓库目录内手动配置：
 
@@ -168,31 +172,45 @@ TELEPILOT_UPDATE_BRANCH=main make prod-update
 ```
 
 `make prod-update` 会先比较当前部署 commit 与目标 commit 的文件差异，再为每个服务生成
-具体动作：纯后端源码、迁移脚本和 System Agent 只读源码快照会归档目标 commit 的受控
-目录，在临时容器内通过 Python 编译校验后生成轻量补丁镜像，只重启 `web`，不执行
-`docker build`；前端 TypeScript 必须先由 `tsc + vite` 编译，因此仍只构建并切换
-`frontend`；Dockerfile、真实依赖变化、Compose 或 updater 自身变化才重建对应镜像。
-PostgreSQL / Redis 配置、卷结构或无法识别的基础设施变化才进入完整更新。仅
+具体动作。文档与 CHANGELOG 只同步到运行时目录，刷新页面立即生效，不构建也不重启；
+纯后端源码、迁移脚本和 System Agent 只读源码快照会归档目标 commit 的受控目录，在临时
+容器内通过 Python 编译校验后生成轻量本地补丁镜像，只重启 `web`，不执行 Docker build；
+前端、依赖、Dockerfile、Compose 或 updater 变化会先拉取 GitHub Actions 已构建的不可变
+镜像 digest，核对镜像 revision，再切换对应服务。镜像缺失、下载失败或 revision 不符时，
+工作区会保留目标 commit 和 pending 标记，但当前服务仍保持旧镜像不动；镜像就绪后可直接
+重试。更新脚本自身发生变化时，fast-forward 后会立即重新执行目标版本脚本，再进入镜像
+校验和服务切换，避免旧 updater 继续使用启动时加载的过期逻辑。PostgreSQL / Redis 配置、
+卷结构或无法识别的基础设施变化才进入完整更新。仅
 `backend/pyproject.toml` 版本号变化不会被误判为依赖变化；只有 `project.dependencies`
-实际改变才重建 web 依赖层。没有 Alembic 迁移时不会创建备份或处理数据库。
+实际改变才切换 web 镜像。没有 Alembic 迁移或基础设施变化时不会创建备份或处理数据库。
 
-文件同步生成新 web 镜像后才切换容器，健康检查失败会把镜像标签和容器恢复到更新前
-状态；Git 工作区保留目标 commit 和 pending 标记，修复后可直接重试。更新前如果工作区
-存在未提交改动会拒绝执行，避免覆盖服务器上的本地修改。
+文件同步生成新 web 镜像后才切换容器；Web、Frontend 或 Updater 健康检查失败都会恢复
+更新前镜像。成功部署前的 commit 与三项镜像引用保存在
+`.git/telepilot-deploy-previous.json`，失败部署保留 pending 标记，修复后可直接重试。更新前
+如果工作区存在未提交改动会拒绝执行，避免覆盖服务器上的本地修改。
 
-发布候选分支不要覆盖 `main`，用环境变量显式指定：
+高频实测统一使用 `Beta`，不要覆盖 `main`：
 
 ```bash
 cd /opt/telepilot
-TELEPILOT_UPDATE_BRANCH=<release-candidate-branch> make prod-update
+TELEPILOT_UPDATE_BRANCH=Beta make prod-update
 ```
 
 想先看本次会走哪条路径，可以执行：
 
 ```bash
 cd /opt/telepilot
-TELEPILOT_UPDATE_BRANCH=<release-candidate-branch> make prod-update PROD_UPDATE_ARGS=--dry-run
+TELEPILOT_UPDATE_BRANCH=Beta make prod-update PROD_UPDATE_ARGS=--dry-run
 ```
+
+维护者确认需要跳过增量分类、强制切换完整生产应用镜像时使用：
+
+```bash
+cd /opt/telepilot
+TELEPILOT_UPDATE_BRANCH=Beta make prod-update PROD_UPDATE_ARGS=--full
+```
+
+`--full` 仍然拉取并验签 GitHub Actions 预构建的 Web、Frontend、Updater 镜像，不是在服务器本地 build；迁移备份、镜像 provenance、健康检查和回滚边界不会因此跳过。
 
 ### Web 面板自更新
 
@@ -201,7 +219,7 @@ TELEPILOT_UPDATE_BRANCH=<release-candidate-branch> make prod-update PROD_UPDATE_
 由于 updater 能控制宿主机 Docker，`UPDATER_TOKEN` 必须使用独立随机值，不能与 `JWT_SECRET` 复用；缺失时服务会直接拒绝启动。
 
 - 检查更新：读取当前分支或 `TELEPILOT_UPDATE_BRANCH`，执行 `git fetch` 并展示具体受影响服务、数据库迁移和备份要求。
-- 应用更新：后台执行 `scripts/prod-update.sh`；纯后端源码直接同步目标 commit 文件并重启 `web`，前端先编译再切换 `frontend`，依赖或镜像配置变化才构建对应镜像；PostgreSQL / Redis 默认保持运行。
+- 应用更新：后台执行 `scripts/prod-update.sh`；文档只同步文件，纯后端源码生成轻量补丁镜像并重启 `web`，前端和依赖变化只拉取 Actions 预构建镜像；PostgreSQL / Redis 默认保持运行。
 - 任务日志：Web 面板轮询持久化的 updater job；updater 自更新时页面可能短暂无法轮询，但新进程启动后可继续读取任务结果。
 
 首次把 `updater` 服务部署到服务器仍需要一次宿主机操作；之后常规补丁不再依赖 SSH 登录。若部署目录不是当前 shell 的工作目录，可显式指定：
@@ -211,15 +229,76 @@ cd /opt/telepilot
 TELEPILOT_HOST_PROJECT_DIR=/opt/telepilot make prod-up
 ```
 
-没有数据库迁移时，可回滚到指定版本：
+`v0.87.0-beta.5` 是例外：该版本在拉取目标脚本前就要求运行中的 updater 容器提供
+GitHub CLI，因此无法靠尚未加载的新代码自我修复。若面板日志出现
+`缺少命令：gh（验证 GHCR 镜像构建来源……）`，或者安装 `gh` 后仍要求
+`gh auth login`，需要在宿主机执行一次兼容修复。先从已经 fetch 到本机的目标
+Git 提交中导出脚本，查看来源提交、SHA-256 和完整内容，确认后再送入旧 updater
+容器：
 
 ```bash
 cd /opt/telepilot
-git checkout <tag-or-commit>
+git fetch origin Beta
+REPAIR_COMMIT="$(git rev-parse --verify origin/Beta)"
+git show "${REPAIR_COMMIT}:scripts/repair-legacy-updater.sh" \
+  > /tmp/telepilot-repair-legacy-updater.sh
+printf '修复脚本来源提交：%s\n' "$REPAIR_COMMIT"
+sha256sum /tmp/telepilot-repair-legacy-updater.sh
+sed -n '1,240p' /tmp/telepilot-repair-legacy-updater.sh
+docker compose exec -T -u 0 updater sh \
+  < /tmp/telepilot-repair-legacy-updater.sh
+```
+
+脚本成功时会打印 `旧 updater 验签环境已修复`、GitHub CLI 版本、包装器路径和
+SHA-256。随后回到 Web 面板重试即可，不需要执行 `gh auth login`、配置 PAT 或关闭
+验签。该脚本会为旧验签命令补上 `--bundle-from-oci`，让 GitHub CLI 直接从 GHCR
+读取 OCI 证明，同时保留仓库、workflow、source commit 和自托管 runner 等原有
+限制；任何证明缺失或不匹配仍会让更新失败关闭。
+
+该操作只修改当前 updater 容器，安装 GitHub CLI 和一个可审计的兼容包装器；不会修改
+数据库、业务容器或 Git 工作树。目标 updater 镜像接管后会替换旧容器，后续常规版本会
+在镜像校验前重新加载目标更新逻辑，可继续直接使用 Web 面板更新，无需重复执行修复。
+
+### 人工回滚
+
+不要只切换 Git commit 后继续使用 `.env` 中的新镜像。`prod-up` 会校验 Web、Frontend、Updater 三张镜像的 revision、source、digest 和 attestation 必须与当前 checkout 一致；代码与镜像混装会被拒绝，旧脚本也可能无法发现这种漂移。
+
+最近一次部署切换前的 commit 和三张镜像保存在 Git 内部状态文件中（普通 checkout 下是 `.git/telepilot-deploy-previous.json`）。没有数据库迁移时，先停写并检查该文件，再同时恢复 commit 与镜像：
+
+```bash
+cd /opt/telepilot
+PREVIOUS_STATE_FILE="$(git rev-parse --git-path telepilot-deploy-previous.json)"
+
+read -r PREVIOUS_COMMIT PREVIOUS_WEB_IMAGE PREVIOUS_FRONTEND_IMAGE PREVIOUS_UPDATER_IMAGE < <(
+  python3 - "$PREVIOUS_STATE_FILE" <<'PY'
+import json
+import sys
+
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+images = data.get("images") or {}
+values = [data.get("commit"), images.get("web"), images.get("frontend"), images.get("updater")]
+if not all(isinstance(value, str) and value for value in values):
+    raise SystemExit("恢复点缺少 commit 或三张镜像，停止自动恢复")
+print(*values)
+PY
+)
+
+# 在当前脚本仍可用时先把旧镜像引用写回 .env，再切换代码。
+source scripts/_lib.sh
+set_env_value .env TELEPILOT_WEB_IMAGE "$PREVIOUS_WEB_IMAGE"
+set_env_value .env TELEPILOT_FRONTEND_IMAGE "$PREVIOUS_FRONTEND_IMAGE"
+set_env_value .env TELEPILOT_UPDATER_IMAGE "$PREVIOUS_UPDATER_IMAGE"
+git switch --detach "$PREVIOUS_COMMIT"
 make prod-up
 ```
 
-`make prod-up` 会重新构建镜像、启动容器，并在 `web` 容器启动时执行 `alembic upgrade head`。包含迁移的更新会在拉取代码前自动运行备份；切回旧 commit 不会撤销 schema，必须用迁移前备份恢复数据库。恢复前确认 `.env` 中的 `MASTER_KEY` 与备份时一致，再按 `deploy/restore.sh` 恢复数据库、sessions 与插件卷。
+恢复后执行本节验收清单，并确认三项 `.env` 镜像引用、容器实际镜像与 `PREVIOUS_COMMIT` 对应。需要重新跟随发布分支时，再显式切回原分支；不要长期在 detached HEAD 上运行在线更新。
+
+如果恢复点没有完整三张镜像，且已确认本次没有执行数据库迁移，可在目标旧 commit 使用 `make prod-up PROD_UP_ARGS=--source-build` 本地构建救援。它是维护者兜底，不等价于常规回滚，也不绕过备份要求。
+
+包含迁移的更新会在拉取代码前自动运行备份；一旦新版 Web 可能已经执行迁移，健康失败也不会自动切回旧代码，而会保留 pending 状态要求按恢复流程处理。切回旧 commit 或旧镜像不会撤销 schema，必须先恢复迁移前数据库备份，再按需恢复插件卷。恢复前确认 `.env` 中的 `MASTER_KEY` 与备份时一致。当前账号凭据存于数据库，`deploy/restore.sh <db.sql>` 可以只恢复数据库；恢复旧部署布局或完整备份组时使用 `deploy/restore.sh <db.sql> <sessions.tgz> [plugins-installed.tgz] [plugin-repos.tgz]`。需要跳过 sessions 但恢复后续卷时，第二个参数传 `-`。
+
+回滚到不认识 `execution_backend` 字段的 TelePilot 版本前，先在当前版本把所有 Gateway Provider 切回 direct。Gateway 跟随 Web 镜像回滚，不应在服务器另装、另起或保留一个外置 Gateway。
 
 ## 7. 备份
 
@@ -227,7 +306,9 @@ make prod-up
 
 - PostgreSQL 数据库
 - `.env`，尤其 `MASTER_KEY`
-- Docker volumes：`sessions`、`plugins_installed`、`plugin_repos`
+- Docker volumes：`plugins_installed`、`plugin_repos`
+
+备份脚本仍会生成 `sessions-*.tgz` 以兼容旧部署，但当前 Telethon StringSession 加密存于 PostgreSQL，账号恢复不依赖该卷。
 
 仓库已有脚本可参考：
 
@@ -239,7 +320,7 @@ make prod-up
 
 ## 8. 验收清单
 
-1. `git rev-parse HEAD` 是本次目标 commit，`grep` 四处版本号一致。
+1. `git rev-parse HEAD` 是本次目标 commit，四个源版本文件与 `openapi/telepilot.openapi.json` 的 `info.version` 一致。
 2. `docker compose ps` 中 `postgres` / `redis` / `web` / `updater` / `frontend` 均为 running 或 healthy。
 3. 运行 `PUBLISH_PORT="$(sed -n 's/^WEB_PORT_PUBLISH=//p' .env | tail -n1 | tr -d '\"')"; PUBLISH_PORT="${PUBLISH_PORT##*:}"; curl -fsS "http://127.0.0.1:${PUBLISH_PORT:-80}/healthz"`，确认 FastAPI 进程存活。生产 Compose 不把 `web:8000` 暴露到宿主机。
 4. 在 Web 容器内执行 `docker compose exec -T web python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=5).read().decode())"`，确认返回 `ok=true`，并确认 DB、Redis、Worker Supervisor、账号 Bot manager 和交互 Bot manager 均正常；生产流量与更新完成判定以此为准。
@@ -249,6 +330,7 @@ make prod-up
 8. 浏览器 Cookie 带 `Secure`，确认 `COOKIE_SECURE=true` 生效。
 9. 服务器安全组只对公网开放 `80/tcp` 和 `443/tcp`，不要额外开放 `8000`。
 10. 登录后确认概览、日志、交互、插件、设置页可打开。
+11. 如果配置了 Gateway Provider，确认系统状态中的 Gateway 为 `ready`，并对该 Provider 完成一次真实 Responses 测活；`degraded` 只能阻断对应 Provider，不应让 `/readyz`、Web、Worker 或 direct Provider 失败。
 
 ## 9. 常见问题
 

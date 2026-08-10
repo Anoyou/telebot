@@ -90,6 +90,7 @@ EVENT_REASON_CODES = {
     "rich_message_reply_markup_unsupported",
     "invalid_rich_message",
     "callback_query",
+    "callback_query_expired",
     "command_matched",
     "command_not_matched",
     "command_unauthorized",
@@ -110,6 +111,7 @@ EVENT_REASON_CODES = {
     "media_payload_empty",
     "media_payload_invalid",
     "media_payload_missing",
+    "message_not_deletable",
     "native_raw_not_allowed",
     "native_raw_skipped",
     "permission_denied",
@@ -1280,9 +1282,10 @@ def _reply_markup_summary(raw: Any) -> dict[str, Any] | None:
     data = raw if isinstance(raw, dict) else {}
     if not data:
         return None
-    rows = data.get("inline_keyboard") or data.get("rows") or data.get("keyboard")
+    markup_type = _reply_markup_type(data)
+    rows = data.get("inline_keyboard") or data.get("keyboard") or data.get("rows")
     if not isinstance(rows, list):
-        return {"type": str(data.get("_") or data.get("type") or "reply_markup")}
+        return {"type": markup_type}
     buttons: list[dict[str, Any]] = []
     for row_index, row in enumerate(rows[:12]):
         cells = row if isinstance(row, list) else row.get("buttons") if isinstance(row, dict) else []
@@ -1291,20 +1294,66 @@ def _reply_markup_summary(raw: Any) -> dict[str, Any] | None:
         for col_index, button in enumerate(cells[:8]):
             btn = button if isinstance(button, dict) else {}
             text = str(btn.get("text") or "") or None
-            callback_data = btn.get("callback_data") or btn.get("data")
-            if isinstance(callback_data, bytes):
-                callback_data = callback_data.decode("utf-8", "replace")
             item = {
                 "row": row_index,
                 "col": col_index,
+                "column": col_index,
                 "text": text,
-                "callback_data": str(callback_data or "") or None,
-                "url": str(btn.get("url") or "") or None,
+                "kind": _reply_markup_button_kind(btn),
             }
             clean = {key: value for key, value in item.items() if value not in (None, "", [], {})}
             if clean:
                 buttons.append(clean)
-    return {"type": "inline_keyboard", "button_count": len(buttons), "buttons": buttons} if buttons else None
+    return {"type": markup_type, "button_count": len(buttons), "buttons": buttons} if buttons else None
+
+
+def _reply_markup_type(data: dict[str, Any]) -> str:
+    """Normalize Bot API and Telethon markup types without conflating reply/inline keyboards."""
+
+    if isinstance(data.get("inline_keyboard"), list):
+        return "inline_keyboard"
+    if isinstance(data.get("keyboard"), list):
+        return "reply_keyboard"
+    native_type = str(data.get("_") or data.get("type") or "").strip()
+    compact_type = native_type.replace("_", "").lower()
+    if "replyinline" in compact_type or "inlinekeyboard" in compact_type:
+        return "inline_keyboard"
+    if "replykeyboard" in compact_type:
+        return "reply_keyboard"
+    return native_type or "reply_markup"
+
+
+def _reply_markup_button_kind(button: dict[str, Any]) -> str:
+    """Project one Telegram button into a stable type without its action payload."""
+
+    native_type = str(button.get("_") or button.get("type") or "").lower()
+    if "callback" in native_type or button.get("callback_data") is not None or button.get("data") is not None:
+        return "callback"
+    if (
+        "url" in native_type
+        or button.get("url") is not None
+        or button.get("login_url") is not None
+        or button.get("web_app") is not None
+    ):
+        return "url"
+    if "switchinline" in native_type or any(
+        button.get(key) is not None
+        for key in ("switch_inline_query", "switch_inline_query_current_chat", "switch_inline_query_chosen_chat")
+    ):
+        return "switch_inline"
+    if "requestphone" in native_type or button.get("request_contact"):
+        return "request_phone"
+    if "requestgeo" in native_type or button.get("request_location"):
+        return "request_location"
+    if "requestpoll" in native_type or button.get("request_poll") is not None:
+        return "request_poll"
+    if "copy" in native_type or button.get("copy_text") is not None:
+        return "copy_text"
+    if "game" in native_type or button.get("callback_game") is not None:
+        return "game"
+    if "buy" in native_type or button.get("pay"):
+        return "pay"
+    return "text"
 
 
 def _forward_summary(msg: dict[str, Any]) -> dict[str, Any] | None:

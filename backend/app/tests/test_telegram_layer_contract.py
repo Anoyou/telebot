@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 
+from telethon import utils
 from telethon.tl import alltlobjects, functions, types
 
 
@@ -36,3 +37,24 @@ def test_input_rich_message_html_has_stable_minimal_raw_serialization() -> None:
     rich_message = types.InputRichMessageHTML(html="x")
 
     assert bytes(rich_message) == bytes.fromhex("6a83cbda0000000001780000")
+
+
+def test_community_peers_use_channel_marking_and_input_peer() -> None:
+    community = types.Community(
+        id=123,
+        title="社区",
+        photo=types.ChatPhotoEmpty(),
+        date=None,
+        access_hash=456,
+    )
+    forbidden = types.CommunityForbidden(id=789, title="不可访问社区", access_hash=654)
+
+    for entity, entity_id, access_hash in (
+        (community, 123, 456),
+        (forbidden, 789, 654),
+    ):
+        assert utils.get_peer_id(entity) == -(1_000_000_000_000 + entity_id)
+        input_peer = utils.get_input_peer(entity)
+        assert isinstance(input_peer, types.InputPeerChannel)
+        assert input_peer.channel_id == entity_id
+        assert input_peer.access_hash == access_hash

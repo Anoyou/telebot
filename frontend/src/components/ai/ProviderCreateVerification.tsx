@@ -8,6 +8,7 @@ import {
 import type {
   LLMApiFormat,
   LLMClientIdentityProfile,
+  LLMExecutionBackend,
   LLMProtocolProfile,
   LLMProviderKind,
   LLMRequestHeaderInput,
@@ -29,9 +30,8 @@ import {
 import { StreamingText } from "@/components/ai/StreamingText";
 import { useStreamingText } from "@/hooks/useStreamingText";
 
-const DEFAULT_MESSAGE = "你怎么又不行了？继续。";
-const DEFAULT_SYSTEM_PROMPT =
-  "你是一个自然、简洁的中文聊天助手。请像真实聊天一样直接回复用户，不要只返回 ping/pong。";
+const DEFAULT_MESSAGE =
+  "我准备开始一段需要专注的工作，但现在有些分心。请用两句话给我一个可以立刻执行的小建议。";
 
 const DEFAULT_BASE_URLS: Record<LLMProviderKind, string> = {
   openai: "https://api.openai.com/v1",
@@ -50,6 +50,7 @@ export type ProviderCreateStage =
 
 export function ProviderCreateVerification({
   providerKind,
+  executionBackend,
   apiFormat,
   protocolProfile,
   clientIdentityProfile,
@@ -65,6 +66,7 @@ export function ProviderCreateVerification({
   onStageChange,
 }: {
   providerKind: LLMProviderKind;
+  executionBackend: LLMExecutionBackend;
   apiFormat: LLMApiFormat;
   protocolProfile: LLMProtocolProfile;
   clientIdentityProfile: LLMClientIdentityProfile;
@@ -93,6 +95,7 @@ export function ProviderCreateVerification({
   const abortRef = useRef<AbortController | null>(null);
   const fingerprint = [
     providerKind,
+    executionBackend,
     apiFormat,
     protocolProfile,
     clientIdentityProfile,
@@ -174,6 +177,7 @@ export function ProviderCreateVerification({
     try {
       const response = await fetchProviderModelsPreview({
         provider: providerKind,
+        execution_backend: executionBackend,
         api_format: apiFormat,
         base_url: baseUrl.trim() || DEFAULT_BASE_URLS[providerKind],
         api_key: apiKey.trim() || null,
@@ -266,6 +270,7 @@ export function ProviderCreateVerification({
       await streamQuickVerifyProvider(
         {
           base_url: baseUrl.trim() || DEFAULT_BASE_URLS[providerKind],
+          execution_backend: executionBackend,
           api_key: apiKey.trim() || null,
           api_format: apiFormat,
           protocol_profile: protocolProfile,
@@ -273,9 +278,7 @@ export function ProviderCreateVerification({
           model: selectedModel,
           reasoning_effort: reasoningEffort || null,
           proxy_id: proxyId ? Number(proxyId) : null,
-          system_prompt: DEFAULT_SYSTEM_PROMPT,
           message: message.trim(),
-          max_tokens: 400,
           timeout_seconds: 90,
           request_headers: requestHeaders,
         },

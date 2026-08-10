@@ -14,7 +14,6 @@
 from __future__ import annotations
 
 import asyncio
-import socket
 import time as _time
 from urllib.parse import unquote, urlsplit
 
@@ -49,7 +48,7 @@ class ProxyOut(BaseModel):
 
 
 class ProxyCreate(BaseModel):
-    type: str          # socks5 | http | mtproxy
+    type: str          # socks5 | http | https
     host: str
     port: int
     username: str | None = None
@@ -87,7 +86,7 @@ def _to_out(p: Proxy) -> ProxyOut:
     )
 
 
-_VALID_TYPES = {"socks5", "http", "https", "mtproxy"}
+_VALID_TYPES = {"socks5", "http", "https"}
 
 
 def _validate_type(t: str) -> None:
@@ -172,67 +171,120 @@ async def get_proxy(pid: int, db: DBSession, _user: CurrentUser) -> ProxyOut:
 
 @router.patch("/{pid}", response_model=ProxyOut)
 async def patch_proxy(pid: int, payload: ProxyUpdate, db: DBSession, user: CurrentUser) -> ProxyOut:
-    p = await db.get(Proxy, pid)
-    if not p:
-        raise _err("NOT_FOUND", "代理不存在", 404)
-    parsed = _parse_proxy_url(payload.host) if payload.host is not None else None
-    if parsed is not None:
-        p.type = str(parsed.get("type", p.type))
-        p.host = str(parsed["host"])
-        if "port" in parsed:
-            p.port = int(parsed["port"])
-        if "username" in parsed and "username" not in payload.model_fields_set:
-            p.username = str(parsed["username"]) or None
-        if "password" in parsed and "password" not in payload.model_fields_set:
-            p.password_enc = encrypt_str(str(parsed["password"]))
-    if payload.type is not None and parsed is None:
-        _validate_type(payload.type)
-        p.type = payload.type
-    if payload.host is not None and parsed is None:
-        p.host = payload.host
-    if payload.port is not None and not (parsed is not None and "port" in parsed):
-        if payload.port <= 0 or payload.port > 65535:
-            raise _err("INVALID_PORT", "端口范围必须是 1-65535")
-        p.port = payload.port
-    if payload.username is not None:
-        p.username = payload.username or None
-    if payload.clear_password:
-        p.password_enc = None
-    elif payload.password is not None and payload.password != "":
-        p.password_enc = encrypt_str(payload.password)
-    await db.commit()
-    await audit.write(db, user.id, "update_proxy", target=str(pid))
-    await db.commit()
+    from ..services.gateway_runtime import (
+        gateway_configuration_transaction,
+        gateway_provider_uses_proxy,
+        reconcile_gateway_runtime_from_session,
+        rollback_and_restore_gateway,
+    )
+
+    gateway_changed = False
+    async with gateway_configuration_transaction(db):
+        try:
+            p = await db.get(Proxy, pid)
+            if not p:
+                raise _err("NOT_FOUND", "代理不存在", 404)
+            await db.refresh(p)
+            gateway_changed = await gateway_provider_uses_proxy(db, pid)
+            parsed = _parse_proxy_url(payload.host) if payload.host is not None else None
+            source_type = str(p.type or "").lower()
+            if source_type in _VALID_TYPES:
+                # 兼容早期写入的 SOCKS5 / HTTPS 等大小写变体；修改任意字段时
+                # 顺手收敛为当前 schema 使用的小写规范值。
+                p.type = source_type
+            target_type = (
+                str(parsed["type"])
+                if parsed is not None and "type" in parsed
+                else payload.type or source_type
+            )
+            if (
+                source_type not in _VALID_TYPES
+                and target_type in _VALID_TYPES
+                and target_type != source_type
+            ):
+                # 历史协议的用户名/secret 不能被误当成新协议凭据继续发送。
+                # 先清空，再允许本次 payload 或粘贴 URL 显式写入新凭据。
+                p.username = None
+                p.password_enc = None
+            if parsed is not None:
+                p.type = str(parsed.get("type", p.type))
+                p.host = str(parsed["host"])
+                if "port" in parsed:
+                    p.port = int(parsed["port"])
+                if "username" in parsed and "username" not in payload.model_fields_set:
+                    p.username = str(parsed["username"]) or None
+                if "password" in parsed and "password" not in payload.model_fields_set:
+                    p.password_enc = encrypt_str(str(parsed["password"]))
+            if payload.type is not None and parsed is None:
+                _validate_type(payload.type)
+                p.type = payload.type
+            if payload.host is not None and parsed is None:
+                p.host = payload.host
+            if payload.port is not None and not (parsed is not None and "port" in parsed):
+                if payload.port <= 0 or payload.port > 65535:
+                    raise _err("INVALID_PORT", "端口范围必须是 1-65535")
+                p.port = payload.port
+            if payload.username is not None:
+                p.username = payload.username or None
+            if payload.clear_password or payload.password == "":
+                p.password_enc = None
+            elif payload.password is not None and payload.password != "":
+                p.password_enc = encrypt_str(payload.password)
+            _validate_type(p.type)
+            await db.flush()
+            await audit.write(db, user.id, "update_proxy", target=str(pid))
+            if gateway_changed:
+                status_out = await reconcile_gateway_runtime_from_session(db)
+                if status_out.state == "degraded":
+                    raise _err(
+                        "LLM_GATEWAY_UNAVAILABLE",
+                        status_out.error or "内置 Gateway 配置同步失败",
+                        422,
+                    )
+            await db.commit()
+        except BaseException:
+            if gateway_changed:
+                await rollback_and_restore_gateway(db)
+            else:
+                await db.rollback()
+            raise
     return _to_out(p)
 
 
 @router.delete("/{pid}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_proxy(pid: int, db: DBSession, user: CurrentUser) -> None:
-    p = await db.get(Proxy, pid)
-    if not p:
-        raise _err("NOT_FOUND", "代理不存在", 404)
-    # 被账号引用就拒删；也告诉用户被哪些 LLM 引用，方便他先去解绑
-    used_acc = (await db.execute(
-        select(Account.id).where(Account.proxy_id == pid).limit(3)
-    )).scalars().all()
-    used_llm = (await db.execute(
-        select(LLMProvider.id).where(LLMProvider.proxy_id == pid).limit(3)
-    )).scalars().all()
-    if used_acc or used_llm:
-        parts = []
-        if used_acc:
-            parts.append(f"账号 #{','.join(str(i) for i in used_acc)}")
-        if used_llm:
-            parts.append(f"LLM provider #{','.join(str(i) for i in used_llm)}")
-        raise _err(
-            "PROXY_IN_USE",
-            f"代理被 {' / '.join(parts)} 使用中，无法删除（先去那里改换代理）",
-            409,
-        )
-    await db.delete(p)
-    await db.commit()
-    await audit.write(db, user.id, "delete_proxy", target=str(pid))
-    await db.commit()
+    from ..services.gateway_runtime import gateway_configuration_transaction
+
+    async with gateway_configuration_transaction(db):
+        try:
+            p = await db.get(Proxy, pid)
+            if not p:
+                raise _err("NOT_FOUND", "代理不存在", 404)
+            await db.refresh(p)
+            # 被账号引用就拒删；也告诉用户被哪些 LLM 引用，方便他先去解绑
+            used_acc = (await db.execute(
+                select(Account.id).where(Account.proxy_id == pid).limit(3)
+            )).scalars().all()
+            used_llm = (await db.execute(
+                select(LLMProvider.id).where(LLMProvider.proxy_id == pid).limit(3)
+            )).scalars().all()
+            if used_acc or used_llm:
+                parts = []
+                if used_acc:
+                    parts.append(f"账号 #{','.join(str(i) for i in used_acc)}")
+                if used_llm:
+                    parts.append(f"LLM provider #{','.join(str(i) for i in used_llm)}")
+                raise _err(
+                    "PROXY_IN_USE",
+                    f"代理被 {' / '.join(parts)} 使用中，无法删除（先去那里改换代理）",
+                    409,
+                )
+            await db.delete(p)
+            await audit.write(db, user.id, "delete_proxy", target=str(pid))
+            await db.commit()
+        except BaseException:
+            await db.rollback()
+            raise
     # 清掉探测缓存，避免下次同 id 的代理（理论不会复用 id 但保险起见）拿到旧数据
     await proxy_probe_cache.clear_probe(pid)
 
@@ -311,8 +363,17 @@ async def test_proxy(pid: int, db: DBSession, _user: CurrentUser) -> ProxyTestRe
     p = await db.get(Proxy, pid)
     if not p:
         raise _err("NOT_FOUND", "代理不存在", 404)
+    proxy_type = str(p.type or "").lower()
+    if proxy_type not in _VALID_TYPES:
+        return ProxyTestResult(
+            ok=False,
+            error=f"代理类型 {p.type!r} 当前不受支持，请编辑为 SOCKS5、HTTP 或 HTTPS",
+        )
 
-    pwd = decrypt_str(p.password_enc) if p.password_enc else None
+    try:
+        pwd = decrypt_str(p.password_enc) if p.password_enc else None
+    except Exception:  # noqa: BLE001 - 测试入口应返回可操作结果，而不是 500
+        return ProxyTestResult(ok=False, error="代理凭据无法解密，请重新保存或更换代理")
 
     # 第一步：try TCP connect 到 Telegram DC2:443，记录延迟
     t0 = _time.monotonic()
@@ -320,9 +381,9 @@ async def test_proxy(pid: int, db: DBSession, _user: CurrentUser) -> ProxyTestRe
         endpoint_error = await _probe_proxy_endpoint(p.host, p.port)
         if endpoint_error:
             return ProxyTestResult(ok=False, error=endpoint_error)
-        if p.type in ("socks5", "http", "https"):
+        if proxy_type in ("socks5", "http", "https"):
             ptype = {"socks5": ProxyType.SOCKS5, "http": ProxyType.HTTP,
-                     "https": ProxyType.HTTP}[p.type]
+                     "https": ProxyType.HTTP}[proxy_type]
             proxy_obj = AsyncProxy(
                 proxy_type=ptype, host=p.host, port=p.port,
                 username=p.username or None, password=pwd or None,
@@ -332,16 +393,6 @@ async def test_proxy(pid: int, db: DBSession, _user: CurrentUser) -> ProxyTestRe
                 timeout=8.0,
             )
             sock.close()
-        elif p.type == "mtproxy":
-            # MTProxy 不走 python-socks；这里只做 TCP 探活到代理端口
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(5.0)
-            await asyncio.get_event_loop().run_in_executor(
-                None, sock.connect, (p.host, p.port)
-            )
-            sock.close()
-        else:
-            return ProxyTestResult(ok=False, error=f"不支持的代理类型: {p.type}")
     except ProxyConnectionError as e:
         return ProxyTestResult(ok=False, error=f"代理连接失败: {e}")
     except ProxyError as e:
@@ -355,16 +406,15 @@ async def test_proxy(pid: int, db: DBSession, _user: CurrentUser) -> ProxyTestRe
 
     # 第二步：通过该代理访问 ipinfo.io 拿出口 IP
     def _make_client():
-        if p.type in ("http", "https"):
+        if proxy_type in ("http", "https"):
             url = f"http://{p.username + ':' + pwd + '@' if p.username else ''}{p.host}:{p.port}"
             return httpx.AsyncClient(proxy=url)
-        if p.type == "socks5":
+        if proxy_type == "socks5":
             scheme = "socks5"
             auth = f"{p.username}:{pwd}@" if p.username else ""
             url = f"{scheme}://{auth}{p.host}:{p.port}"
             return httpx.AsyncClient(proxy=url)
-        # MTProxy 不能拿 IP
-        return httpx.AsyncClient()
+        raise ValueError(f"不支持的代理类型: {p.type}")
 
     geo = await _resolve_country(_make_client)
     result = ProxyTestResult(

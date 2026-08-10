@@ -51,6 +51,7 @@ class AgentLimits:
 class AgentCallbacks:
     on_step: Callable[[int], Awaitable[None]] | None = None
     on_usage: Callable[[ModelUsage], Awaitable[None]] | None = None
+    on_safe_boundary: Callable[[], Awaitable[tuple[ModelMessage, ...]]] | None = None
     on_tool_batch: Callable[[tuple[ToolCall, ...]], Awaitable[None]] | None = None
     on_tool_start: Callable[[ToolCall], Awaitable[None]] | None = None
     on_tool_finish: Callable[[ToolCall, ToolResult], Awaitable[None]] | None = None
@@ -69,6 +70,10 @@ class AgentResult:
     tool_calls: int
     stop_reason: StopReason
     reasoning_content: str | None = None
+    execution_backend: str = "direct"
+    gateway_version: str | None = None
+    gateway_request_id: str | None = None
+    gateway_stage: str | None = None
 
 
 class AgentLimitError(RuntimeError):
@@ -293,6 +298,8 @@ async def run_agent(
     resumed_once = False
     for step in range(1, limits.max_steps + 1):
         await _notify(callbacks.on_step, step)
+        if callbacks.on_safe_boundary is not None:
+            messages.extend(await callbacks.on_safe_boundary())
         if resume_tool_calls and not resumed_once and step == 1:
             resumed_once = True
             response = ModelResponse(
@@ -309,6 +316,23 @@ async def run_agent(
             usage = _sum_usage(usage, response.usage)
             await _notify(callbacks.on_usage, usage)
             _apply_limit_budget(response.usage)
+            if callbacks.on_safe_boundary is not None:
+                steering_messages = await callbacks.on_safe_boundary()
+                if steering_messages:
+                    # 模型响应已经完成、工具尚未执行，是可安全转向的边界。
+                    # 丢弃尚未生效的工具调用，把已生成文本仅作为上下文，再按
+                    # 用户的新指令重新决策；已经完成的上一轮工具副作用不会回滚。
+                    if response.text:
+                        messages.append(
+                            ModelMessage(
+                                role=MessageRole.ASSISTANT,
+                                content=response.content,
+                                reasoning_content=response.reasoning_content,
+                            )
+                        )
+                    messages.extend(steering_messages)
+                    await _notify(callbacks.on_text_reset)
+                    continue
         if not response.tool_calls:
             if not response.text:
                 raise RuntimeError("模型既未返回文本，也未调用工具")
@@ -356,6 +380,10 @@ async def run_agent(
                 tool_calls=tool_call_count,
                 stop_reason=response.stop_reason,
                 reasoning_content="\n\n".join(reasoning_parts) or None,
+                execution_backend=response.execution_backend,
+                gateway_version=response.gateway_version,
+                gateway_request_id=response.gateway_request_id,
+                gateway_stage=response.gateway_stage,
             )
 
         # 对工具调用前可能已抵达的自然语言草稿只作临时预览。确认本轮要
@@ -411,6 +439,8 @@ async def run_agent(
         MessageRole.USER,
         "已达到工具调用轮数上限。禁止继续调用工具，请仅根据已有观察给出最终结果，并明确未完成项。",
     )
+    if callbacks.on_safe_boundary is not None:
+        messages.extend(await callbacks.on_safe_boundary())
     final_response = await call(
         replace(
             request,
@@ -443,6 +473,10 @@ async def run_agent(
         tool_calls=tool_call_count,
         stop_reason=final_response.stop_reason,
         reasoning_content="\n\n".join(reasoning_parts) or None,
+        execution_backend=final_response.execution_backend,
+        gateway_version=final_response.gateway_version,
+        gateway_request_id=final_response.gateway_request_id,
+        gateway_stage=final_response.gateway_stage,
     )
 
 

@@ -52,6 +52,7 @@ class LLMProviderDTO:
     api_format: str | None = None
     protocol_profile: str = "standard"
     client_identity_profile: str = "auto"
+    execution_backend: str = "direct"
     web_search_api_format: str | None = None
     base_url: str | None = None
     default_model: str = ""
@@ -87,6 +88,7 @@ class LLMProviderDTO:
             api_format=d.get("api_format"),
             protocol_profile=str(d.get("protocol_profile", "standard") or "standard"),
             client_identity_profile=str(d.get("client_identity_profile", "auto") or "auto"),
+            execution_backend=str(d.get("execution_backend", "direct") or "direct"),
             web_search_api_format=d.get("web_search_api_format"),
             base_url=d.get("base_url"),
             default_model=str(d.get("default_model", "") or ""),
@@ -109,6 +111,7 @@ class LLMProviderDTO:
             api_format=getattr(row, "api_format", None),
             protocol_profile=str(getattr(row, "protocol_profile", "standard") or "standard"),
             client_identity_profile=str(getattr(row, "client_identity_profile", "auto") or "auto"),
+            execution_backend=str(getattr(row, "execution_backend", "direct") or "direct"),
             web_search_api_format=getattr(row, "web_search_api_format", None),
             base_url=row.base_url,
             default_model=str(row.default_model or ""),
@@ -130,6 +133,7 @@ class LLMProviderDTO:
             "api_format": self.api_format,
             "protocol_profile": self.protocol_profile,
             "client_identity_profile": self.client_identity_profile,
+            "execution_backend": self.execution_backend,
             "web_search_api_format": self.web_search_api_format,
             "base_url": self.base_url,
             "default_model": self.default_model,
@@ -197,12 +201,27 @@ class LLMProviderDTO:
         return default_model or None
 
     def capabilities_for_model(self, model: str):
-        """Apply optional model metadata over protocol-level capabilities."""
+        """Merge protocol facts with optional per-model metadata.
 
+        Model metadata may refine normal capabilities, but it cannot re-enable a
+        capability that the selected protocol profile explicitly forbids.
+        """
+
+        from .llm_profiles import resolve_protocol_profile
         from .llm_protocol import capabilities_for_api_format
 
         api_format = str(self.api_format or "chat_completions")
+        profile = resolve_protocol_profile(
+            api_format,
+            self.protocol_profile,
+            base_url=self.base_url,
+            model=model,
+            infer_when_standard=True,
+        )
         capabilities = capabilities_for_api_format(api_format)
+        capabilities = capabilities.with_overrides(
+            reasoning_transport=profile.reasoning_transport,
+        )
         if api_format == "anthropic_messages":
             default_efforts = {"low", "medium", "high"}
             if "opus" in str(model or "").lower():
@@ -215,16 +234,42 @@ class LLMProviderDTO:
             (item for item in self.models if str(item.get("id") or "").strip() == str(model or "").strip()),
             None,
         )
+        hard_disabled = {
+            capability: False
+            for capability in profile.hard_disabled_capabilities
+            if capability
+            in {"images", "tools", "parallel_tool_calls", "web_search", "temperature"}
+        }
         if not metadata:
-            return capabilities
+            return capabilities.with_overrides(**hard_disabled)
         overrides: dict[str, Any] = {}
         for key, capability_key in (
             ("supports_tools", "tools"),
             ("supports_images", "images"),
             ("supports_temperature", "temperature"),
+            ("supports_parallel_tool_calls", "parallel_tool_calls"),
+            ("supports_web_search", "web_search"),
         ):
             if isinstance(metadata.get(key), bool):
                 overrides[capability_key] = metadata[key]
+        for key in ("context_window", "max_output_tokens"):
+            value = metadata.get(key)
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                overrides[key] = value
+        for key in ("input_modalities", "output_modalities", "supported_api_formats"):
+            values = metadata.get(key)
+            if isinstance(values, list):
+                overrides[key] = frozenset(str(item) for item in values if str(item))
+        supported_formats = overrides.get("supported_api_formats")
+        if isinstance(supported_formats, frozenset):
+            overrides["protocol_compatible"] = api_format in supported_formats
+        reasoning_transport = metadata.get("reasoning_transport")
+        if (
+            profile.name == "standard"
+            and isinstance(reasoning_transport, str)
+            and reasoning_transport
+        ):
+            overrides["reasoning_transport"] = reasoning_transport
         efforts = metadata.get("reasoning_efforts")
         if isinstance(efforts, list):
             normalized = frozenset(
@@ -234,7 +279,8 @@ class LLMProviderDTO:
             )
             overrides["reasoning"] = bool(normalized)
             overrides["reasoning_efforts"] = normalized
-        return capabilities.with_overrides(**overrides)
+        capabilities = capabilities.with_overrides(**overrides)
+        return capabilities.with_overrides(**hard_disabled)
 
 
 def provider_to_dto(provider_dict: dict[str, Any]) -> LLMProviderDTO:

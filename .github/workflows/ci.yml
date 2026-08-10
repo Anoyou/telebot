@@ -2,22 +2,64 @@ name: CI
 
 on:
   push:
-    branches: [main, Agent-beta]
+    branches: [main, Beta]
+    tags: ["v*"]
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  change-scope:
+    name: 变更范围
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.scope.outputs.backend }}
+      frontend: ${{ steps.scope.outputs.frontend }}
+      browser: ${{ steps.scope.outputs.browser }}
+      plugin: ${{ steps.scope.outputs.plugin }}
+      contract: ${{ steps.scope.outputs.contract }}
+      version: ${{ steps.scope.outputs.version }}
+      docs_only: ${{ steps.scope.outputs.docs_only }}
+      full: ${{ steps.scope.outputs.full }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - name: 计算需要运行的检查
+        id: scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          args=(--root . --base "$BEFORE_SHA" --head "$HEAD_SHA" --github-output "$GITHUB_OUTPUT")
+          if [[ "$EVENT_NAME" == "pull_request" || "$REF_NAME" == "main" ]]; then
+            args+=(--force-full)
+          fi
+          python scripts/ci_change_scope.py "${args[@]}"
+
   backend:
+    name: 后端
+    needs: change-scope
+    if: needs.change-scope.outputs.backend == 'true'
     runs-on: ubuntu-latest
     env:
       MASTER_KEY: "4QAy7kFzv2mkHRXTHwL_FEZABz0R3sqat5rBl4vDLXk="
       JWT_SECRET: "telepilot-ci-jwt-secret-only-for-tests"
       PYTHONPATH: ".."
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
 
@@ -33,16 +75,25 @@ jobs:
         working-directory: backend
         run: pytest
 
+      - name: Reject stale OpenAPI snapshot from any backend model change
+        run: |
+          python scripts/export-openapi.py
+          git diff --exit-code -- openapi/telepilot.openapi.json
+
       - name: Validate plugin examples
+        if: needs.change-scope.outputs.plugin == 'true' || needs.change-scope.outputs.full == 'true'
         run: PYTHONPATH=backend:. python scripts/validate-plugin-examples.py
 
   frontend:
+    name: 前端
+    needs: change-scope
+    if: needs.change-scope.outputs.frontend == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
 
@@ -64,12 +115,15 @@ jobs:
         run: pnpm build
 
   frontend-browser:
+    name: 浏览器
+    needs: change-scope
+    if: needs.change-scope.outputs.browser == 'true'
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
 
@@ -94,10 +148,75 @@ jobs:
         working-directory: frontend
         run: pnpm test:visual
 
-  version-sync:
+  api-contract:
+    name: API 契约
+    needs: change-scope
+    if: needs.change-scope.outputs.contract == 'true'
+    runs-on: ubuntu-latest
+    env:
+      MASTER_KEY: "4QAy7kFzv2mkHRXTHwL_FEZABz0R3sqat5rBl4vDLXk="
+      JWT_SECRET: "telepilot-ci-jwt-secret-only-for-tests"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: Install pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.23.0 --activate
+
+      - name: Install contract dependencies
+        run: |
+          python -m pip install -e "./backend[dev]"
+          pnpm --dir frontend install --frozen-lockfile
+
+      - name: Regenerate OpenAPI and TypeScript contract
+        run: make codegen
+
+      - name: Reject stale generated contract
+        run: git diff --exit-code -- openapi/telepilot.openapi.json frontend/src/api/schema.ts
+
+      - name: Test API contract invariants
+        working-directory: backend
+        run: pytest -q app/tests/test_openapi_contract.py
+
+  gateway:
+    name: Gateway
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install Go
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5
+        with:
+          go-version: "1.23"
+          cache-dependency-path: gateway/go.sum
+
+      - name: Test Gateway
+        working-directory: gateway
+        run: go test ./...
+
+      - name: Vet Gateway
+        working-directory: gateway
+        run: go vet ./...
+
+  version-sync:
+    name: 版本同步
+    needs: change-scope
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
 
       - name: Check release version sync
         run: |
@@ -110,6 +229,7 @@ jobs:
           backend_pyproject = Path("backend/pyproject.toml").read_text()
           frontend_version = Path("frontend/src/lib/version.ts").read_text()
           frontend_package = json.loads(Path("frontend/package.json").read_text())
+          openapi_snapshot = json.loads(Path("openapi/telepilot.openapi.json").read_text())
           changelog = Path("CHANGELOG.md").read_text()
 
           versions = {
@@ -117,38 +237,90 @@ jobs:
               "backend/pyproject.toml": re.search(r'version = "([^"]+)"', backend_pyproject).group(1),
               "frontend/src/lib/version.ts": re.search(r'APP_VERSION = "([^"]+)"', frontend_version).group(1),
               "frontend/package.json": frontend_package["version"],
+              "openapi/telepilot.openapi.json": openapi_snapshot["info"]["version"],
           }
           unique = set(versions.values())
           if len(unique) != 1:
               raise SystemExit(f"版本号不一致: {versions}")
           version = unique.pop()
-          if f"## [{version}]" not in changelog and "## [Unreleased]" not in changelog:
-              raise SystemExit(f"CHANGELOG.md 缺少版本 {version} 或 Unreleased 段")
+          if f"## [{version}]" not in changelog:
+              raise SystemExit(f"CHANGELOG.md 缺少当前精确版本段：## [{version}]")
           print(f"version sync ok: {version}")
           PY
 
-      - name: Prevent non-main stable release version bumps
-        if: github.event_name == 'push' && github.ref_name != 'main'
+      - name: Check branch release channel
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          BASE_REF: ${{ github.base_ref }}
         run: |
-          git fetch origin main --depth=1
           python - <<'PY'
+          import os
           import re
-          import subprocess
           from pathlib import Path
 
           current_text = Path("backend/app/__init__.py").read_text()
           current = re.search(r'__version__ = "([^"]+)"', current_text).group(1)
-          main_text = subprocess.check_output(
-              ["git", "show", "origin/main:backend/app/__init__.py"],
-              text=True,
-          )
-          main = re.search(r'__version__ = "([^"]+)"', main_text).group(1)
+          stable = re.fullmatch(r"\d+\.\d+\.\d+", current)
           prerelease = re.fullmatch(r"\d+\.\d+\.\d+-(?:alpha|beta|rc)\.\d+", current)
-          if current != main and not prerelease:
+          if not stable and not prerelease:
+              raise SystemExit(f"版本格式不符合发布约定：{current}")
+
+          event = os.environ["EVENT_NAME"]
+          ref_name = os.environ["REF_NAME"]
+          base_ref = os.environ.get("BASE_REF", "")
+          targets_main = (event == "pull_request" and base_ref == "main") or (
+              event == "push" and ref_name == "main"
+          )
+          if targets_main and prerelease:
               raise SystemExit(
-                  f"非 main 分支不得独立发布正式版本：当前 {current}，main {main}。"
-                  "请先合入 main，再由 main 统一迭代正式版本；开发分支仅允许 alpha/beta/rc 预发布版本。"
+                  f"main 发布线只允许稳定版本，当前为 {current}。"
+                  "请在发布准备分支去掉 prerelease 后缀后再创建或更新 PR。"
               )
-          channel = "预发布" if prerelease else "与 main 一致"
-          print(f"non-main version guard ok: {current} ({channel})")
+          if event == "push" and ref_name == "Beta" and not prerelease:
+              raise SystemExit(
+                  f"Beta 发布线只允许 alpha/beta/rc 预发布版本，当前为 {current}。"
+              )
+          channel = "预发布" if prerelease else "稳定版"
+          print(f"release channel guard ok: {current} ({channel})")
           PY
+
+  ci-gate:
+    name: CI Gate
+    if: always()
+    needs: [change-scope, backend, frontend, frontend-browser, api-contract, gateway, version-sync]
+    runs-on: ubuntu-latest
+    steps:
+      - name: 汇总条件任务结果
+        env:
+          CHANGE_SCOPE: ${{ needs.change-scope.result }}
+          BACKEND: ${{ needs.backend.result }}
+          FRONTEND: ${{ needs.frontend.result }}
+          BROWSER: ${{ needs.frontend-browser.result }}
+          API_CONTRACT: ${{ needs.api-contract.result }}
+          GATEWAY: ${{ needs.gateway.result }}
+          VERSION_SYNC: ${{ needs.version-sync.result }}
+        run: |
+          for result in "$CHANGE_SCOPE" "$BACKEND" "$FRONTEND" "$BROWSER" "$API_CONTRACT" "$GATEWAY" "$VERSION_SYNC"; do
+            if [[ "$result" != "success" && "$result" != "skipped" ]]; then
+              echo "CI 子任务失败或取消：$result" >&2
+              exit 1
+            fi
+          done
+          echo "所有必需检查已通过"
+
+  publish-images:
+    name: 发布预构建镜像
+    needs: ci-gate
+    if: always() && github.event_name == 'push' && needs.ci-gate.result == 'success'
+    uses: ./.github/workflows/publish-images.yml
+    with:
+      revision: ${{ github.sha }}
+      base_revision: ${{ github.event.before }}
+      ref_name: ${{ github.ref_name }}
+      ref_type: ${{ github.ref_type }}
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write

@@ -29,6 +29,11 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+from telethon.tl.types import (
+    KeyboardButtonCallback,
+    KeyboardButtonRow,
+    ReplyInlineMarkup,
+)
 
 from app.services import account_bot_runtime, account_bot_service, userbot_rich_message
 from app.services import payout_limit as payout_limit_mod
@@ -125,6 +130,26 @@ class _FakeClient:
     async def pin_message(self, chat_id, message_id, **kwargs):  # noqa: ANN001, ANN003
         self.calls.append(("pin_message", chat_id, message_id, kwargs))
         return True
+
+    async def get_messages(self, chat_id, *, ids):  # noqa: ANN001
+        self.calls.append(("get_messages", chat_id, ids))
+        return SimpleNamespace(
+            id=ids,
+            empty=False,
+            sender=SimpleNamespace(id=456, bot=True),
+            sender_id=456,
+            reply_markup=ReplyInlineMarkup(
+                rows=[
+                    KeyboardButtonRow(
+                        buttons=[KeyboardButtonCallback(text="确认", data=b"server-owned")]
+                    )
+                ]
+            ),
+        )
+
+    async def __call__(self, request):  # noqa: ANN001
+        self.calls.append(("request", request))
+        return SimpleNamespace(cache_time=0, message="ok", alert=False, url=None)
 
     def iter_messages(self, _chat_id, **_kwargs):  # noqa: ANN001, ANN003
         async def _gen():
@@ -281,6 +306,25 @@ PARITY_MATRIX: list[ParityCase] = [
         (TRACE_STATUS_OK, None, "userbot_reply"),
         (TRACE_STATUS_OK, None, "userbot_reply"),
         covers="pin_message",
+    ),
+    _row(
+        "click_callback_button_userbot_only",
+        [
+            {
+                "type": "click_callback_button",
+                "chat_id": CHAT,
+                "message_id": 7,
+                "row": 0,
+                "column": 0,
+                "expected_bot_id": 456,
+                "expected_button_text": "确认",
+            }
+        ],
+        "click_callback_button",
+        (TRACE_STATUS_OK, None, "userbot_callback"),
+        (TRACE_STATUS_SKIPPED, "unsupported_send_via", None),
+        covers="click_callback_button",
+        drift="有意设计：仅 UserBot 执行链路支持，Interaction Bot delivery 不代点第三方按钮",
     ),
     _row(
         "answer_callback_ok",
@@ -524,6 +568,11 @@ async def _drive_worker(monkeypatch: pytest.MonkeyPatch, case: ParityCase) -> Ex
     state = loader_mod._AccountState(1)  # noqa: SLF001
     state.redis = mem
     state.client = _FakeClient()
+    state.instances["guess"] = type(
+        "_ParityActivePlugin",
+        (loader_mod.Plugin,),
+        {"key": "guess", "display_name": "parity active plugin"},
+    )()
     # 与 E3 一致：非限流用例挂 AllowEngine，避免 loader 本地降级改写快照。
     state.engine = _DenyEngine() if case.engine_denies else _AllowEngine()
 

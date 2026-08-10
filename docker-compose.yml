@@ -65,6 +65,7 @@ services:
 
   # ── Web：FastAPI + supervisor，主进程内拉起每账号 worker 子进程 ─
   web:
+    image: ${TELEPILOT_WEB_IMAGE:-ghcr.io/anoyou/telepilot-web:stable}
     build:
       context: .
       dockerfile: backend/Dockerfile
@@ -109,11 +110,14 @@ services:
       redis:
         condition: service_healthy
     volumes:
-      # session 加密文件落盘目录，volume 持久化
+      # 历史兼容 session 卷；当前 Telethon StringSession 经 MASTER_KEY 加密后存入 DB，
+      # 账号运行不依赖该卷。暂保留卷名，避免破坏旧部署的备份/恢复布局。
       - sessions:/app/sessions
       # 远程插件安装产物和插件仓库缓存必须持久化；否则重建 web 容器后插件文件会丢失
       - plugins_installed:/app/plugins/installed
       - plugin_repos:/app/data/plugin_repos
+      # 更新日志由宿主机增量同步；System Agent 无需随文档更新重启 web。
+      - ${TELEPILOT_HOST_PROJECT_DIR:-.}/.run/runtime-content:/app/runtime-content:ro
     healthcheck:
       # 用 /readyz 做真实探活：DB + Redis 任一异常即视为 unhealthy
       # urlopen 显式 timeout=4：让应用层超时先于 docker 的 5s 触发，错误更清晰
@@ -128,6 +132,7 @@ services:
 
   # ── Updater：内网自更新执行器，不对公网暴露端口 ────────────────
   updater:
+    image: ${TELEPILOT_UPDATER_IMAGE:-ghcr.io/anoyou/telepilot-updater:stable}
     build:
       context: .
       dockerfile: deploy/updater/Dockerfile
@@ -156,6 +161,7 @@ services:
 
   # ── Frontend：nginx 静态托管 + 反代后端 ──────────────────────
   frontend:
+    image: ${TELEPILOT_FRONTEND_IMAGE:-ghcr.io/anoyou/telepilot-frontend:stable}
     build:
       context: .
       dockerfile: frontend/Dockerfile
@@ -164,6 +170,9 @@ services:
     mem_reservation: ${FRONTEND_MEM_RESERVATION:-16m}
     depends_on:
       - web
+    volumes:
+      # 公开文档与 CHANGELOG 独立于前端镜像，文件同步后刷新页面即可生效。
+      - ${TELEPILOT_HOST_PROJECT_DIR:-.}/.run/runtime-content:/usr/share/nginx/html/runtime-content:ro
     ports:
       # 对外发布端口，可在 .env 中通过 WEB_PORT_PUBLISH 覆盖（默认 80）
       - "${WEB_PORT_PUBLISH:-80}:80"

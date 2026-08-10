@@ -214,10 +214,14 @@ async def _validated_update(
     if not raw:
         raise ValueError("至少提供一个要修改的账号字段")
     payload = AccountUpdateRequest(**raw).model_dump(exclude_unset=True)
-    if payload.get("proxy_id") is not None and await ctx.db.get(
-        Proxy, int(payload["proxy_id"])
-    ) is None:
-        raise ValueError(f"代理 #{payload['proxy_id']} 不存在")
+    if payload.get("proxy_id") is not None:
+        proxy = await ctx.db.get(Proxy, int(payload["proxy_id"]))
+        if proxy is None:
+            raise ValueError(f"代理 #{payload['proxy_id']} 不存在")
+        if str(proxy.type or "").lower() not in {"socks5", "http", "https"}:
+            raise ValueError(
+                f"代理类型 {proxy.type!r} 当前不受支持，请先在代理库中改为 SOCKS5、HTTP 或 HTTPS"
+            )
     if payload.get("template_id") is not None and await ctx.db.get(
         RateLimitTemplate, int(payload["template_id"])
     ) is None:

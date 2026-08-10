@@ -11,7 +11,7 @@ import re
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ..db.models.command import (
     ALL_COMMAND_TYPES,
@@ -24,14 +24,28 @@ from ..db.models.command import (
     COMMAND_TYPE_RUN_PLUGIN,
     LLM_API_FORMAT_CHAT_COMPLETIONS,
     LLM_CLIENT_IDENTITY_AUTO,
+    LLM_EXECUTION_BACKEND_DIRECT,
     LLM_MODALITY_TEXT,
     LLM_PROTOCOL_PROFILE_STANDARD,
     LLM_WEB_SEARCH_API_FORMAT_AUTO,
+)
+from ..llm_probe_defaults import (
+    QUICK_VERIFY_MAX_TOKENS,
+    QUICK_VERIFY_MESSAGE,
+    QUICK_VERIFY_SYSTEM_PROMPT,
+    QUICK_VERIFY_TIMEOUT_SECONDS,
 )
 
 # ── 命令名校验正则：与 worker/command.py 中的 \w+ 派发兼容 ─────
 _COMMAND_NAME_RE = re.compile(r"^[a-zA-Z0-9_]{1,64}$")
 _COMMAND_ALIAS_RE = re.compile(r"^[a-zA-Z0-9_]{1,16}$")
+LLMProtocolProfile = Literal[
+    "standard",
+    "openai_responses",
+    "deepseek_responses",
+    "codex_responses",
+    "claude_code_proxy",
+]
 
 
 # ════════════════════════════════════════════════════════════
@@ -318,9 +332,24 @@ class ProviderModel(BaseModel):
     supports_tools: bool | None = None
     supports_images: bool | None = None
     supports_temperature: bool | None = None
-    reasoning_efforts: list[
-        Literal["minimal", "low", "medium", "high", "xhigh", "max"]
-    ] | None = None
+    supports_parallel_tool_calls: bool | None = None
+    supports_web_search: bool | None = None
+    context_window: int | None = Field(default=None, ge=1)
+    max_output_tokens: int | None = Field(default=None, ge=1)
+    input_modalities: list[Literal["text", "image", "audio", "video"]] | None = None
+    output_modalities: list[Literal["text", "image", "audio"]] | None = None
+    supported_api_formats: list[Literal["chat_completions", "responses", "anthropic_messages"]] | None = None
+    reasoning_transport: (
+        Literal[
+            "none",
+            "reasoning_content",
+            "responses_item",
+            "encrypted_reasoning_item",
+            "anthropic_thinking",
+        ]
+        | None
+    ) = None
+    reasoning_efforts: list[Literal["minimal", "low", "medium", "high", "xhigh", "max"]] | None = None
 
     @field_validator("id")
     @classmethod
@@ -363,10 +392,8 @@ class LLMProviderCreate(BaseModel):
     )
     """API 协议；和 provider 厂商解耦——同一个反代 base_url 可能只支持其中某种。"""
 
-    protocol_profile: Literal["standard", "claude_code_proxy"] = (
-        LLM_PROTOCOL_PROFILE_STANDARD
-    )
-    """Anthropic Messages 请求兼容档案；其他 API 协议会在服务层规范化为 standard。"""
+    protocol_profile: LLMProtocolProfile = LLM_PROTOCOL_PROFILE_STANDARD
+    """Provider 协议档案；不兼容当前 API 格式的值会在服务层规范化为 standard。"""
 
     web_search_api_format: Literal["auto", "chat_completions", "responses", "anthropic_messages"] = (
         LLM_WEB_SEARCH_API_FORMAT_AUTO
@@ -385,10 +412,11 @@ class LLMProviderCreate(BaseModel):
     ] = LLM_CLIENT_IDENTITY_AUTO
     """客户端身份档案；auto 按本次实际协议解析。与 protocol_profile 相互独立。"""
 
+    execution_backend: Literal["direct", "codex_gateway"] = LLM_EXECUTION_BACKEND_DIRECT
+    """模型传输后端；Gateway 仅支持 Responses，且不改变已保存身份档案。"""
+
     # ── 路由元数据（全可选；不填走默认）───────────────────────
-    modality: Literal["text", "vision", "audio", "multimodal"] = Field(
-        default=LLM_MODALITY_TEXT
-    )
+    modality: Literal["text", "vision", "audio", "multimodal"] = Field(default=LLM_MODALITY_TEXT)
     """能力模态。决定该 provider 是否会被视觉路由命中。"""
 
     tags: list[str] = Field(default_factory=list, max_length=20)
@@ -401,12 +429,12 @@ class LLMProviderCreate(BaseModel):
     """运维备注；路由不读。"""
 
     proxy_id: int | None = Field(default=None, ge=1)
-    """出口代理 id（指向 proxy 表）；None = 直连（DIRECT）。mtproxy 类型的 proxy 不能给
-    LLM 调用用——HTTP 客户端不支持 MTProto；service 层在校验时拒绝。"""
+    """出口代理 id（指向 proxy 表）；None = 直连（DIRECT）。历史 mtproxy 行不受当前
+    运行链路支持，service 层在校验时拒绝。"""
 
     models: list[ProviderModel] = Field(default_factory=list, max_length=200)
     """该 provider 下挂的候选模型清单。新建时通常留空；建完 provider 后用前端的
-    ``Fetch 模型列表`` 按钮自动拉取，再 toggle 启用要用的几个。"""
+    “获取模型列表”按钮自动拉取，再 toggle 启用要用的几个。"""
 
     request_headers: list[LLMRequestHeaderInput] = Field(default_factory=list)
     """Provider 专用兼容请求头；服务层校验名称、作用域、大小与系统保留字段。"""
@@ -425,6 +453,12 @@ class LLMProviderCreate(BaseModel):
             raise ValueError(f"未知 modality：{v}")
         return v
 
+    @model_validator(mode="after")
+    def _validate_execution_backend(self) -> LLMProviderCreate:
+        if self.execution_backend == "codex_gateway" and self.api_format != "responses":
+            raise ValueError("Codex 客户端兼容模式（Gateway）仅支持 Responses API Format")
+        return self
+
     @field_validator("tags")
     @classmethod
     def _check_tags(cls, v: list[str]) -> list[str]:
@@ -438,9 +472,7 @@ class LLMProviderCreate(BaseModel):
             if not tag:
                 continue
             if tag not in ALL_LLM_TAGS:
-                raise ValueError(
-                    f"未知 tag：{tag}（合法：{sorted(ALL_LLM_TAGS)}）"
-                )
+                raise ValueError(f"未知 tag：{tag}（合法：{sorted(ALL_LLM_TAGS)}）")
             if tag in seen:
                 continue
             seen.add(tag)
@@ -457,7 +489,7 @@ class LLMProviderUpdate(BaseModel):
     base_url: str | None = Field(default=None, max_length=255)
     default_model: str | None = Field(default=None, min_length=1, max_length=64)
     api_format: Literal["chat_completions", "responses", "anthropic_messages"] | None = None
-    protocol_profile: Literal["standard", "claude_code_proxy"] | None = None
+    protocol_profile: LLMProtocolProfile | None = None
     client_identity_profile: (
         Literal[
             "auto",
@@ -471,7 +503,10 @@ class LLMProviderUpdate(BaseModel):
         ]
         | None
     ) = None
-    web_search_api_format: Literal["auto", "chat_completions", "responses", "anthropic_messages"] | None = None
+    execution_backend: Literal["direct", "codex_gateway"] | None = None
+    web_search_api_format: Literal["auto", "chat_completions", "responses", "anthropic_messages"] | None = (
+        None
+    )
 
     # 路由元数据（全可选；None / 缺省 = 不动）
     modality: Literal["text", "vision", "audio", "multimodal"] | None = None
@@ -511,6 +546,7 @@ class LLMProviderOut(BaseModel):
     api_format: str = LLM_API_FORMAT_CHAT_COMPLETIONS
     protocol_profile: str = LLM_PROTOCOL_PROFILE_STANDARD
     client_identity_profile: str = LLM_CLIENT_IDENTITY_AUTO
+    execution_backend: str = LLM_EXECUTION_BACKEND_DIRECT
     web_search_api_format: str = LLM_WEB_SEARCH_API_FORMAT_AUTO
     # 路由元数据（出参始终带，便于前端展示）
     modality: str = LLM_MODALITY_TEXT
@@ -545,7 +581,7 @@ class FetchModelsResponse(BaseModel):
 class FetchModelsPreviewRequest(BaseModel):
     """``POST /api/commands/llm-providers/fetch-models-preview`` 入参。
 
-    用于"未保存的 provider 也想 Fetch 模型列表"场景：
+    用于“未保存的 Provider 也想获取模型列表”场景：
     前端把当前编辑表单里的字段（provider / api_format / base_url / api_key / proxy_id）
     直接送过来，后端发一次 ``GET {base_url}/models`` 后**只返 ID 列表**，不落库，
     避免用户为了 Fetch 还得先保存。
@@ -558,11 +594,19 @@ class FetchModelsPreviewRequest(BaseModel):
     api_format: Literal["chat_completions", "responses", "anthropic_messages"] = (
         LLM_API_FORMAT_CHAT_COMPLETIONS
     )
+    protocol_profile: LLMProtocolProfile = LLM_PROTOCOL_PROFILE_STANDARD
+    execution_backend: Literal["direct", "codex_gateway"] = LLM_EXECUTION_BACKEND_DIRECT
     base_url: str | None = Field(default=None, max_length=255)
     api_key: str | None = Field(default=None, max_length=512)
     proxy_id: int | None = Field(default=None, ge=1)
     pid: int | None = Field(default=None, ge=1)
     request_headers: list[LLMRequestHeaderInput] | None = None
+
+    @model_validator(mode="after")
+    def _validate_execution_backend(self) -> FetchModelsPreviewRequest:
+        if self.execution_backend == "codex_gateway" and self.api_format != "responses":
+            raise ValueError("Codex 客户端兼容模式（Gateway）仅支持 Responses API Format")
+        return self
 
 
 class FetchModelsPreviewResponse(BaseModel):
@@ -580,15 +624,14 @@ class QuickVerifyProviderRequest(BaseModel):
     """用未落库凭据发起一次真实流式对话验证。"""
 
     base_url: str
+    execution_backend: Literal["direct", "codex_gateway"] = LLM_EXECUTION_BACKEND_DIRECT
     # 不在 Pydantic Field 上做长度拒绝，避免默认 422 把敏感 input 原样带回；
     # 路由会在进入流式响应前用不含输入值的结构化错误拒绝超长 Key。
     api_key: str | None = None
-    api_format: Literal[
-        "chat_completions", "responses", "anthropic_messages"
-    ] = LLM_API_FORMAT_CHAT_COMPLETIONS
-    protocol_profile: Literal["standard", "claude_code_proxy"] = (
-        LLM_PROTOCOL_PROFILE_STANDARD
+    api_format: Literal["chat_completions", "responses", "anthropic_messages"] = (
+        LLM_API_FORMAT_CHAT_COMPLETIONS
     )
+    protocol_profile: LLMProtocolProfile = LLM_PROTOCOL_PROFILE_STANDARD
     client_identity_profile: Literal[
         "auto",
         "minimal",
@@ -600,23 +643,25 @@ class QuickVerifyProviderRequest(BaseModel):
         "grok_cli",
     ] = LLM_CLIENT_IDENTITY_AUTO
     model: str | None = Field(default=None, max_length=128)
-    reasoning_effort: Literal[
-        "minimal", "low", "medium", "high", "xhigh", "max"
-    ] | None = None
+    reasoning_effort: Literal["minimal", "low", "medium", "high", "xhigh", "max"] | None = None
     proxy_id: int | None = Field(default=None, ge=1)
     request_headers: list[LLMRequestHeaderInput] = Field(default_factory=list)
     system_prompt: str = Field(
-        default="你是一个自然、简洁的中文聊天助手。请像真实聊天一样直接回复用户，不要只返回 ping/pong。",
+        default=QUICK_VERIFY_SYSTEM_PROMPT,
         min_length=1,
         max_length=2000,
     )
     message: str = Field(
-        default="你怎么又不行了？继续。",
+        default=QUICK_VERIFY_MESSAGE,
         min_length=1,
         max_length=2000,
     )
-    max_tokens: int = Field(default=400, ge=64, le=2000)
-    timeout_seconds: int = Field(default=90, ge=10, le=180)
+    max_tokens: int = Field(default=QUICK_VERIFY_MAX_TOKENS, ge=64, le=2000)
+    timeout_seconds: int = Field(
+        default=QUICK_VERIFY_TIMEOUT_SECONDS,
+        ge=10,
+        le=180,
+    )
 
     @field_validator("base_url", "system_prompt", "message")
     @classmethod
@@ -630,6 +675,15 @@ class QuickVerifyProviderRequest(BaseModel):
     @classmethod
     def _strip_quick_verify_optional_text(cls, value: str | None) -> str | None:
         return (value.strip() or None) if value is not None else None
+
+    @model_validator(mode="after")
+    def _validate_quick_verify_execution_backend(self) -> QuickVerifyProviderRequest:
+        if self.execution_backend == "codex_gateway":
+            if self.api_format != "responses":
+                raise ValueError("Codex 客户端兼容模式（Gateway）仅支持 Responses API Format")
+            if not self.model:
+                raise ValueError("使用 Codex 客户端兼容模式（Gateway）验证时必须指定模型 ID")
+        return self
 
 
 class DetectProviderProtocolsRequest(BaseModel):
@@ -665,6 +719,12 @@ class ProtocolProbeResult(BaseModel):
     error_category: str | None = None
     # 面向用户的修复建议（脱敏）。
     suggestion: str | None = None
+    upstream_status_code: int | None = None
+    upstream_error_code: str | None = None
+    upstream_error_message: str | None = None
+    upstream_error_detail: str | None = None
+    upstream_request_id: str | None = None
+    client_request_id: str | None = None
 
 
 class ProtocolIdentityAttempt(BaseModel):
@@ -678,6 +738,12 @@ class ProtocolIdentityAttempt(BaseModel):
     error_category: str | None = None
     error: str | None = None
     suggestion: str | None = None
+    upstream_status_code: int | None = None
+    upstream_error_code: str | None = None
+    upstream_error_message: str | None = None
+    upstream_error_detail: str | None = None
+    upstream_request_id: str | None = None
+    client_request_id: str | None = None
 
 
 class DetectProviderProtocolsResponse(BaseModel):
@@ -688,6 +754,7 @@ class DetectProviderProtocolsResponse(BaseModel):
     anthropic_messages: ProtocolProbeResult
     models: ProtocolProbeResult
     recommended_api_format: str | None = None
+    recommended_protocol_profile: str | None = None
     # 阶段 B：推荐客户端身份 + 每协议身份尝试列表。
     recommended_client_identity_profile: str | None = None
     identity_attempts: list[ProtocolIdentityAttempt] = Field(default_factory=list)
@@ -715,6 +782,15 @@ class TestModelResponse(BaseModel):
     """返回 text 前 80 字符；用于让用户在 UI 一眼看出"这个模型确实回话了"。"""
     error: str | None = None
     """失败时的错误消息（已脱敏，不含 api_key）。"""
+    status_code: int | None = None
+    error_category: str | None = None
+    suggestion: str | None = None
+    upstream_status_code: int | None = None
+    upstream_error_code: str | None = None
+    upstream_error_message: str | None = None
+    upstream_error_detail: str | None = None
+    upstream_request_id: str | None = None
+    client_request_id: str | None = None
 
 
 class ChatTestTurn(BaseModel):
@@ -746,20 +822,23 @@ class ChatTestModelsRequest(BaseModel):
     """测试用 system prompt。"""
     max_tokens: int = Field(default=1200, ge=64, le=8000)
     timeout_seconds: int = Field(default=90, ge=10, le=600)
-    api_format_override: Literal[
-        "chat_completions", "responses", "anthropic_messages"
-    ] | None = None
+    execution_backend_override: Literal["direct", "codex_gateway"] | None = None
+    """仅本次测活使用的临时执行后端，不写回 Provider。"""
+    api_format_override: Literal["chat_completions", "responses", "anthropic_messages"] | None = None
     """仅本次测活使用的临时协议，不写回 Provider。"""
-    client_identity_profile_override: Literal[
-        "auto",
-        "minimal",
-        "openai_sdk",
-        "codex_tui",
-        "codex_desktop",
-        "claude_code",
-        "claude_desktop",
-        "grok_cli",
-    ] | None = None
+    client_identity_profile_override: (
+        Literal[
+            "auto",
+            "minimal",
+            "openai_sdk",
+            "codex_tui",
+            "codex_desktop",
+            "claude_code",
+            "claude_desktop",
+            "grok_cli",
+        ]
+        | None
+    ) = None
     """仅本次测活使用的临时客户端身份，不写回 Provider。"""
 
     @field_validator("models")
@@ -809,8 +888,20 @@ class ChatTestModelResult(BaseModel):
     empty_response: bool = False
     error: str | None = None
     status_code: int | None = None
+    error_category: str | None = None
+    suggestion: str | None = None
+    upstream_status_code: int | None = None
+    upstream_error_code: str | None = None
+    upstream_error_message: str | None = None
+    upstream_error_detail: str | None = None
+    upstream_request_id: str | None = None
+    client_request_id: str | None = None
     client_identity_profile: str | None = None
     effective_api_format: str | None = None
+    execution_backend: str | None = None
+    gateway_version: str | None = None
+    gateway_request_id: str | None = None
+    gateway_stage: str | None = None
     streaming: bool = False
     """本次结果是否通过上游原生流式协议获得。"""
     stream_fallback: bool = False
@@ -931,6 +1022,7 @@ class FullLivenessRunRequest(BaseModel):
     ) -> dict[int, list[str]] | None:
         return _normalize_liveness_model_scope(value)
 
+
 class LivenessResultItem(BaseModel):
     """单个测活任务结果（已脱敏）。"""
 
@@ -946,8 +1038,18 @@ class LivenessResultItem(BaseModel):
     status_code: int | None = None
     error_category: str | None = None
     suggestion: str | None = None
+    upstream_status_code: int | None = None
+    upstream_error_code: str | None = None
+    upstream_error_message: str | None = None
+    upstream_error_detail: str | None = None
+    upstream_request_id: str | None = None
+    client_request_id: str | None = None
     client_identity_profile: str | None = None
     effective_api_format: str | None = None
+    execution_backend: str | None = None
+    gateway_version: str | None = None
+    gateway_request_id: str | None = None
+    gateway_stage: str | None = None
     skipped: bool = False
 
 

@@ -104,8 +104,19 @@ async def test_operational_stats_net_matches_ledger_summary(stats_session_factor
         created_at=base,
     )
 
-    stats_filters = stats_service.StatsFilters(account_id=7, plugin_key="game")
-    ledger_filters = ledger_service.LedgerFilters(account_id=7, plugin_key="game", limit=None)
+    stats_filters = stats_service.StatsFilters(
+        since=base,
+        until=base + timedelta(days=2),
+        account_id=7,
+        plugin_key="game",
+    )
+    ledger_filters = ledger_service.LedgerFilters(
+        since=base,
+        until=base + timedelta(days=2),
+        account_id=7,
+        plugin_key="game",
+        limit=None,
+    )
     async with stats_session_factory() as db:
         stats = await stats_service.summarize_operational_stats(db, stats_filters)
         ledger = await ledger_service.summarize_ledger(db, ledger_filters)
@@ -154,8 +165,19 @@ async def test_operational_stats_chat_filter_matches_ledger_filter(stats_session
         created_at=base + timedelta(minutes=1),
     )
 
-    stats_filters = stats_service.StatsFilters(account_id=7, chat_id=-100123)
-    ledger_filters = ledger_service.LedgerFilters(account_id=7, chat_id=-100123, limit=None)
+    stats_filters = stats_service.StatsFilters(
+        since=base,
+        until=base + timedelta(days=1),
+        account_id=7,
+        chat_id=-100123,
+    )
+    ledger_filters = ledger_service.LedgerFilters(
+        since=base,
+        until=base + timedelta(days=1),
+        account_id=7,
+        chat_id=-100123,
+        limit=None,
+    )
     async with stats_session_factory() as db:
         stats = await stats_service.summarize_operational_stats(db, stats_filters)
         ledger = await ledger_service.summarize_ledger(db, ledger_filters)
@@ -189,8 +211,61 @@ async def test_operational_stats_recovers_participants_from_successful_payouts(s
     )
 
     async with stats_session_factory() as db:
-        stats = await stats_service.summarize_operational_stats(db, stats_service.StatsFilters(account_id=7))
+        stats = await stats_service.summarize_operational_stats(
+            db,
+            stats_service.StatsFilters(
+                since=base,
+                until=base + timedelta(days=1),
+                account_id=7,
+            ),
+        )
 
     assert stats.total.participant_count == 2
     assert stats.total.payout_success_count == 2
     assert stats.total.payout_failure_count == 1
+
+
+@pytest.mark.asyncio
+async def test_operational_stats_default_window_matches_ledger_window(stats_session_factory) -> None:
+    now = datetime.now(UTC)
+    old = now - timedelta(days=ledger_service.DEFAULT_LEDGER_SUMMARY_WINDOW_DAYS + 1)
+    recent = now - timedelta(days=1)
+    await _insert_action_event(
+        stats_session_factory,
+        action_type="start_session",
+        session_key="game:-100123:old",
+        params_summary={"type": "start_session", "chat_id": -100123},
+        created_at=old,
+    )
+    await _insert_action_event(
+        stats_session_factory,
+        action_type="payment_confirmed",
+        session_key="game:-100123:old",
+        params_summary={"event_type": "payment_confirmed", "amount": "90", "chat_id": -100123},
+        created_at=old,
+    )
+    await _insert_action_event(
+        stats_session_factory,
+        action_type="start_session",
+        session_key="game:-100123:recent",
+        params_summary={"type": "start_session", "chat_id": -100123},
+        created_at=recent,
+    )
+    await _insert_action_event(
+        stats_session_factory,
+        action_type="payment_confirmed",
+        session_key="game:-100123:recent",
+        params_summary={"event_type": "payment_confirmed", "amount": "10", "chat_id": -100123},
+        created_at=recent,
+    )
+
+    async with stats_session_factory() as db:
+        stats = await stats_service.summarize_operational_stats(
+            db,
+            stats_service.StatsFilters(account_id=7, plugin_key="game"),
+        )
+
+    assert stats.total.started_sessions == 1
+    assert stats.total.ledger_count == 1
+    assert Decimal(stats.total.ledger_net) == Decimal("10")
+    assert [item.key for item in stats.by_day] == [recent.date().isoformat()]

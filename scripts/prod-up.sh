@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 一键生产部署：纯 docker compose
 #   - 检查 .env（密钥必须就位）
-#   - 构建并启动全部 5 个容器（postgres / redis / web / updater / frontend）
+#   - 默认拉取并启动全部 5 个容器（postgres / redis / web / updater / frontend）
 #   - 等待 web 健康检查通过
 #   - 打印访问地址
 #
@@ -13,6 +13,35 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/_lib.sh"
 cd "$ROOT_DIR"
 export TELEPILOT_HOST_PROJECT_DIR="${TELEPILOT_HOST_PROJECT_DIR:-$ROOT_DIR}"
+[[ "$TELEPILOT_HOST_PROJECT_DIR" == /* ]] \
+  || die "TELEPILOT_HOST_PROJECT_DIR 必须是宿主机绝对路径，拒绝解析相对挂载目录"
+
+SOURCE_BUILD="${TELEPILOT_SOURCE_BUILD:-0}"
+
+usage() {
+  cat <<'EOF'
+用法：scripts/prod-up.sh [--source-build]
+
+默认从 GHCR 拉取预构建镜像，不在服务器编译。
+  --source-build  维护者救援模式：使用当前工作树在本机重新构建应用镜像
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --source-build)
+      SOURCE_BUILD=1
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      die "未知参数：$1"
+      ;;
+  esac
+  shift
+done
 
 # ── 1. 依赖与 .env ────────────────────────────────────────
 need_cmd docker "macOS Docker Desktop / Linux docker.io"
@@ -158,9 +187,66 @@ ok "Postgres 凭据校验通过（用户=$_pg_user）"
 # 仅在 .env 没有 ``MEMORY_TIER=`` 时注入；用户后续可任意修改或改 manual 禁用。
 auto_tune_env .env
 
-# ── 2. 构建并启动 ────────────────────────────────────────
-log "构建 + 启动全部容器（首次约 3-5 分钟）"
-docker compose up -d --build
+# ── 2. 拉取并启动 ────────────────────────────────────────
+# 先创建 bind mount 目录，内容在所有服务健康后再发布。
+mkdir -p "$ROOT_DIR/.run/runtime-content/docs"
+if (( SOURCE_BUILD == 1 )); then
+  warn "使用维护者救援模式：服务器将本地构建应用镜像"
+  docker compose up -d --build
+else
+  log "解析并校验 TelePilot 预构建镜像集合"
+  mapfile -t app_images < <(
+    docker compose config --format json | python3 -c '
+import json, sys
+services = json.load(sys.stdin)["services"]
+for name in ("web", "frontend", "updater"):
+    print(services[name]["image"])
+'
+  )
+  (( ${#app_images[@]} == 3 )) || die "无法解析 web/frontend/updater 镜像引用"
+  expected_revision="$(
+    git log -1 --format=%H HEAD -- . \
+      ':(exclude)docs/**' \
+      ':(exclude,glob)**/*.md' \
+      ':(exclude,glob)**/*.rst' \
+      ':(exclude,glob)**/*.txt' \
+      ':(exclude)LICENSE'
+  )"
+  [[ -n "$expected_revision" ]] || die "无法计算当前 checkout 的镜像检查点"
+  expected_source="${TELEPILOT_IMAGE_SOURCE:-https://github.com/Anoyou/Telebot}"
+  resolved_images=()
+  revisions=()
+  for index in 0 1 2; do
+    image_ref="${app_images[$index]}"
+    docker pull "$image_ref" >/dev/null \
+      || die "预构建镜像拉取失败：$image_ref"
+    image_revision="$(docker image inspect \
+      --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+      "$image_ref" 2>/dev/null || true)"
+    image_source="$(docker image inspect \
+      --format '{{ index .Config.Labels "org.opencontainers.image.source" }}' \
+      "$image_ref" 2>/dev/null || true)"
+    digest_ref="$(docker image inspect --format '{{ index .RepoDigests 0 }}' "$image_ref" 2>/dev/null || true)"
+    [[ "$image_revision" == "$expected_revision" ]] \
+      || die "镜像 revision 与当前 checkout 不一致：$image_ref"
+    [[ "$image_source" == "$expected_source" ]] \
+      || die "镜像 source 不受信：$image_ref"
+    [[ "$digest_ref" == *@sha256:* ]] \
+      || die "镜像缺少 registry digest：$image_ref"
+    verify_image_attestation "$digest_ref" "$image_revision" \
+      || die "镜像缺少受信 GitHub Actions 构建来源证明：$image_ref"
+    revisions+=("$image_revision")
+    resolved_images+=("$digest_ref")
+  done
+  [[ "${revisions[0]}" == "${revisions[1]}" && "${revisions[1]}" == "${revisions[2]}" ]] \
+    || die "三项应用镜像不是同一 commit，拒绝混装"
+  TELEPILOT_WEB_IMAGE="${resolved_images[0]}"
+  TELEPILOT_FRONTEND_IMAGE="${resolved_images[1]}"
+  TELEPILOT_UPDATER_IMAGE="${resolved_images[2]}"
+  export TELEPILOT_WEB_IMAGE TELEPILOT_FRONTEND_IMAGE TELEPILOT_UPDATER_IMAGE
+  log "启动生产容器（服务器不执行编译）"
+  docker compose up -d --no-build
+fi
 
 # ── 3. 等待健康 ──────────────────────────────────────────
 log "等待 web 容器健康"
@@ -188,6 +274,11 @@ if [[ "$state" != "healthy" ]]; then
   exit 1
 fi
 ok "web 容器健康"
+wait_compose_healthy docker-compose.yml updater 60 || die "updater 不健康"
+wait_compose_healthy docker-compose.yml frontend 60 || die "frontend 不健康"
+
+# 所有服务成功后再切换公开文档与 revision，避免失败启动提前发布新状态。
+"$SCRIPT_DIR/sync-runtime-content.sh"
 
 PUBLISH_PORT="$(grep -E '^WEB_PORT_PUBLISH=' .env 2>/dev/null | cut -d= -f2 | tr -d ' "' || true)"
 PUBLISH_PORT="${PUBLISH_PORT:-80}"

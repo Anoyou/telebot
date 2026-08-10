@@ -34,6 +34,7 @@ import importlib.util
 import json
 import logging
 import re
+import secrets
 import shutil
 import time
 import traceback
@@ -47,7 +48,8 @@ from typing import Any
 from sqlalchemy import select, update
 from telethon import TelegramClient, events
 from telethon.errors import FloodWaitError, PeerFloodError
-from telethon.tl.types import PeerUser
+from telethon.tl.functions.messages import GetBotCallbackAnswerRequest
+from telethon.tl.types import KeyboardButtonCallback, PeerUser, ReplyInlineMarkup
 
 from ... import __version__ as TELEPILOT_VERSION
 from ...db.base import AsyncSessionLocal
@@ -1499,6 +1501,7 @@ async def _invoke_userbot_event_bus_entry(
             entry_key=entry_key,
             trace=payload.get("trace_id"),
             default_send_via=["userbot_reply"],
+            allow_userbot_callback_click=True,
         )
     else:
         buffered_messages = BufferedMessageOps()
@@ -1798,7 +1801,7 @@ async def _dispatch_userbot_direct_passthrough(
         if handler is None or getattr(type(inst), handler_name, None) is getattr(Plugin, handler_name, None):
             continue
         if getattr(inst, "owner_only", True):
-            allowed = await _event_allowed_for_owner_only(state, event)
+            allowed = await _event_allowed_for_owner_only(state, event, direction=direction)
             if not allowed:
                 continue
         priority = _plugin_direct_passthrough_priority(ctx)
@@ -1814,7 +1817,7 @@ async def _dispatch_userbot_direct_passthrough(
     trace = None
     trace_started = False
 
-    for priority, plugin_key, _inst, ctx, handler in candidates:
+    for priority, plugin_key, inst, ctx, handler in candidates:
         if not trace_started:
             trace = await _start_userbot_direct_passthrough_trace(
                 state,
@@ -1874,11 +1877,18 @@ async def _dispatch_userbot_direct_passthrough(
             call_ctx = replace(ctx, client=call_client, log=call_log, messages=call_messages)
         else:
             call_ctx = replace(ctx, client=call_client, log=call_log)
+        # installed 插件即使启用了低延时直通，也只能拿到权限感知的事件包装；
+        # 否则 Telethon event 内绑定的 MessageButton.click() 会绕过 MessageOps。
+        plugin_event = (
+            _wrap_event_for_context(event, call_ctx)
+            if getattr(type(inst), "_source", "builtin") == "installed"
+            else event
+        )
         try:
             result = await _invoke_plugin_with_resilience(
                 state,
                 plugin_key,
-                lambda _handler=handler, _ctx=call_ctx, _event=event: _handler(_ctx, _event),
+                lambda _handler=handler, _ctx=call_ctx, _event=plugin_event: _handler(_ctx, _event),
             )
             outcome, declared_error = _coerce_direct_passthrough_outcome(result)
             if outcome == "failed":
@@ -2166,6 +2176,67 @@ async def _apply_userbot_event_bus_actions(
             return False
         return await _apply_userbot_payout_action(state, event, action)
 
+    async def _on_click_callback_button(action: dict[str, Any]) -> bool:
+        inst = state.instances.get(plugin_key)
+        if inst is None:
+            await record_action(
+                action.get("context"),
+                action,
+                TRACE_STATUS_FAILED,
+                actual_send_via="userbot_callback",
+                error_code="plugin_not_active",
+                error="plugin instance is no longer active",
+            )
+            await _emit_userbot_action_tap(
+                state,
+                action,
+                ACTION_EVENT_STATUS_FAILED,
+                channel="userbot_callback",
+                error_code="plugin_not_active",
+                error="插件已停用或正在重载",
+            )
+            return False
+        plugin_source = getattr(type(inst), "_source", "builtin")
+        manifest = _loaded_plugin_manifest(type(inst), inst)
+        permissions = set(manifest.permissions or []) if manifest is not None else set()
+        if plugin_source == "installed" and "click_bot_button" not in permissions:
+            await record_action(
+                action.get("context"),
+                action,
+                TRACE_STATUS_FAILED,
+                actual_send_via="userbot_callback",
+                error_code="permission_denied",
+                error="installed plugin must declare click_bot_button permission",
+            )
+            await _emit_userbot_action_tap(
+                state,
+                action,
+                ACTION_EVENT_STATUS_FAILED,
+                channel="userbot_callback",
+                error_code="permission_denied",
+                error="manifest 未声明 click_bot_button 权限",
+            )
+            await _log(
+                redis,
+                state.account_id,
+                "warn",
+                "Event Bus callback click denied: manifest 未声明 click_bot_button 权限",
+                source="plugin",
+                plugin_key=plugin_key,
+                entry_key=entry_key,
+                reason_code="permission_denied",
+                action_type="click_callback_button",
+                **trace_log_context(trace),
+            )
+            return False
+        return await _apply_userbot_click_callback_button_action(
+            state,
+            action,
+            plugin_key=plugin_key,
+            redis=redis,
+            expected_plugin_instance=inst,
+        )
+
     async def _on_deprecated(action: dict[str, Any]) -> bool:
         action_type = str(action.get("type") or "").strip()
         deprecated_channels = deprecated_send_via_values(action_send_via_raw_selector(action))
@@ -2273,6 +2344,7 @@ async def _apply_userbot_event_bus_actions(
         on_edit_caption=_on_edit_caption,
         on_delete_message=_on_delete_message,
         on_pin_message=_on_pin_message,
+        on_click_callback_button=_on_click_callback_button,
         on_answer_callback=_on_answer_callback,
         on_answer_inline_query=_on_answer_inline_query,
         on_deprecated_send_via=_on_deprecated,
@@ -2585,6 +2657,8 @@ def _userbot_rate_limit_action(action_type: str, chat_id: int | None) -> str:
         return "edit_message"
     if action_type in {"send_photo", "send_file"}:
         return "upload_file"
+    if action_type == "click_callback_button":
+        return "callback_query"
     return action_type
 
 
@@ -2615,6 +2689,38 @@ async def _acquire_userbot_action_rate_limit(
         except Exception:  # noqa: BLE001
             log.debug("userbot rate limit log failed account=%s", state.account_id, exc_info=True)
 
+    async def _record_rejection(detail: dict[str, Any]) -> None:
+        channel = "userbot_callback" if action_type == "click_callback_button" else "userbot_reply"
+        error = str(
+            detail.get("reason")
+            or detail.get("outcome")
+            or "rate limited"
+        )
+        result = {
+            "outcome": detail.get("outcome"),
+            "wait_seconds": detail.get("wait_seconds"),
+            "rate_limit_action": detail.get("rate_limit_action") or limit_action,
+            "rate_limit_backend": detail.get("rate_limit_backend"),
+        }
+        await record_action(
+            action.get("context"),
+            action,
+            TRACE_STATUS_SKIPPED,
+            actual_send_via=channel,
+            error_code="rate_limited",
+            error=error,
+            result=result,
+        )
+        await _emit_userbot_action_tap(
+            state,
+            action,
+            ACTION_EVENT_STATUS_FAILED,
+            channel=channel,
+            error_code="rate_limited",
+            error=error,
+            result=result,
+        )
+
     if engine is None:
         # 与 command/runtime 对齐：引擎缺失时走本地降级桶，不再 fail-open 直发。
         from ..command import acquire_userbot_action_rate_limit as _cmd_acquire
@@ -2624,6 +2730,8 @@ async def _acquire_userbot_action_rate_limit(
             "UserBot 交互动作未接入限速引擎，已走本地降级限流。",
             rate_limit_backend=detail.get("rate_limit_backend"),
         )
+        if not allowed:
+            await _record_rejection(detail)
         return bool(allowed)
     try:
         decision = await engine.acquire(state.account_id, limit_action, peer_id=target_chat_id)
@@ -2635,21 +2743,18 @@ async def _acquire_userbot_action_rate_limit(
             f"UserBot 交互动作限速检查失败，已走本地降级限流：{type(exc).__name__}: {exc}",
             rate_limit_backend=detail.get("rate_limit_backend"),
         )
+        if not allowed:
+            await _record_rejection(detail)
         return bool(allowed)
     if not bool(getattr(decision, "allowed", False)):
-        await record_action(
-            action.get("context"),
-            action,
-            TRACE_STATUS_SKIPPED,
-            actual_send_via="userbot_reply",
-            error_code="rate_limited",
-            error=str(getattr(decision, "reason", None) or getattr(decision, "outcome", "") or "rate limited"),
-            result={
-                "outcome": getattr(decision, "outcome", None),
-                "wait_seconds": getattr(decision, "wait_seconds", None),
-                "rate_limit_action": limit_action,
-            },
-        )
+        detail = {
+            "outcome": getattr(decision, "outcome", None),
+            "wait_seconds": getattr(decision, "wait_seconds", None),
+            "rate_limit_action": limit_action,
+            "rate_limit_backend": "distributed",
+            "reason": getattr(decision, "reason", None),
+        }
+        await _record_rejection(detail)
         return False
     wait_seconds = float(getattr(decision, "wait_seconds", 0.0) or 0.0)
     if wait_seconds > 0:
@@ -2694,6 +2799,7 @@ async def _record_userbot_action_failure(
     error_code: str,
     error: str,
     target_chat_id: int | None,
+    channel: str = "userbot_reply",
     reply_to_message_id: int | None = None,
     reply_to_user_id: int | None = None,
     extra: dict[str, Any] | None = None,
@@ -2711,7 +2817,7 @@ async def _record_userbot_action_failure(
         action.get("context"),
         action,
         TRACE_STATUS_FAILED,
-        actual_send_via="userbot_reply",
+        actual_send_via=channel,
         error_code=error_code,
         error=error,
         result=result,
@@ -2720,7 +2826,7 @@ async def _record_userbot_action_failure(
         state,
         action,
         ACTION_EVENT_STATUS_FAILED,
-        channel="userbot_reply",
+        channel=channel,
         error_code=error_code,
         error=error,
         result=result,
@@ -2899,6 +3005,263 @@ async def _save_userbot_button_map(
     session["data"] = data
     session["updated_at"] = time.time()
     await _write_userbot_session(redis, session_key, session)
+
+
+async def _apply_userbot_click_callback_button_action(
+    state: _AccountState,
+    action: dict[str, Any],
+    *,
+    plugin_key: str,
+    redis: Any,
+    expected_plugin_instance: Plugin | None = None,
+) -> bool:
+    """受控点击第三方 Bot 的 callback 按钮，不接受插件提供 callback data。"""
+
+    target_chat_id = _int_or_none(action.get("chat_id"))
+    message_id = _int_or_none(action.get("message_id"))
+    row = _int_or_none(action.get("row"))
+    column = _int_or_none(action.get("column"))
+
+    async def _fail(code: str, error: str, *, extra: dict[str, Any] | None = None) -> bool:
+        await _record_userbot_action_failure(
+            state,
+            action,
+            error_code=code,
+            error=error,
+            target_chat_id=target_chat_id,
+            channel="userbot_callback",
+            reply_to_message_id=message_id,
+            extra=extra,
+        )
+        return False
+
+    def _active_plugin_error() -> tuple[str, str] | None:
+        if expected_plugin_instance is None:
+            return None
+        current = state.instances.get(plugin_key)
+        if current is not expected_plugin_instance:
+            return "plugin_not_active", "插件已停用、重载或实例已变化"
+        plugin_source = getattr(type(current), "_source", "builtin")
+        if plugin_source == "installed":
+            manifest = _loaded_plugin_manifest(type(current), current)
+            permissions = set(manifest.permissions or []) if manifest is not None else set()
+            if "click_bot_button" not in permissions:
+                return "permission_denied", "插件 click_bot_button 权限已被撤销"
+        return None
+
+    if target_chat_id is None:
+        return await _fail("scope_not_matched", "target chat_id missing")
+    if message_id is None or message_id <= 0:
+        return await _fail("invalid_message_id", "message_id must be a positive integer")
+    if row is None or column is None or row < 0 or column < 0:
+        return await _fail("invalid_button_index", "row and column must be non-negative integers")
+    if state.client is None:
+        return await _fail("userbot_offline", "userbot client unavailable")
+
+    async def _read_target() -> tuple[bytes, dict[str, Any]] | None:
+        try:
+            message = await asyncio.wait_for(
+                state.client.get_messages(target_chat_id, ids=message_id),
+                timeout=15,
+            )
+        except TimeoutError:
+            await _fail("telegram_timeout", "读取目标消息超时")
+            return None
+        except Exception as exc:  # noqa: BLE001
+            await _fail("telegram_api_error", f"{type(exc).__name__}: {exc}")
+            return None
+        if message is None or bool(getattr(message, "empty", False)):
+            await _fail("message_not_found", "目标消息不存在或账号无权读取")
+            return None
+
+        markup = getattr(message, "reply_markup", None)
+        if not isinstance(markup, ReplyInlineMarkup):
+            await _fail("inline_keyboard_missing", "目标消息没有 InlineKeyboard")
+            return None
+        rows = list(getattr(markup, "rows", None) or [])
+        if row >= len(rows):
+            await _fail("button_index_out_of_range", f"按钮行越界: row={row}")
+            return None
+        buttons = list(getattr(rows[row], "buttons", None) or [])
+        if column >= len(buttons):
+            await _fail(
+                "button_index_out_of_range",
+                f"按钮列越界: row={row}, column={column}",
+            )
+            return None
+        button = buttons[column]
+        if not isinstance(button, KeyboardButtonCallback):
+            await _fail(
+                "button_type_not_allowed",
+                f"只允许 callback 按钮，实际类型为 {type(button).__name__}",
+            )
+            return None
+        callback_data = getattr(button, "data", None)
+        if not isinstance(callback_data, (bytes, bytearray, memoryview)) or not callback_data:
+            await _fail("callback_data_missing", "目标 callback 按钮缺少有效 callback data")
+            return None
+
+        sender = getattr(message, "sender", None)
+        if sender is None:
+            try:
+                sender = await asyncio.wait_for(message.get_sender(), timeout=10)
+            except TimeoutError:
+                await _fail("telegram_timeout", "读取消息发送者超时")
+                return None
+            except Exception as exc:  # noqa: BLE001
+                await _fail("telegram_api_error", f"{type(exc).__name__}: {exc}")
+                return None
+        sender_id = _int_or_none(getattr(sender, "id", None) or getattr(message, "sender_id", None))
+        if sender_id is None or not bool(getattr(sender, "bot", False)):
+            await _fail("sender_not_bot", "目标消息发送者不是 Bot")
+            return None
+
+        expected_bot_id = action.get("expected_bot_id")
+        if expected_bot_id not in (None, ""):
+            parsed_expected_bot_id = _int_or_none(expected_bot_id)
+            if parsed_expected_bot_id is None or parsed_expected_bot_id != sender_id:
+                await _fail(
+                    "expected_bot_mismatch",
+                    "目标消息 Bot 与 expected_bot_id 不一致",
+                    extra={"actual_bot_id": sender_id},
+                )
+                return None
+        button_text = str(getattr(button, "text", None) or "")
+        expected_button_text = action.get("expected_button_text")
+        if expected_button_text is not None and str(expected_button_text) != button_text:
+            await _fail(
+                "expected_button_text_mismatch",
+                "目标按钮文字与 expected_button_text 不一致",
+                extra={"actual_button_text": button_text},
+            )
+            return None
+
+        return bytes(callback_data), {
+            "chat_id": target_chat_id,
+            "message_id": message_id,
+            "row": row,
+            "column": column,
+            "bot_id": sender_id,
+            "button_text": button_text,
+        }
+
+    initial_target = await _read_target()
+    if initial_target is None:
+        return False
+    _initial_callback_data, initial_result = initial_target
+    if _action_dev_mode_dry_run_enabled(state, action):
+        await _record_userbot_dry_run(
+            state,
+            action,
+            channel="userbot_callback",
+            result={**initial_result, "dry_run": True},
+        )
+        return True
+
+    # 限速引擎可能要求等待；此时不占用 20 秒幂等锁，避免锁在真正点击前过期。
+    if not await _acquire_userbot_action_rate_limit(
+        state,
+        action,
+        action_type="click_callback_button",
+        target_chat_id=target_chat_id,
+    ):
+        return False
+
+    # 等待期间消息可能被 Bot 编辑。点击前必须重新读取并复核发送者、按钮类型、
+    # 文字和平台持有的 callback data，不能沿用限速前的快照。
+    current_target = await _read_target()
+    if current_target is None:
+        return False
+    callback_data, result = current_target
+
+    active_error = _active_plugin_error()
+    if active_error is not None:
+        return await _fail(*active_error)
+
+    # 点击副作用属于同一个 UserBot 账号；锁不能按插件隔离，否则两个订阅插件
+    # 同时命中同一按钮时会各点击一次。
+    dedupe_key = (
+        f"tp:plugin:callback-click:{state.account_id}:"
+        f"{target_chat_id}:{message_id}:{row}:{column}"
+    )
+    claim_token = secrets.token_urlsafe(18)
+    try:
+        # 先用较长 TTL 覆盖“请求已到 Telegram、但响应超时/丢失”的未知结果窗口；
+        # 只有收到明确成功响应后才把同一 token 的锁原子缩短为 20 秒。
+        claimed = await redis.set(dedupe_key, claim_token, nx=True, ex=300)
+    except Exception as exc:  # noqa: BLE001
+        return await _fail("dedupe_unavailable", f"重复点击保护不可用: {type(exc).__name__}: {exc}")
+    if not claimed:
+        return await _fail("duplicate_button_click", "同一按钮仍处于重复点击保护期")
+
+    # Redis await 期间管理员可能禁用/重载插件；在真正发送 MTProto 副作用前再检查一次。
+    active_error = _active_plugin_error()
+    if active_error is not None:
+        return await _fail(*active_error)
+
+    try:
+        answer = await asyncio.wait_for(
+            state.client(
+                GetBotCallbackAnswerRequest(
+                    peer=target_chat_id,
+                    msg_id=message_id,
+                    data=callback_data,
+                )
+            ),
+            timeout=15,
+        )
+    except TimeoutError:
+        return await _fail("telegram_timeout", "点击 callback 按钮超时，结果未知")
+    except Exception as exc:  # noqa: BLE001
+        # Telethon/第三方异常文本可能包含 request repr；request 中带 callback data，
+        # 因此审计只保留异常类型，不把异常原文写入 Trace 或 ActionEvent。
+        return await _fail("telegram_api_error", f"{type(exc).__name__}: callback 请求失败")
+
+    callback_result = {
+        **result,
+        # Bot callback answer 文本可能包含一次性验证码或隐私提示；审计只记录存在性。
+        "message_present": bool(getattr(answer, "message", None)),
+        "alert": bool(getattr(answer, "alert", False)),
+        # callback URL 可能带一次性登录票据或业务 token，只记录是否存在。
+        "url_present": bool(getattr(answer, "url", None)),
+        "cache_time": _int_or_none(getattr(answer, "cache_time", None)),
+    }
+    try:
+        await redis.eval(
+            """
+            if redis.call('get', KEYS[1]) == ARGV[1] then
+                return redis.call('expire', KEYS[1], ARGV[2])
+            end
+            return 0
+            """,
+            1,
+            dedupe_key,
+            claim_token,
+            20,
+        )
+    except Exception:  # noqa: BLE001
+        # 点击已经成功；缩短失败时保留 5 分钟锁是更安全的降级，不影响成功结果。
+        log.warning(
+            "shorten callback click dedupe ttl failed account=%s plugin=%s",
+            state.account_id,
+            plugin_key,
+            exc_info=True,
+        )
+    await record_action(
+        action.get("context"),
+        action,
+        TRACE_STATUS_OK,
+        actual_send_via="userbot_callback",
+        result=callback_result,
+    )
+    await _emit_userbot_action_tap(
+        state,
+        action,
+        ACTION_EVENT_STATUS_OK,
+        channel="userbot_callback",
+        result=callback_result,
+    )
+    return True
 
 
 async def _apply_userbot_payout_action(state: _AccountState, event: Any, action: dict[str, Any]) -> bool:
@@ -4222,6 +4585,17 @@ async def _apply_userbot_delete_message_action(state: _AccountState, event: Any,
                 )
                 return True
             except Exception as exc:  # noqa: BLE001
+                if account_bot_service.is_message_not_deletable_error(exc):
+                    await record_action(
+                        action.get("context"),
+                        action,
+                        TRACE_STATUS_SKIPPED,
+                        actual_send_via=send_via,
+                        error_code="message_not_deletable",
+                        reason_code="message_not_deletable",
+                        error=str(exc),
+                    )
+                    return True
                 last_code = "telegram_api_error"
                 last_error = f"{type(exc).__name__}: {exc}"
                 continue
@@ -4241,6 +4615,17 @@ async def _apply_userbot_delete_message_action(state: _AccountState, event: Any,
                 )
                 return True
             except Exception as exc:  # noqa: BLE001
+                if account_bot_service.is_message_not_deletable_error(exc):
+                    await record_action(
+                        action.get("context"),
+                        action,
+                        TRACE_STATUS_SKIPPED,
+                        actual_send_via=send_via,
+                        error_code="message_not_deletable",
+                        reason_code="message_not_deletable",
+                        error=str(exc),
+                    )
+                    return True
                 last_code = "telegram_api_error"
                 last_error = f"{type(exc).__name__}: {exc}"
                 continue
@@ -4364,6 +4749,17 @@ async def _apply_userbot_answer_callback_action(state: _AccountState, action: di
             show_alert=bool(action.get("show_alert")),
         )
     except Exception as exc:  # noqa: BLE001
+        if account_bot_service.is_expired_callback_error(exc):
+            await record_action(
+                action.get("context"),
+                action,
+                TRACE_STATUS_SKIPPED,
+                actual_send_via="interaction_bot",
+                error_code="callback_query_expired",
+                reason_code="callback_query_expired",
+                error=str(exc),
+            )
+            return True
         await record_action(action.get("context"), action, TRACE_STATUS_FAILED, error_code="telegram_api_error", error=f"{type(exc).__name__}: {exc}")
         await _emit_userbot_action_tap(
             state,
@@ -4810,26 +5206,6 @@ def _missing_plugin_error(feature_key: str) -> tuple[str, str]:
             ),
         )
     return ("plugin not found", f"feature {feature_key} 已启用但未找到插件实现")
-
-
-def _import_builtins() -> None:
-    """import 内置插件包，触发各模块的 ``@register`` 装饰器写入注册表。
-
-    模块化重构后此函数等价于"调 ``discover_plugins()`` + 跳过返回值"——
-    保留是因为现有调用方（runtime / 测试）仍以这个名字为入口；
-    返回值忽略，单纯靠副作用（``@register`` + ``_manifest`` 注入）来工作。
-    任意单个插件失败仅记日志，不影响其它插件加载。
-    """
-    try:
-        from . import builtin  # noqa: F401  builtin/__init__.py 也会 re-export
-    except Exception:  # noqa: BLE001
-        log.exception("import plugins.builtin 失败")
-    try:
-        # 只扫描 builtin。第三方 installed 插件必须等 DB 双开关检查通过后
-        # 再按需加载，避免 worker 启动/配置刷新时执行未启用插件代码。
-        discover_plugins()
-    except Exception:  # noqa: BLE001
-        log.exception("discover_plugins 失败")
 
 
 def _installed_module_name(plugin_key: str) -> str:
@@ -5576,6 +5952,7 @@ class _AccountState:
         # 启动 / reload_config 时同步。命令派发、插件错误、业务事件不受影响。
         self.log_incoming_messages: bool = False
         self.account_proxy_url: str | None = None
+        self.account_proxy_error: str | None = None
         self.interaction_text_guard_rules: tuple[_InteractionTextGuardRule, ...] = ()
         self.interaction_bot_sender_ids: frozenset[int] = frozenset()
         self.userbot_session_chats: set[int] = set()
@@ -5752,6 +6129,14 @@ class _LiveMessageOps:
         await self.apply([action])
         return action
 
+    async def click_callback_button(self, **kwargs: Any) -> dict[str, Any]:
+        from .message_ops import BufferedMessageOps
+
+        buffered = BufferedMessageOps()
+        action = await buffered.click_callback_button(**kwargs)
+        await self.apply([action])
+        return action
+
     async def answer_inline_query(self, **kwargs: Any) -> dict[str, Any]:
         from .message_ops import BufferedMessageOps
 
@@ -5790,8 +6175,10 @@ class _InteractionEntryMessageOps(BufferedMessageOps):
         entry_key: str,
         trace: Any | None = None,
         default_send_via: list[str] | None = None,
+        allow_userbot_callback_click: bool = False,
     ) -> None:
         super().__init__()
+        self._allow_userbot_callback_click = allow_userbot_callback_click
         self._live = _LiveMessageOps(
             state,
             plugin_key=plugin_key,
@@ -5801,7 +6188,24 @@ class _InteractionEntryMessageOps(BufferedMessageOps):
         )
 
     async def apply(self, actions: list[dict[str, Any]], *, entry_key: str | None = None) -> None:
+        if not self._allow_userbot_callback_click and any(
+            str((action or {}).get("type") or "").strip() == "click_callback_button"
+            for action in (actions or [])
+            if isinstance(action, dict)
+        ):
+            raise RuntimeError(
+                "Interaction Bot 插件入口不支持 click_callback_button；"
+                "Interaction Bot 收到用户点击后请使用 answer_callback"
+            )
         await self._live.apply(actions, entry_key=entry_key)
+
+    async def click_callback_button(self, **kwargs: Any) -> dict[str, Any]:
+        if not self._allow_userbot_callback_click:
+            raise RuntimeError(
+                "Interaction Bot 插件入口不支持 click_callback_button；"
+                "Interaction Bot 收到用户点击后请使用 answer_callback"
+            )
+        return await super().click_callback_button(**kwargs)
 
     async def read_saved_message_id(self, key: str) -> int | None:
         return await self._live.read_saved_message_id(key)
@@ -5811,10 +6215,24 @@ class _InteractionEntryMessageOps(BufferedMessageOps):
 
 
 async def _event_sender_id(event: Any) -> int | None:
+    """读取事件发送者 ID，优先使用 Telethon 原生的 sender_id 字段。"""
+    message = getattr(event, "message", event)
+    for candidate in (
+        getattr(event, "sender_id", None),
+        getattr(message, "sender_id", None),
+    ):
+        if candidate is not None:
+            try:
+                return int(candidate)
+            except (TypeError, ValueError):
+                pass
     sender = getattr(event, "sender", None)
     sender_id = getattr(sender, "id", None)
     if sender_id is not None:
-        return int(sender_id)
+        try:
+            return int(sender_id)
+        except (TypeError, ValueError):
+            pass
     try:
         sender = await event.get_sender()
         sender_id = getattr(sender, "id", None)
@@ -5823,10 +6241,21 @@ async def _event_sender_id(event: Any) -> int | None:
         return None
 
 
-async def _event_allowed_for_owner_only(state: _AccountState, event: Any) -> bool:
+async def _event_allowed_for_owner_only(
+    state: _AccountState,
+    event: Any,
+    *,
+    direction: str | None = None,
+) -> bool:
     """owner_only 插件的统一消息门禁：账号本人或授权 sudo 用户才可触发。"""
-    if bool(getattr(event, "outgoing", False)):
+    # 派发器已经依据 events.NewMessage(incoming/outgoing) 明确知道方向；
+    # 不要读取 Telethon 0.x 的 event.outgoing（Telethon 1.44 不再提供该别名）。
+    if direction == "outgoing":
         return True
+    if direction is None:
+        message = getattr(event, "message", event)
+        if bool(getattr(message, "out", False)):
+            return True
     sender_id = await _event_sender_id(event)
     if sender_id is None:
         return False
@@ -5839,25 +6268,6 @@ async def _event_allowed_for_owner_only(state: _AccountState, event: Any) -> boo
     if not sudo_chat_allowed(allowed_chats, getattr(event, "chat_id", None)):
         return False
     return True
-
-
-def _rule_chat_matches_for_interaction_guard(rule: dict[str, Any], chat_id: int | None) -> bool:
-    if chat_id is None:
-        return False
-    chat_ids = rule.get("chat_ids")
-    if isinstance(chat_ids, list) and chat_ids:
-        try:
-            return int(chat_id) in {int(item) for item in chat_ids}
-        except (TypeError, ValueError):
-            return False
-    return True
-
-
-def _text_equals_any(text: str, values: Any) -> bool:
-    if not isinstance(values, list):
-        return False
-    clean = str(text or "").strip()
-    return bool(clean and any(clean == str(item or "").strip() for item in values if str(item or "").strip()))
 
 
 def _normalize_guard_texts(*values: Any) -> frozenset[str]:
@@ -6683,6 +7093,7 @@ async def load_plugins_for_account(
     redis: Any,
     scheduler: Any | None = None,
     account_proxy_url: str | None = None,
+    account_proxy_error: str | None = None,
 ) -> None:
     """runtime 在 ``client.connect()`` 之前调一次。
 
@@ -6698,6 +7109,7 @@ async def load_plugins_for_account(
     state.redis = redis
     state.scheduler = scheduler
     state.account_proxy_url = account_proxy_url
+    state.account_proxy_error = account_proxy_error
     state.log_incoming_messages = await _load_log_incoming_messages_setting()
     _STATES[account_id] = state
 
@@ -6852,7 +7264,7 @@ async def load_plugins_for_account(
                 if direction not in inst.message_channels:
                     continue
                 if getattr(inst, "owner_only", True):
-                    allowed = await _event_allowed_for_owner_only(state, event)
+                    allowed = await _event_allowed_for_owner_only(state, event, direction=direction)
                     if not allowed:
                         continue
                 ctx = state.contexts.get(fkey)
@@ -7185,6 +7597,7 @@ async def _activate(db, state: _AccountState, af: AccountFeature, redis: Any) ->
                     feature_key=af.feature_key,
                     config=effective_config,
                     account_proxy_url=state.account_proxy_url,
+                    account_proxy_error=state.account_proxy_error,
                 ),
                 allowed_hosts=allowed_hosts,
                 manifest_http=getattr(plugin_manifest, "http", None),
@@ -7268,6 +7681,7 @@ async def _activate(db, state: _AccountState, af: AccountFeature, redis: Any) ->
         ),
         generation=state.generation,
         account_proxy_url=state.account_proxy_url,
+        account_proxy_error=state.account_proxy_error,
     )
     # storage 始终基于原始 redis + 自己的前缀，不经过 facade 双重前缀。
     ctx.storage = PluginStorage(
@@ -8429,23 +8843,31 @@ async def invoke_interaction_entry(
     default_send_via: list[str] | None = None,
     deadline_at_ms: int | None = None,
 ) -> list[dict[str, Any]]:
-    """调用已加载插件的交互 Bot 入口，返回平台标准动作。"""
+    """调用已加载插件的 Interaction Bot 事件或旧交互入口。"""
 
     state = _STATES.get(account_id)
     if state is None:
         raise RuntimeError("账号 worker 尚未运行")
     plugin_key = str(plugin_key or "").strip()
     entry_key = str(entry_key or "").strip()
-    if not plugin_key or not entry_key:
-        raise ValueError("缺少 plugin_key 或 entry_key")
+    if not plugin_key:
+        raise ValueError("缺少 plugin_key")
     inst = state.instances.get(plugin_key)
     ctx = state.contexts.get(plugin_key)
     if inst is None or ctx is None:
         raise RuntimeError(f"模块未加载或未启用：{plugin_key}")
 
+    raw_payload = dict(payload or {})
+    trigger = raw_payload.get("trigger") if isinstance(raw_payload.get("trigger"), dict) else {}
+    is_event_subscription = str(trigger.get("dispatch_mode") or "").strip() == "event_subscription"
+    has_event_handler = _plugin_overrides(inst, "on_event")
+    has_interaction_handler = _plugin_overrides(inst, "on_interaction")
+    if not entry_key and not (is_event_subscription and has_event_handler):
+        raise ValueError("Event Bus 订阅缺少 entry_key，且插件未实现 on_event")
+
     base_log = ctx.log
     base_client = ctx.client
-    trace_id = str((payload or {}).get("trace_id") or "").strip()
+    trace_id = str(raw_payload.get("trace_id") or "").strip()
     buffered_messages = _InteractionEntryMessageOps(
         state,
         plugin_key=plugin_key,
@@ -8472,9 +8894,13 @@ async def invoke_interaction_entry(
 
         call_log = _trace_log
     call_ctx = replace(ctx, messages=buffered_messages, client=call_client, log=call_log)
-    plugin_payload = attach_tp_event(dict(payload or {}))
+    plugin_payload = attach_tp_event(raw_payload)
 
     async def _call_handler() -> Any:
+        if is_event_subscription and has_event_handler:
+            return await inst.on_event(call_ctx, plugin_payload)
+        if not has_interaction_handler:
+            raise RuntimeError(f"模块尚未实现交互入口：{plugin_key}.{entry_key}")
         return await inst.on_interaction(call_ctx, entry_key, plugin_payload)
 
     actions = await _invoke_plugin_with_resilience(
@@ -8483,7 +8909,7 @@ async def invoke_interaction_entry(
         _call_handler,
         deadline_at_ms=deadline_at_ms,
     )
-    if actions is None and not buffered_messages.actions:
+    if actions is None and not buffered_messages.actions and not (is_event_subscription and has_event_handler):
         raise RuntimeError(f"模块尚未实现交互入口：{plugin_key}.{entry_key}")
     if actions is None:
         actions = []

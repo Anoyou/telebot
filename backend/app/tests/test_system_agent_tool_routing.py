@@ -67,6 +67,62 @@ def test_reference_reuses_last_memory_domain() -> None:
     )
 
 
+@pytest.mark.parametrize("text", ("重试", "再试一次", "retry"))
+def test_provider_retry_reuses_last_memory_domain(text: str) -> None:
+    route = route_locally(
+        text,
+        available={"providers", "logs"},
+        memory_state={"last_domains": ["providers"]},
+    )
+
+    assert route == ToolRoute(
+        ("providers",),
+        "memory",
+        "reference_to_previous_domain",
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    (
+        "sk-proj-abcdefghijklmnopqrstuvwxyz123456",
+        "abcdefghijklmnopqrstuvwxyz123456",
+        "abcdefghijkl.mnopqrstuvwxyz",
+    ),
+)
+def test_standalone_key_continues_previous_provider_task(text: str) -> None:
+    route = route_locally(
+        text,
+        available={"providers", "logs"},
+        memory_state={"last_domains": ["providers"]},
+    )
+
+    assert route == ToolRoute(
+        ("providers",),
+        "memory",
+        "provider_key_continuation",
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    (
+        "abcdefghijklmnopqrstuvwxyz123456",
+        "这是一段很长但没有系统实时数据需求的普通说明文本",
+        "issue-abcdefghijklmnopqrstuvwxyz123456",
+    ),
+)
+def test_standalone_long_text_without_provider_context_does_not_route_to_provider(
+    text: str,
+) -> None:
+    route = route_locally(
+        text,
+        available={"providers", "logs"},
+    )
+
+    assert route is None or "providers" not in route.domains
+
+
 @pytest.mark.parametrize(
     "text",
     (

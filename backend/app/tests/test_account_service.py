@@ -9,6 +9,7 @@ import pytest
 
 from app.schemas.account import AccountUpdateRequest
 from app.services import account_service
+from app.util.proxy import ProxyConfigError
 from app.worker import supervisor
 
 
@@ -16,8 +17,9 @@ from app.worker import supervisor
 async def test_update_account_proxy_changed_triggers_reload(monkeypatch: pytest.MonkeyPatch) -> None:
     """当 proxy_id/template_id 发生变化时，必须触发 worker 重启。"""
     acc = SimpleNamespace(id=1, proxy_id=10, template_id=20, display_name="old")
+    proxy = SimpleNamespace(id=11, type="socks5")
     db = AsyncMock()
-    db.get = AsyncMock(return_value=acc)
+    db.get = AsyncMock(side_effect=[acc, proxy])
     db.commit = AsyncMock(return_value=None)
 
     published: list[tuple[str, str]] = []
@@ -84,6 +86,91 @@ async def test_update_account_not_found() -> None:
         await account_service.update_account(db, 404, AccountUpdateRequest(display_name="x"))
     assert exc_info.value.status_code == 404
     assert exc_info.value.detail["code"] == "ACCOUNT_NOT_FOUND"
+
+
+@pytest.mark.asyncio
+async def test_update_account_rejects_legacy_mtproxy() -> None:
+    acc = SimpleNamespace(id=3, proxy_id=None, template_id=None, display_name="old")
+    proxy = SimpleNamespace(id=12, type="mtproxy")
+    db = AsyncMock()
+    db.get = AsyncMock(side_effect=[acc, proxy])
+
+    with pytest.raises(account_service.HTTPException) as exc_info:
+        await account_service.update_account(db, 3, AccountUpdateRequest(proxy_id=12))
+
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.detail["code"] == "PROXY_TYPE_UNSUPPORTED"
+    db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_delete_account_cleans_transfer_notice_setting(monkeypatch: pytest.MonkeyPatch) -> None:
+    """删除账号必须同步清理无外键约束的交互 Bot 配置。"""
+    acc = SimpleNamespace(id=7)
+    db = AsyncMock()
+    db.get = AsyncMock(return_value=acc)
+    db.execute = AsyncMock()
+    db.delete = AsyncMock()
+    db.commit = AsyncMock()
+    monkeypatch.setattr(account_service, "_publish", AsyncMock())
+    monkeypatch.setattr(account_service, "_logout_best_effort", AsyncMock())
+
+    await account_service.delete_account(db, 7)
+
+    db.execute.assert_awaited_once()
+    statement = db.execute.await_args.args[0]
+    assert next(iter(statement.compile().params.values())) == "account_bot_transfer_notice:7"
+    db.delete.assert_awaited_once_with(acc)
+    db.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "proxy",
+    [
+        SimpleNamespace(
+            id=9,
+            type="mtproxy",
+            host="proxy.example",
+            port=443,
+            username=None,
+            password_enc=None,
+        ),
+        None,
+    ],
+    ids=["legacy-type", "missing-row"],
+)
+async def test_logout_invalid_proxy_never_constructs_telegram_client(
+    monkeypatch: pytest.MonkeyPatch,
+    proxy,
+) -> None:
+    acc = SimpleNamespace(
+        proxy_id=9,
+        api_id_enc="api-id",
+        api_hash_enc="api-hash",
+        session_enc=b"session",
+    )
+    db = AsyncMock()
+    db.get = AsyncMock(return_value=proxy)
+    monkeypatch.setattr(account_service, "decrypt_bytes", lambda _value: b"session")
+    monkeypatch.setattr(
+        account_service,
+        "decrypt_str",
+        lambda value: "12345" if value == "api-id" else "api-hash",
+    )
+    constructed = False
+
+    def _telegram_client(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        nonlocal constructed
+        constructed = True
+        raise AssertionError("旧代理不得进入 TelegramClient")
+
+    monkeypatch.setattr(account_service, "TelegramClient", _telegram_client)
+
+    with pytest.raises(ProxyConfigError):
+        await account_service._logout_best_effort(db, acc)
+
+    assert constructed is False
 
 
 @pytest.mark.asyncio

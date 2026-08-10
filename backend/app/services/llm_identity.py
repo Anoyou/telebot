@@ -70,7 +70,7 @@ DEFAULT_CLIENT_IDENTITY_PROFILE = CLIENT_IDENTITY_AUTO
 # ``auto`` 按本次实际协议解析出的默认身份。
 _AUTO_IDENTITY_BY_FORMAT = {
     LLM_API_FORMAT_CHAT_COMPLETIONS: CLIENT_IDENTITY_OPENAI_SDK,
-    LLM_API_FORMAT_RESPONSES: CLIENT_IDENTITY_CODEX_TUI,
+    LLM_API_FORMAT_RESPONSES: CLIENT_IDENTITY_OPENAI_SDK,
     LLM_API_FORMAT_ANTHROPIC_MESSAGES: CLIENT_IDENTITY_CLAUDE_CODE,
 }
 
@@ -81,6 +81,7 @@ IDENTITY_PROBE_ORDER = {
         CLIENT_IDENTITY_MINIMAL,
     ),
     LLM_API_FORMAT_RESPONSES: (
+        CLIENT_IDENTITY_OPENAI_SDK,
         CLIENT_IDENTITY_CODEX_TUI,
         CLIENT_IDENTITY_MINIMAL,
     ),
@@ -516,6 +517,8 @@ def is_identity_compatible(profile: str, api_format: str | None) -> bool:
 def resolve_identity(
     configured_profile: str | None,
     effective_api_format: str | None,
+    *,
+    recommended_profile: str | None = None,
 ) -> ClientIdentity:
     """根据"本次实际协议"解析出要使用的客户端身份。
 
@@ -528,7 +531,12 @@ def resolve_identity(
     fmt = (effective_api_format or "").strip().lower()
 
     if normalized == CLIENT_IDENTITY_AUTO:
-        target = default_identity_for_format(fmt)
+        recommended = normalize_identity_profile(recommended_profile)
+        target = (
+            recommended
+            if recommended not in {CLIENT_IDENTITY_AUTO, CLIENT_IDENTITY_MINIMAL}
+            else default_identity_for_format(fmt)
+        )
     else:
         target = normalized
 
@@ -679,8 +687,16 @@ def request_configuration_profiles() -> list[dict[str, Any]]:
             runtime_headers = [
                 {
                     "name": name,
-                    "value": "每个请求会话随机生成；三者使用同一 UUID",
-                    "description": "Codex Responses 的临时请求链路标识，不使用 Telegram、账号或用户 ID。",
+                    "value": (
+                        "按 Provider 隔离的稳定会话伪名"
+                        if name in {"session-id", "thread-id"}
+                        else "每次 HTTP 请求唯一 UUID"
+                    ),
+                    "description": (
+                        "Codex Responses 会话链路标识；由 MASTER_KEY 做 HMAC，不外发原始业务 ID。"
+                        if name in {"session-id", "thread-id"}
+                        else "Codex Responses 单次请求标识，与会话 ID 分离。"
+                    ),
                     "configurable": False,
                     "management": "runtime",
                 }
@@ -690,8 +706,16 @@ def request_configuration_profiles() -> list[dict[str, Any]]:
             runtime_headers = [
                 {
                     "name": name,
-                    "value": "每个请求会话随机生成；两个字段使用同一 UUID",
-                    "description": "Codex Desktop Responses 的临时请求链路标识。",
+                    "value": (
+                        "按 Provider 隔离的稳定会话伪名"
+                        if name == "session_id"
+                        else "每次 HTTP 请求唯一 UUID"
+                    ),
+                    "description": (
+                        "Codex Desktop 会话标识；由 MASTER_KEY 做 HMAC，不外发原始业务 ID。"
+                        if name == "session_id"
+                        else "Codex Desktop 单次请求标识，与会话 ID 分离。"
+                    ),
                     "configurable": False,
                     "management": "runtime",
                 }
@@ -701,8 +725,8 @@ def request_configuration_profiles() -> list[dict[str, Any]]:
             runtime_headers = [
                 {
                     "name": "X-Claude-Code-Session-Id",
-                    "value": "每个客户端实例随机生成 UUID",
-                    "description": "Claude Code 的临时会话标识，不复用系统内业务 ID。",
+                    "value": "按 Provider 隔离的稳定会话伪名",
+                    "description": "Claude Code 会话标识；由 MASTER_KEY 做 HMAC，不外发原始业务 ID。",
                     "configurable": False,
                     "management": "runtime",
                 }
@@ -717,10 +741,9 @@ def request_configuration_profiles() -> list[dict[str, Any]]:
                     "management": "runtime",
                 }
                 for name, value, description in (
-                    ("x-grok-conv-id", "随机 UUID", "Grok 临时会话标识。"),
+                    ("x-grok-conv-id", "稳定会话伪名", "按 Provider 隔离的 Grok 会话标识。"),
                     ("x-grok-session-id", "与 conv-id 一致", "Grok 临时会话标识。"),
                     ("x-grok-req-id", "随机 UUID", "Grok 单次请求标识。"),
-                    ("x-grok-agent-id", "随机 UUID", "Grok 临时 Agent 标识。"),
                     ("x-grok-turn-idx", "1", "单次 headless 调用的轮次编号。"),
                     ("x-grok-model-override", "当前模型 ID", "Grok 本次请求的模型覆盖值。"),
                 )
@@ -824,6 +847,7 @@ def request_configuration_profiles() -> list[dict[str, Any]]:
                 for name, description in (
                     ("x-xai-token-auth", "Grok CLI 的专用 Token 鉴权字段，不能由普通 Provider API Key 模拟。"),
                     ("x-authenticateresponse", "Grok CLI 登录挑战响应，属于账号与设备鉴权语义。"),
+                    ("x-grok-agent-id", "Grok Agent Identity 没有 TelePilot 对等语义，不复制。"),
                 )
             ]
         output.append(

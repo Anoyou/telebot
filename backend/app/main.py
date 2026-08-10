@@ -45,6 +45,7 @@ from .services import (
 )
 from .services.login_service import cleanup_expired_loop
 from .services.system_agent.actions import cleanup_expired_action_secrets_loop
+from .services.system_agent.run_manager import get_system_agent_run_manager
 from .settings import settings
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
@@ -98,6 +99,14 @@ async def _retry_runtime_component(
             logging.info("关键组件 %s 已自动恢复", name)
             return
         delay = min(delay * 2, 30.0)
+
+
+async def _restore_system_agent_runs(manager=None):
+    """启动期主动恢复持久化 Agent 队列，并返回本进程 Manager。"""
+
+    manager = manager or get_system_agent_run_manager()
+    await manager.ensure_ready()
+    return manager
 
 
 async def _start_interaction_bot_component() -> object:
@@ -200,6 +209,7 @@ def _run_alembic_upgrade() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期：启动 supervisor + login 清理任务，退出时优雅关停。"""
+    system_agent_run_manager = None
     _warn_if_forwarded_for_misconfigured()
     # 0) 启动期自动 alembic upgrade head
     #    解决"代码加了新字段、DB 还没跑迁移 → 前端列表 500"那类问题。
@@ -226,12 +236,30 @@ async def lifespan(app: FastAPI):
     except Exception:  # noqa: BLE001
         logging.exception("加载客户端身份 UA 版本覆盖失败，使用默认版本继续启动")
 
+    # Gateway 是 optional runtime；失败只使对应 Provider degraded，不影响全局 readiness。
+    try:
+        from .services.gateway_runtime import reconcile_gateway_runtime
+
+        await reconcile_gateway_runtime()
+    except Exception as exc:  # noqa: BLE001
+        logging.exception("内置 Gateway 启动或配置同步失败；direct Provider 继续可用")
+        from .services.gateway_runtime import gateway_runtime_manager
+
+        await gateway_runtime_manager.mark_control_plane_degraded(exc)
+
     try:
         interrupted_jobs = await plugin_config_action_jobs.startup_plugin_config_action_jobs()
         if interrupted_jobs:
             logging.warning("已收敛 %d 个上次进程遗留的插件配置任务", interrupted_jobs)
     except Exception:  # noqa: BLE001
         logging.exception("收敛遗留插件配置任务失败")
+
+    # 主动恢复持久化 Agent 队列，避免必须等到首次 Web/Bot 调用才继续遗留任务。
+    system_agent_run_manager = get_system_agent_run_manager()
+    try:
+        await _restore_system_agent_runs(system_agent_run_manager)
+    except Exception:  # noqa: BLE001
+        logging.exception("恢复 System Agent 持久任务失败；后续调用将继续自动重试")
 
     # 1) 启动登录会话清理后台任务（每 60s 扫一次）
     cleanup_task = asyncio.create_task(cleanup_expired_loop())
@@ -314,6 +342,17 @@ async def lifespan(app: FastAPI):
             task.cancel()
         if retry_tasks:
             await asyncio.gather(*retry_tasks, return_exceptions=True)
+        try:
+            from .services.gateway_runtime import gateway_runtime_manager
+
+            await gateway_runtime_manager.shutdown()
+        except Exception:  # noqa: BLE001
+            logging.exception("停止内置 Gateway 失败")
+        if system_agent_run_manager is not None:
+            try:
+                await system_agent_run_manager.shutdown()
+            except Exception:  # noqa: BLE001
+                logging.exception("停止 System Agent 持久任务失败")
         try:
             await plugin_config_action_jobs.shutdown_plugin_config_action_jobs()
         except Exception:  # noqa: BLE001
@@ -462,10 +501,15 @@ async def csrf_header_middleware(request: Request, call_next):
 async def http_exc_handler(request: Request, exc: HTTPException):
     detail = exc.detail
     if isinstance(detail, dict) and "code" in detail:
-        return JSONResponse(status_code=exc.status_code, content={"error": detail})
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"error": detail},
+            headers=exc.headers,
+        )
     return JSONResponse(
         status_code=exc.status_code,
         content={"error": {"code": "HTTP", "message": str(detail)}},
+        headers=exc.headers,
     )
 
 
@@ -610,3 +654,8 @@ app.include_router(remote_plugin_api.router)
 from .api import plugin_repo as plugin_repo_api  # noqa: E402
 
 app.include_router(plugin_repo_api.router)
+
+# 所有路由注册完成后再安装内部契约，确保 OpenAPI 快照覆盖完整 API。
+from .openapi_contract import install_openapi_contract  # noqa: E402
+
+install_openapi_contract(app)

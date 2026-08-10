@@ -1,8 +1,33 @@
 # EXECUTION-STATE（进度真相源）
 
-> 当前计划：`agent-plans/PLAN-agent-slots-bot-fixes.md` **v4**
+> 当前计划：`agent-plans/PLAN-embedded-codex-gateway.md` **v1**
 > 纪律：每 WP 完成即更新本文件；新会话恢复从本文件开始。
 > 状态：`pending` → `in_progress` → `done`（附 commit 哈希）/ `blocked` / `partial`（附缺口）
+
+## 当前计划：内置 Codex Gateway / 全链路 Agent 接入 / LLM 错误语义收口 v1
+
+### 阶段 A：错误语义收口
+
+- [x] WP-A1 统一诊断事实 — done `cd305088`
+- [x] WP-A2 全调用面接入 — done `546277d3`
+- [x] WP-A3 前端与用量展示 — done `e6e8b430`
+
+### 阶段 B：独立 Gateway 模块
+
+- [x] WP-B1 进程骨架与契约 — done `b63267fd`
+- [x] WP-B2 Provider 快照与精确路由 — done `726d9495`
+- [x] WP-B3 Codex Responses 数据面 — done `cb3192f1`
+
+### 阶段 C：TelePilot 全链路接入
+
+- [x] WP-C1 运行时管理与配置同步 — done `88374f4e`
+- [x] WP-C2 Provider schema 与 Client Builder — done `03e8aac6`
+- [x] WP-C3 Agent、插件、测活与 usage 验收 — done `1892beee`
+- [x] WP-C4 Provider UI、健康与文档 — done `6dbeeaeb`
+
+开发工作包已完成；发布审查补齐了 Codex session/thread/turn/window/installation、prompt cache 与出站身份契约。2026-08-03 对原受限 Provider #32 的对照请求未复现原 `official clients` 403，但 Provider 反代当前返回 `502 Lucky Bad Gateway`；该结果既不能证明身份已被接受，也不能标记为真实模型成功。amd64/arm64 Gateway 二进制与完整 Web runtime 镜像已完成本地构建检查，线上 Deploy Check 仍属于发布后外部验收。
+
+---
 
 ## 当前计划：Bot 交互修复 / 插件工具插槽 / OpenWorker 三点 v4
 

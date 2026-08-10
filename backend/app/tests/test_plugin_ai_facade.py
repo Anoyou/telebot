@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -10,6 +11,7 @@ from app.services.llm_agent import AgentResult
 from app.services.llm_client import LLMCallFailed, LLMError, LLMResult, LLMStreamChunk
 from app.services.llm_dto import LLMProviderDTO
 from app.services.llm_protocol import ModelResponse, ModelUsage, StopReason, TextContent
+from app.util.proxy import ProxyConfigError
 from app.worker.plugins import ai_facade
 from app.worker.plugins.ai_facade import AIQuotaError, AIUnavailableError, PluginAI
 
@@ -80,6 +82,89 @@ async def test_list_providers_redacts_sensitive_metadata() -> None:
     assert "secret-base" not in encoded
     assert "user:pass" not in encoded
     assert "model-secret" not in encoded
+
+
+@pytest.mark.asyncio
+async def test_legacy_proxy_provider_is_excluded_before_plugin_ai_client_build(
+    monkeypatch,
+) -> None:  # noqa: ANN001
+    provider_row = SimpleNamespace(proxy_id=8)
+    legacy_proxy = SimpleNamespace(
+        id=8,
+        type="mtproxy",
+        host="proxy.example",
+        port=443,
+        username=None,
+        password_enc=None,
+    )
+
+    class _Result:
+        def __init__(self, rows) -> None:  # noqa: ANN001
+            self._rows = rows
+
+        def scalars(self):  # noqa: ANN201
+            return self
+
+        def all(self):  # noqa: ANN201
+            return self._rows
+
+    class _Session:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def __aenter__(self):  # noqa: ANN204
+            return self
+
+        async def __aexit__(self, *_args) -> None:  # noqa: ANN002
+            return None
+
+        async def execute(self, _query):  # noqa: ANN001, ANN201
+            self.calls += 1
+            return _Result([provider_row] if self.calls == 1 else [legacy_proxy])
+
+    monkeypatch.setattr(ai_facade, "AsyncSessionLocal", _Session)
+    monkeypatch.setattr(
+        ai_facade.LLMProviderDTO,
+        "from_orm_row",
+        staticmethod(lambda _row: _provider(1)),
+    )
+    client_built = False
+
+    def _build_client(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        nonlocal client_built
+        client_built = True
+        raise AssertionError("旧代理 Provider 不得进入 LLM 客户端")
+
+    monkeypatch.setattr(ai_facade, "build_llm_client", _build_client)
+    facade = PluginAI(account_id=7, plugin_key="demo")
+
+    with pytest.raises(AIUnavailableError, match="没有可用的 LLM provider"):
+        await facade.complete("sys", "hello")
+
+    assert client_built is False
+
+
+def test_proxy_url_projection_rejects_missing_proxy() -> None:
+    with pytest.raises(ProxyConfigError, match="代理不存在"):
+        ai_facade._proxy_url_from_row(None)
+
+
+def test_proxy_url_projection_rejects_broken_proxy_credentials(monkeypatch) -> None:
+    proxy = SimpleNamespace(
+        type="socks5",
+        host="proxy.example",
+        port=1080,
+        username="alice",
+        password_enc=b"broken",
+    )
+    monkeypatch.setattr(
+        ai_facade,
+        "decrypt_str",
+        lambda _value: (_ for _ in ()).throw(ValueError("bad master key")),
+    )
+
+    with pytest.raises(ProxyConfigError, match="凭据无法解密"):
+        ai_facade._proxy_url_from_row(proxy)
 
 
 @pytest.mark.asyncio
@@ -371,6 +456,77 @@ async def test_agent_uses_manifest_allowlist_and_shared_runtime(monkeypatch) -> 
     assert result.routing["mode"] == "auto"
     assert result.routing["provider_id"] == 1
     assert result.routing["model"] == "gpt-test"
+
+
+@pytest.mark.asyncio
+async def test_agent_sticks_to_provider_after_fallback(monkeypatch) -> None:
+    providers = {
+        1: _provider(1, name="gateway", api_format="responses"),
+        2: _provider(2, name="direct", api_format="responses"),
+    }
+    starts: list[int] = []
+
+    async def _loader():
+        return providers
+
+    async def lookup(_arguments: dict[str, Any]) -> dict[str, Any]:
+        return {"ok": True}
+
+    async def _run_agent(model_call, request, _tools, **_kwargs):
+        await model_call(request)
+        response = await model_call(request)
+        return AgentResult(
+            text=response.text,
+            model=response.model,
+            messages=request.messages,
+            usage=response.usage,
+            steps=2,
+            tool_calls=1,
+            stop_reason=StopReason.COMPLETED,
+        )
+
+    async def _invoke(primary, _providers, request, **kwargs):
+        starts.append(primary.id)
+        actual = providers[2] if len(starts) == 1 else primary
+        progress = kwargs.get("progress_callback")
+        if progress is not None:
+            await progress({"type": "model_attempt", "provider_id": actual.id, "model": request.model})
+        return (
+            ModelResponse(
+                model=request.model,
+                content=(TextContent("done"),),
+                usage=ModelUsage(input_tokens=1, output_tokens=1),
+            ),
+            actual,
+            actual.id != primary.id,
+        )
+
+    monkeypatch.setattr(ai_facade, "run_agent", _run_agent)
+    monkeypatch.setattr(ai_facade, "invoke_structured", _invoke)
+    monkeypatch.setattr(ai_facade.plugin_ai_quota, "acquire", AsyncNoop(return_value=object()))
+    monkeypatch.setattr(ai_facade.plugin_ai_quota, "release", AsyncNoop())
+    facade = PluginAI(
+        account_id=7,
+        plugin_key="demo",
+        provider_loader=_loader,
+        allow_agent=True,
+        manifest={
+            "capabilities": {"agent_tools": {"enabled": True}},
+            "agent_tools": [
+                {
+                    "name": "lookup",
+                    "description": "Lookup",
+                    "parameters": {"type": "object", "properties": {}},
+                }
+            ],
+        },
+    )
+
+    result = await facade.run_agent("sys", "user", handlers={"lookup": lookup})
+
+    assert result.text == "done"
+    assert starts == [1, 2]
+    assert result.provider_id == 2
 
 
 @pytest.mark.asyncio

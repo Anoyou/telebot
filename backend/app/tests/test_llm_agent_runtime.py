@@ -854,7 +854,7 @@ async def test_agent_retries_same_model_five_times_before_same_provider_fallback
     assert [event["model"] for event in exhausted] == ["model-a"]
     usage_records = [call.args[0] for call in emit_usage.await_args_list]
     failed_record = next(record for record in usage_records if not record.success)
-    assert failed_record.error_type == "server_error"
+    assert failed_record.error_type == "upstream_error"
     assert failed_record.response_preview == "LLMError: upstream unavailable"
 
 

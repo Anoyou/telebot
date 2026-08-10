@@ -1,8 +1,13 @@
 from __future__ import annotations
 
-import pytest
+from datetime import UTC, datetime
+from types import SimpleNamespace
 
-from app.db.models.log import RuntimeLog
+import pytest
+from sqlalchemy import event, text
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+from app.db.models.log import EventSpan, EventTrace, RuntimeLog
 from app.services import event_trace
 
 
@@ -41,6 +46,9 @@ async def test_start_trace_failure_writes_runtime_log(monkeypatch) -> None:
 
         def add(self, row):
             added.append(row)
+
+        async def flush(self):
+            return None
 
         async def commit(self):
             return None
@@ -89,6 +97,9 @@ async def test_start_trace_omits_native_raw_from_payload_snapshot_by_default(mon
 
         def add(self, row):
             added.append(row)
+
+        async def flush(self):
+            return None
 
         async def commit(self):
             return None
@@ -141,6 +152,9 @@ async def test_start_trace_persists_native_raw_when_enabled(monkeypatch) -> None
         def add(self, row):
             added.append(row)
 
+        async def flush(self):
+            return None
+
         async def commit(self):
             return None
 
@@ -185,6 +199,9 @@ async def test_trace_writes_are_buffered_until_flush(monkeypatch) -> None:
 
         def add(self, row):
             added.append(row)
+
+        async def flush(self):
+            return None
 
         async def commit(self):
             commits["count"] += 1
@@ -240,6 +257,9 @@ async def test_supplied_trace_id_is_deduped_in_batch(monkeypatch) -> None:
         def add(self, row):
             added.append(row)
 
+        async def flush(self):
+            return None
+
         async def commit(self):
             commits["count"] += 1
 
@@ -251,6 +271,232 @@ async def test_supplied_trace_id_is_deduped_in_batch(monkeypatch) -> None:
 
     assert [getattr(row, "trace_id", None) for row in added] == ["evt_same"]
     assert commits["count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_same_batch_flushes_new_trace_before_child_span(monkeypatch) -> None:
+    """同批新父子记录必须先落父 Trace，不能靠失败后的逐条重试补救。"""
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    insert_order: list[str] = []
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def _enable_foreign_keys(dbapi_connection, _connection_record) -> None:
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
+
+    @event.listens_for(engine.sync_engine, "before_cursor_execute")
+    def _capture_event_insert(
+        _connection,
+        _cursor,
+        statement,
+        _parameters,
+        _context,
+        _executemany,
+    ) -> None:
+        normalized = statement.lstrip().upper()
+        if normalized.startswith("INSERT INTO EVENT_"):
+            insert_order.append(statement.split()[2])
+
+    async with engine.begin() as connection:
+        await connection.execute(text("CREATE TABLE account (id BIGINT PRIMARY KEY)"))
+        await connection.run_sync(EventTrace.__table__.create)
+        await connection.run_sync(EventSpan.__table__.create)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    monkeypatch.setattr(event_trace, "AsyncSessionLocal", session_factory)
+    now = datetime.now(UTC)
+    trace = EventTrace(
+        id=1,
+        trace_id="evt_same_batch",
+        event_type="message",
+        status=event_trace.TRACE_STATUS_RUNNING,
+        started_at=now,
+    )
+    span = EventSpan(
+        id=1,
+        span_id="spn_same_batch",
+        trace_id=trace.trace_id,
+        phase="normalize",
+        status=event_trace.TRACE_STATUS_OK,
+        started_at=now,
+    )
+
+    try:
+        await event_trace._flush_trace_batch(
+            [
+                event_trace._TraceWrite(kind="trace", payload=trace),
+                event_trace._TraceWrite(kind="span", payload=span),
+            ]
+        )
+    finally:
+        await engine.dispose()
+
+    assert insert_order == ["event_trace", "event_span"]
+
+
+@pytest.mark.asyncio
+async def test_cross_process_span_waits_until_parent_trace_is_visible(monkeypatch) -> None:
+    """跨进程子 Span 不能在父 Trace 的 200ms 批量提交窗口内抢先写库。"""
+
+    invalid_commits = {"count": 0}
+    persisted: list[object] = []
+
+    class _Scalars:
+        def __init__(self, values):
+            self._values = values
+
+        def all(self):
+            return list(self._values)
+
+    class _Result:
+        def __init__(self, values):
+            self._values = values
+
+        def scalars(self):
+            return _Scalars(self._values)
+
+    class _Session:
+        def __init__(self, *, parent_visible: bool, reject_commit: bool = False):
+            self.parent_visible = parent_visible
+            self.reject_commit = reject_commit
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def execute(self, *_args, **_kwargs):
+            return _Result(["evt_cross_process"] if self.parent_visible else [])
+
+        def add(self, row):
+            persisted.append(row)
+
+        async def commit(self):
+            if self.reject_commit:
+                invalid_commits["count"] += 1
+                raise RuntimeError("event_span_trace_id_fkey")
+
+    sessions = [
+        _Session(parent_visible=False, reject_commit=True),
+        _Session(parent_visible=True),
+        _Session(parent_visible=True),
+    ]
+    monkeypatch.setattr(event_trace, "AsyncSessionLocal", lambda: sessions.pop(0))
+    monkeypatch.setattr(event_trace, "TRACE_PARENT_VISIBILITY_POLL_SECONDS", 0.0)
+
+    span = SimpleNamespace(trace_id="evt_cross_process")
+    await event_trace._flush_trace_batch([event_trace._TraceWrite(kind="span", payload=span)])
+
+    assert invalid_commits["count"] == 0
+    assert persisted == [span]
+    assert sessions == []
+
+
+@pytest.mark.asyncio
+async def test_missing_parent_trace_is_reported_without_invalid_child_insert(monkeypatch) -> None:
+    """父 Trace 永久缺失时应放弃子写入并记录原因，不能制造外键异常。"""
+
+    added: list[object] = []
+    commits = {"count": 0}
+
+    class _Scalars:
+        def all(self):
+            return []
+
+    class _Result:
+        def scalars(self):
+            return _Scalars()
+
+    class _Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def execute(self, *_args, **_kwargs):
+            return _Result()
+
+        def add(self, row):
+            added.append(row)
+
+        async def commit(self):
+            commits["count"] += 1
+
+    monkeypatch.setattr(event_trace, "AsyncSessionLocal", lambda: _Session())
+    monkeypatch.setattr(event_trace, "TRACE_PARENT_VISIBILITY_TIMEOUT_SECONDS", 0.0)
+
+    span = SimpleNamespace(trace_id="evt_never_created")
+    await event_trace._flush_trace_batch([event_trace._TraceWrite(kind="span", payload=span)])
+
+    assert span not in added
+    assert len(added) == 1
+    assert isinstance(added[0], RuntimeLog)
+    assert added[0].message == "event trace parent missing after wait"
+    assert added[0].detail["trace_id"] == "evt_never_created"
+    assert commits["count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_parent_disappearing_before_child_write_is_filtered_in_transaction(monkeypatch) -> None:
+    """事务外检查后消失的父 Trace 也不能让子 Span 触发外键异常。"""
+
+    added: list[object] = []
+    child_commits = {"count": 0}
+
+    class _Scalars:
+        def __init__(self, values):
+            self._values = values
+
+        def all(self):
+            return list(self._values)
+
+    class _Result:
+        def __init__(self, values):
+            self._values = values
+
+        def scalars(self):
+            return _Scalars(self._values)
+
+    class _Session:
+        def __init__(self, values, *, child_write: bool = False):
+            self.values = values
+            self.child_write = child_write
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def execute(self, *_args, **_kwargs):
+            return _Result(self.values)
+
+        def add(self, row):
+            added.append(row)
+
+        async def commit(self):
+            if self.child_write:
+                child_commits["count"] += 1
+
+    sessions = [
+        _Session(["evt_disappeared"]),
+        _Session([], child_write=True),
+        _Session([]),
+    ]
+    monkeypatch.setattr(event_trace, "AsyncSessionLocal", lambda: sessions.pop(0))
+
+    span = SimpleNamespace(trace_id="evt_disappeared")
+    await event_trace._flush_trace_batch([event_trace._TraceWrite(kind="span", payload=span)])
+
+    assert span not in added
+    assert child_commits["count"] == 1
+    assert len(added) == 1
+    assert isinstance(added[0], RuntimeLog)
+    assert added[0].message == "event trace parent missing after wait"
+    assert added[0].detail["trace_id"] == "evt_disappeared"
+    assert sessions == []
 
 
 def test_clear_native_raw_snapshot_marks_expired() -> None:

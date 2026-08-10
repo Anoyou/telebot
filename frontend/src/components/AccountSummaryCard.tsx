@@ -33,7 +33,7 @@ interface AccountSummaryCardProps {
   className?: string;
 }
 
-// 国家代码 → 旗 emoji；与 ProxyManager / NetworkBadge 同实现
+// 国家代码 → 旗 emoji；与 ProxyManager 同实现
 function flagOf(country?: string | null): string {
   if (!country || country.length !== 2) return "🌐";
   const cp = (s: string) => 0x1f1e6 + (s.toUpperCase().charCodeAt(0) - 65);

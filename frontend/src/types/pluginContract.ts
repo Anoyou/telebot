@@ -45,6 +45,7 @@ const CAPABILITY_LABELS: Record<string, string> = {
 const PERMISSION_LABELS: Record<string, string> = {
   ai: "AI 调用",
   ai_text: "AI 文本",
+  click_bot_button: "点击 Bot 按钮",
   delete_message: "删除消息",
   edit_message: "编辑消息",
   external_http: "HTTP 请求",

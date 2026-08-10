@@ -33,7 +33,7 @@
 
 ```bash
 chmod 600 .env                 # 任何用户可读 .env = 全量泄露
-chmod 700 sessions/            # session string 落盘目录（如启用）
+chmod 700 sessions/            # 历史兼容目录；当前加密 StringSession 存入 DB，不依赖此目录
 chmod 700 data/avatars/        # 头像缓存（不算敏感，但顺手收紧）
 ```
 
@@ -53,7 +53,7 @@ bash deploy/backup-keys.sh           # 默认 gpg 对称加密，输出 keys-bac
 - **HTTPS**：前端必须走 https。任意可拿到 LAN/中间环节的人都能拿到 cookie 里的 JWT。
 - **CSP**：默认前端 Nginx 已下发 CSP；若使用自定义反代或 CDN，保持 `default-src 'self'` 起步并按需放行。
 - **CORS**：`CORS_ORIGINS` 只放真实前端域名，不要 `*`。
-- **TG 出口代理**：要么 VPS 在能直连 TG 的网络，要么走自有可信代理；不要用公开 SOCKS5。
+- **TG 出口代理**：要么 VPS 在能直连 TG 的网络，要么走自有可信代理；不要用公开 SOCKS5。管理代理库只允许新建或更新 SOCKS5/HTTP/HTTPS；SOCKS4 仅作为 `TG_DEFAULT_PROXY` 和旧账号绑定的 Telegram 运行兼容，插件 HTTP、LLM 与 Gateway 均不会使用。
 
 ---
 
@@ -88,7 +88,8 @@ python -m app.scripts.rekey --old "$OLD_MASTER_KEY" --new "$NEW_MASTER_KEY"
 ```
 
 覆盖字段：账号 API ID/API Hash/session、代理密码、LLM API Key 与兼容请求头、通知 Bot Token、
-账号 Bot Token、Web TOTP secret、插件仓库凭据、System Agent 待确认 Action 的敏感参数，
+账号 Bot Token、Web TOTP secret、插件仓库凭据、System Agent 待确认 Action 的敏感参数、
+持久排队正文与运行中 steer/补充输入/审批 payload，
 以及 `account_bot_transfer_notice:*` 内的交互/转账 Bot Token和
 `account_webhooks:*` 内的 Webhook Token。脚本还会递归重加密账号插件配置和全局插件配置中的
 `secret:v1:` 密文。历史 `account_webhooks:*` 明文 `token` 会在重钥时直接迁移为新密钥加密的
@@ -103,6 +104,10 @@ python -m app.scripts.rekey --old "$OLD_MASTER_KEY" --new "$NEW_MASTER_KEY"
 兼容请求头，部分非 Token 形态的 header value 可能进入助手会话或 AI 近期调用预览。
 从 `0.86.0-beta.9` 起，聊天中的自定义请求头配置会整段替换为安全提示，值只能在
 「AI → Provider 设置」中填写；上游错误回显也会按当前调用的全部 header value 脱敏。
+
+选择 Codex 客户端兼容模式（Gateway）的 Provider 仍只使用 TelePilot 保存的 Provider API Key。Gateway 不读取 Codex OAuth、账号身份、设备证明或 `~/.codex/auth.json`；凭据只经 `0600` Unix Socket 控制面进入子进程内存，不写配置文件。Gateway 不跟随上游重定向，不记录 Base URL、请求/响应正文或凭据；详细边界与排障见 [Codex 客户端兼容模式（Gateway）](./CODEX-GATEWAY.md)。
+
+rekey 完成后更新 `.env` 的 `MASTER_KEY` 并重建 Web；Gateway 子进程会清空旧内存快照并从数据库重新同步。无需也不应导出、编辑或备份 Gateway 内存配置。
 
 曾使用上述 beta 且在聊天里粘贴过请求头值时，升级前后必须在上游服务重新生成并轮换
 这些值，并删除对应 System Agent 会话。旧数据库与备份应继续按敏感材料保存；轮换后其中
@@ -330,6 +335,26 @@ docker compose exec -T web python -c "import urllib.request; print(urllib.reques
 
 Redis 或数据库异常时，Worker 和 Bot runtime 的关键副作用路径按 fail-closed 处理；仍应确认异常子进程已经退出。恢复总闸前先修复依赖，确认 `/readyz` 正常，再重新启用。
 
+### 3.7 备份还原演练
+
+还原会覆盖数据库和业务卷，只能在隔离机器或明确批准的灾备环境执行，不能把生产机的每周巡检写成 `backup && restore`。先复制同一时间戳的完整备份组和对应 `.env`/`MASTER_KEY`，启动隔离生产栈，再显式传入参数：
+
+```bash
+cd /opt/telepilot
+BACKUP_DIR=/var/backups/telepilot
+STAMP=<backup.sh 输出的时间戳>
+
+bash deploy/restore.sh \
+  "$BACKUP_DIR/db-$STAMP.sql" \
+  "$BACKUP_DIR/sessions-$STAMP.tgz" \
+  "$BACKUP_DIR/plugins-installed-$STAMP.tgz" \
+  "$BACKUP_DIR/plugin-repos-$STAMP.tgz"
+```
+
+脚本会校验同时间戳 checksum，并要求输入 `yes` 确认覆盖。完成后检查 `docker compose ps`、容器内 `/readyz`、账号登录状态、已安装插件和仓库列表；只有这些均可读取，才算本次演练成功。
+
+当前账号 StringSession 加密存于数据库，仅恢复账号时可执行 `bash deploy/restore.sh "$BACKUP_DIR/db-$STAMP.sql"`。上面的完整命令保留 `sessions` 归档用于旧部署兼容；跳过它但恢复插件卷时，第二个参数传 `-`。
+
 ---
 
 ## 4. 日常巡检建议
@@ -337,7 +362,7 @@ Redis 或数据库异常时，Worker 和 Bot runtime 的关键副作用路径按
 | 频率 | 检查项 | 命令 / 位置 |
 | --- | --- | --- |
 | 每天 | `audit_log` 是否有异常 action（login fail 集中、`account.delete`、`humanize.update` 异常） | 使用下方容器内查询，按实际异常 action 调整过滤条件 |
-| 每周 | 备份还原演练（在隔离机器） | `bash deploy/backup.sh && bash deploy/restore.sh` |
+| 每周 | 备份还原演练（在隔离机器） | 按 §3.7 选择同一时间戳的完整备份组并显式传入 restore 参数；禁止在生产机直接串联执行 |
 | 按需 | 插件 lint 规则升级后或完成批量插件迁移后，跑一次存量回填 | `python -m app.scripts.lint_existing_plugins --dry-run`（确认 diff）→ `python -m app.scripts.lint_existing_plugins` |
 | 每天 | 有 `payout` 玩法时，看是否出现放弃（abandoned）的补偿单：收款成功但发奖失败，需人工补发（见 §7.2） | 使用 §7.2 的容器内查询，检查 `status='abandoned'` 的记录 |
 | 每月 | 跑一次 `bash deploy/backup-keys.sh`，更新异地 .gpg | 把旧 .gpg 销毁前确认新 .gpg 能成功解密 |

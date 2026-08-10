@@ -49,6 +49,12 @@ from ..worker.ipc import CMD_RELOAD_COMMANDS, publish_cmd_with_ack
 
 log = logging.getLogger(__name__)
 
+_DEFAULT_LLM_BASE_URLS = {
+    "openai": "https://api.openai.com/v1",
+    "anthropic": "https://api.anthropic.com/v1",
+    "ollama": "http://localhost:11434/v1",
+}
+
 _BUILTIN_RESERVED_WORDS: set[str] = {
     "help", "h",
     "status", "s", "st",
@@ -316,6 +322,7 @@ def _provider_to_out(row: LLMProvider) -> LLMProviderOut:
         client_identity_profile=normalize_client_identity_profile(
             getattr(row, "client_identity_profile", None)
         ),
+        execution_backend=getattr(row, "execution_backend", "direct") or "direct",
         # 路由元数据（老数据可能为 None / [] / 缺字段；用属性 getattr 兼容）
         modality=getattr(row, "modality", None) or "text",
         tags=list(getattr(row, "tags", None) or []),
@@ -336,15 +343,15 @@ async def _validate_proxy_for_llm(db: AsyncSession, proxy_id: int) -> Proxy:
 
     拒绝条件：
     - 不存在 → 404
-    - type=mtproxy → 422（HTTP 客户端不支持 Telegram MTProto）
+    - 非 socks5/http/https 类型 → 422（当前运行链路不支持，且不能静默回落直连）
     """
     p = await db.get(Proxy, proxy_id)
     if p is None:
         raise _err("PROXY_NOT_FOUND", f"proxy_id={proxy_id} 不存在", 404)
-    if (p.type or "").lower() == "mtproxy":
+    if (p.type or "").lower() not in {"socks5", "http", "https"}:
         raise _err(
             "PROXY_KIND_NOT_SUPPORTED",
-            "mtproxy 仅支持 Telegram，不能用于 LLM 调用；请选 socks5/http/https 类型的代理",
+            f"代理类型 {p.type!r} 当前不受支持，不能用于 LLM 调用；请改用 socks5/http/https",
             422,
         )
     return p
@@ -386,12 +393,19 @@ async def create_provider(
         if payload.api_format
         else default_api_format_for(payload.provider)
     )
+    gateway_mode = payload.execution_backend == "codex_gateway"
+    if gateway_mode:
+        if effective_api_format != "responses":
+            raise _err("LLM_GATEWAY_FORMAT_INVALID", "Codex 客户端兼容模式（Gateway）仅支持 Responses", 422)
+        if not payload.api_key:
+            raise _err("LLM_GATEWAY_CONFIG_INVALID", "Codex 客户端兼容模式（Gateway）必须配置 API Key", 422)
     identity_profile = normalize_client_identity_profile(
         payload.client_identity_profile
     )
-    identity_error = validate_identity_for_save(identity_profile, effective_api_format)
-    if identity_error:
-        raise _err("LLM_PROVIDER_IDENTITY_INVALID", identity_error, 422)
+    if not gateway_mode:
+        identity_error = validate_identity_for_save(identity_profile, effective_api_format)
+        if identity_error:
+            raise _err("LLM_PROVIDER_IDENTITY_INVALID", identity_error, 422)
 
     try:
         request_headers_enc = encrypt_request_headers(payload.request_headers)
@@ -404,15 +418,18 @@ async def create_provider(
         # 空字符串视同未设置（避免存空 token 让 fernet 误判）
         api_key_enc=encrypt_str(payload.api_key) if payload.api_key else None,
         request_headers_enc=request_headers_enc,
-        base_url=payload.base_url,
+        base_url=(payload.base_url or _DEFAULT_LLM_BASE_URLS[payload.provider]) if gateway_mode else payload.base_url,
         default_model=payload.default_model,
         api_format=payload.api_format,
         protocol_profile=normalize_protocol_profile(
             payload.api_format,
-            payload.protocol_profile,
+            "codex_responses"
+            if payload.execution_backend == "codex_gateway"
+            else payload.protocol_profile,
         ),
-        web_search_api_format=payload.web_search_api_format,
+        web_search_api_format="responses" if gateway_mode else payload.web_search_api_format,
         client_identity_profile=identity_profile,
+        execution_backend=payload.execution_backend,
         # 路由元数据
         modality=payload.modality,
         tags=list(payload.tags or []),
@@ -424,6 +441,14 @@ async def create_provider(
     )
     db.add(row)
     await db.flush()
+    if gateway_mode:
+        from .gateway_runtime import gateway_runtime_manager
+        from .llm_dto import LLMProviderDTO
+
+        gateway_runtime_manager.validate_provider_configuration(LLMProviderDTO.from_orm_row(row))
+        status = await gateway_runtime_manager.preflight()
+        if status.state == "degraded":
+            raise _err("LLM_GATEWAY_UNAVAILABLE", status.error or "内置 Gateway 不可用", 422)
     return _provider_to_out(row)
 
 
@@ -449,20 +474,39 @@ async def update_provider(
             raise _err("LLM_PROVIDER_NAME_CONFLICT", f"已存在同名 provider：{data['name']}", 409)
         row.name = data["name"]
 
+    effective_provider = str(data.get("provider") or row.provider)
     if "provider" in data:
-        row.provider = data["provider"]
-    if "base_url" in data:
-        row.base_url = data["base_url"]
+        row.provider = effective_provider
     if "default_model" in data and data["default_model"]:
         row.default_model = data["default_model"]
     effective_api_format = str(data.get("api_format") or row.api_format or "chat_completions")
+    effective_execution_backend = str(
+        data.get("execution_backend") or getattr(row, "execution_backend", "direct") or "direct"
+    )
+    gateway_mode = effective_execution_backend == "codex_gateway"
+    if gateway_mode:
+        if effective_api_format != "responses":
+            raise _err("LLM_GATEWAY_FORMAT_INVALID", "Codex 客户端兼容模式（Gateway）仅支持 Responses", 422)
+        requested_key = data.get("api_key") if "api_key" in data else None
+        has_effective_key = bool(row.api_key_enc) if requested_key is None else bool(requested_key)
+        if not has_effective_key:
+            raise _err("LLM_GATEWAY_CONFIG_INVALID", "Codex 客户端兼容模式（Gateway）必须配置 API Key", 422)
+    if "base_url" in data:
+        row.base_url = data["base_url"]
+    if gateway_mode and not row.base_url:
+        row.base_url = _DEFAULT_LLM_BASE_URLS[effective_provider]
     if "api_format" in data and data["api_format"]:
         row.api_format = data["api_format"]
+    row.execution_backend = effective_execution_backend
+    if gateway_mode:
+        data["protocol_profile"] = "codex_responses"
     row.protocol_profile = normalize_protocol_profile(
         effective_api_format,
         data.get("protocol_profile", getattr(row, "protocol_profile", None)),
     )
-    if "web_search_api_format" in data and data["web_search_api_format"]:
+    if gateway_mode:
+        row.web_search_api_format = "responses"
+    elif "web_search_api_format" in data and data["web_search_api_format"]:
         row.web_search_api_format = data["web_search_api_format"]
     # 阶段 F 收口 #2：identity 或 api_format 变更时，校验最终生效组合。
     effective_identity = normalize_client_identity_profile(
@@ -470,9 +514,10 @@ async def update_provider(
         if ("client_identity_profile" in data and data["client_identity_profile"])
         else getattr(row, "client_identity_profile", None)
     )
-    identity_error = validate_identity_for_save(effective_identity, effective_api_format)
-    if identity_error:
-        raise _err("LLM_PROVIDER_IDENTITY_INVALID", identity_error, 422)
+    if not gateway_mode:
+        identity_error = validate_identity_for_save(effective_identity, effective_api_format)
+        if identity_error:
+            raise _err("LLM_PROVIDER_IDENTITY_INVALID", identity_error, 422)
     row.client_identity_profile = effective_identity
 
     # 路由元数据：明确出现在 patch 内才覆盖
@@ -526,6 +571,14 @@ async def update_provider(
             raise _err("LLM_PROVIDER_REQUEST_HEADERS_INVALID", str(exc), 422) from None
 
     await db.flush()
+    if gateway_mode:
+        from .gateway_runtime import gateway_runtime_manager
+        from .llm_dto import LLMProviderDTO
+
+        gateway_runtime_manager.validate_provider_configuration(LLMProviderDTO.from_orm_row(row))
+        status = await gateway_runtime_manager.preflight()
+        if status.state == "degraded":
+            raise _err("LLM_GATEWAY_UNAVAILABLE", status.error or "内置 Gateway 不可用", 422)
     return _provider_to_out(row)
 
 

@@ -12,8 +12,9 @@ from contextlib import suppress
 from dataclasses import replace
 from typing import Any
 
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from ...db.base import AsyncSessionLocal
 from ...db.models.system_agent import (
     MESSAGE_ROLE_ASSISTANT,
     MESSAGE_ROLE_TOOL,
@@ -21,12 +22,14 @@ from ...db.models.system_agent import (
     SystemAgentMessage,
     SystemAgentSession,
 )
+from .. import llm_diagnostics
 from ..llm_agent import AgentCallbacks, AgentLimits, AgentTool, run_agent
+from ..llm_call_context import runtime_metadata as build_runtime_metadata
 from ..llm_dto import LLMProviderDTO
 from ..llm_invoke import invoke_structured, stream_structured
 from ..llm_protocol import MessageRole, ModelMessage, ModelRequest, ModelUsage, ToolCall, ToolResult
 from ..llm_protocol import ToolSpec as LlmToolSpec
-from ..llm_runtime import ProviderSwitchRequired
+from ..llm_runtime import ProviderSwitchRequired, diagnostic_error_kwargs
 from .config import (
     load_system_context_flags,
     resolve_agent_providers,
@@ -41,6 +44,7 @@ from .model_capability import verify_resolved_agent_providers
 from .prompts import build_system_prompt, provider_setup_hint
 from .redactor import StreamingMessageRedactor, summarize_tool_result
 from .registry import PreparedAction, ToolRegistry, get_registry
+from .secrets import extract_plaintext_secrets, redact_known_secrets
 from .skills import SkillRegistry, get_skill_registry
 from .tool_routing import (
     ToolRoute,
@@ -74,9 +78,11 @@ class SystemAgentRuntime:
         self,
         registry: ToolRegistry | None = None,
         skill_registry: SkillRegistry | None = None,
+        tool_session_factory: async_sessionmaker[AsyncSession] = AsyncSessionLocal,
     ) -> None:
         self.registry = registry or get_registry()
         self.skill_registry = skill_registry or get_skill_registry()
+        self._tool_session_factory = tool_session_factory
 
     async def stream_turn(
         self,
@@ -96,6 +102,7 @@ class SystemAgentRuntime:
         model_selection: dict[str, Any] | None = None,
         read_only_only: bool = False,
         exclude_latest_session_memory: bool = False,
+        run_input_provider: Callable[[], Awaitable[list[str]]] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """执行一轮对话，逐条 yield NDJSON 事件。
 
@@ -182,6 +189,16 @@ class SystemAgentRuntime:
             )
             yield next_event("done", ok=False)
             return
+        resolved = _apply_client_selection(resolved, selection)
+        if isinstance(resolved, str):
+            yield next_event(
+                "error",
+                code="CLIENT_SELECTION_INVALID",
+                message=resolved,
+                hint="请选择与当前 Provider 兼容的调用客户端，或改回跟随 Provider。",
+            )
+            yield next_event("done", ok=False)
+            return
 
         yield next_event(
             "model_capability_check",
@@ -191,9 +208,26 @@ class SystemAgentRuntime:
         )
 
         progress_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
-        streaming_redactor = StreamingMessageRedactor(secrets=list(chat_secrets or []))
-        reasoning_redactor = StreamingMessageRedactor(secrets=list(chat_secrets or []))
+        turn_secrets = list(dict.fromkeys(chat_secrets or []))
+        streaming_redactor = StreamingMessageRedactor(secrets=turn_secrets)
+        reasoning_redactor = StreamingMessageRedactor(secrets=turn_secrets)
         attempted_models: dict[int, str] = {}
+
+        def redact_turn_text(value: str) -> str:
+            redacted = redact_known_secrets(value, turn_secrets)
+            return redacted.replace("***]", "[REDACTED]").replace(
+                "***",
+                "[REDACTED]",
+            )
+
+        def redact_turn_value(value: Any) -> Any:
+            if isinstance(value, dict):
+                return {str(key): redact_turn_value(item) for key, item in value.items()}
+            if isinstance(value, list):
+                return [redact_turn_value(item) for item in value]
+            if isinstance(value, str):
+                return redact_turn_text(value)
+            return value
 
         async def emit_model_progress(progress: dict[str, Any]) -> None:
             payload = dict(progress)
@@ -206,7 +240,13 @@ class SystemAgentRuntime:
                 attempted_model = str(payload.get("model") or "").strip()
                 if attempted_provider_id > 0 and attempted_model:
                     attempted_models[attempted_provider_id] = attempted_model
-            await progress_queue.put(next_event(event_type, **payload))
+            safe_payload = redact_turn_value(payload)
+            await progress_queue.put(
+                next_event(
+                    event_type,
+                    **(safe_payload if isinstance(safe_payload, dict) else {}),
+                )
+            )
 
         async def wait_for_progress(task: asyncio.Task[Any]) -> tuple[str, Any]:
             progress_task = asyncio.create_task(progress_queue.get())
@@ -305,7 +345,12 @@ class SystemAgentRuntime:
                     account_id=session.account_id,
                     fallback_provider_id=fallback_provider_id,
                     progress_callback=emit_model_progress,
-                    known_secrets=list(chat_secrets or []),
+                    known_secrets=turn_secrets,
+                    client_runtime_metadata=build_runtime_metadata(
+                        session_id=session.id,
+                        run_id=run_id,
+                        turn_id=run_id,
+                    ),
                 )
             finally:
                 stage_timings["route_ms"] = max(
@@ -473,7 +518,7 @@ class SystemAgentRuntime:
             account_id=session.account_id,
             web_user_id=web_user_id,
             bot_tg_user_id=bot_tg_user_id,
-            chat_secrets=list(chat_secrets or []),
+            chat_secrets=turn_secrets,
         )
 
         deferred_events: list[dict[str, Any]] = []
@@ -523,7 +568,12 @@ class SystemAgentRuntime:
                 "retry_delay_seconds": 3.0,
                 "repair_text_tool_protocol": True,
                 # 仅供本地 usage preview 脱敏；Provider adapter 不发送 metadata。
-                "known_secrets": list(chat_secrets or []),
+                "known_secrets": turn_secrets,
+                **build_runtime_metadata(
+                    session_id=session.id,
+                    run_id=run_id,
+                    turn_id=run_id,
+                ),
             },
         )
         limits = AgentLimits(
@@ -556,18 +606,20 @@ class SystemAgentRuntime:
 
         async def on_tool_start(call: ToolCall) -> None:
             spec = tool_specs_by_name.get(call.name)
+            arguments_summary = summarize_tool_result(call.arguments, max_chars=800)
             await progress_queue.put(
                 next_event(
                     "tool_started",
                     tool_name=call.name,
                     tool_description=spec.description if spec else call.name,
                     call_id=call.id,
-                    arguments_summary=summarize_tool_result(call.arguments, max_chars=800),
+                    arguments_summary=redact_turn_value(arguments_summary),
                 )
             )
 
         async def on_tool_finish(call: ToolCall, result: ToolResult) -> None:
             spec = tool_specs_by_name.get(call.name)
+            result_summary = summarize_tool_result(result.content, max_chars=1200)
             await progress_queue.put(
                 next_event(
                     "tool_finished",
@@ -575,7 +627,7 @@ class SystemAgentRuntime:
                     tool_description=spec.description if spec else call.name,
                     call_id=call.id,
                     is_error=bool(result.is_error),
-                    result_summary=summarize_tool_result(result.content, max_chars=1200),
+                    result_summary=redact_turn_value(result_summary),
                 )
             )
 
@@ -610,7 +662,33 @@ class SystemAgentRuntime:
             streaming_redactor.reset()
             await progress_queue.put(next_event("assistant_delta_reset"))
 
+        async def on_safe_boundary() -> tuple[ModelMessage, ...]:
+            if run_input_provider is None:
+                return ()
+            values = [str(item).strip() for item in await run_input_provider()]
+            values = [item for item in values if item]
+            if not values:
+                return ()
+            for secret in extract_plaintext_secrets("\n".join(values)):
+                if secret not in turn_secrets:
+                    turn_secrets.append(secret)
+            for value in values:
+                await progress_queue.put(
+                    next_event(
+                        "steer_applied",
+                        summary=redact_turn_text(value)[:500],
+                    )
+                )
+            return tuple(
+                ModelMessage.text(
+                    MessageRole.USER,
+                    "用户在运行中补充了新指令，请从当前安全边界起优先遵循：\n" + value,
+                )
+                for value in values
+            )
+
         callbacks = AgentCallbacks(
+            on_safe_boundary=on_safe_boundary,
             on_tool_batch=on_tool_batch,
             on_tool_start=on_tool_start,
             on_tool_finish=on_tool_finish,
@@ -618,6 +696,11 @@ class SystemAgentRuntime:
             on_reasoning_delta=on_reasoning_delta,
             on_text_reset=on_text_reset,
         )
+
+        # 模型请求可能持续数分钟，不能让初始化阶段的只读事务在网络等待期间
+        # 长期占用连接；工具处理器需要数据库时会由同一 session 按需重新获取。
+        if db is not None:
+            await db.commit()
 
         active_provider = provider_dto
         active_model = model
@@ -764,10 +847,30 @@ class SystemAgentRuntime:
                 exc.provider_name,
             )
             timings = finalize_stage_timings(ok=False)
+            error_facts = diagnostic_error_kwargs(exc.last_error)
+            execution_backend = error_facts.get("execution_backend") or active_provider.execution_backend
+            gateway_facts = error_facts if execution_backend == "codex_gateway" else {}
+            error_category = error_facts.get("category")
             yield next_event(
                 "error",
                 code="AGENT_PROVIDER_SWITCH_REQUIRED",
-                message=str(exc)[:500],
+                message=llm_diagnostics.format_diagnostic_error(
+                    exc.last_error or exc,
+                    fallback=str(exc),
+                ),
+                status_code=error_facts.get("status_code"),
+                error_category=error_category,
+                suggestion=llm_diagnostics.suggestion_for(str(error_category or "")) or None,
+                upstream_status_code=error_facts.get("upstream_status_code"),
+                upstream_error_code=error_facts.get("upstream_error_code"),
+                upstream_error_message=error_facts.get("upstream_error_message"),
+                upstream_error_detail=error_facts.get("upstream_error_detail"),
+                upstream_request_id=error_facts.get("upstream_request_id"),
+                client_request_id=error_facts.get("client_request_id"),
+                execution_backend=execution_backend,
+                gateway_version=gateway_facts.get("gateway_version"),
+                gateway_request_id=gateway_facts.get("request_id"),
+                gateway_stage=gateway_facts.get("gateway_stage"),
                 provider_switch={
                     "from_provider_name": exc.provider_name,
                     "candidates": exc.candidates,
@@ -783,10 +886,29 @@ class SystemAgentRuntime:
         except Exception as exc:  # noqa: BLE001
             log.exception("system agent run failed session=%s", session.id)
             timings = finalize_stage_timings(ok=False)
+            error_facts = diagnostic_error_kwargs(exc)
+            execution_backend = error_facts.get("execution_backend") or active_provider.execution_backend
+            gateway_facts = error_facts if execution_backend == "codex_gateway" else {}
+            error_category = error_facts.get("category")
             yield next_event(
                 "error",
                 code="AGENT_RUN_FAILED",
-                message=str(exc)[:500],
+                message=redact_turn_text(
+                    llm_diagnostics.format_diagnostic_error(exc)
+                )[:500],
+                status_code=error_facts.get("status_code"),
+                error_category=error_category,
+                suggestion=llm_diagnostics.suggestion_for(str(error_category or "")) or None,
+                upstream_status_code=error_facts.get("upstream_status_code"),
+                upstream_error_code=error_facts.get("upstream_error_code"),
+                upstream_error_message=error_facts.get("upstream_error_message"),
+                upstream_error_detail=error_facts.get("upstream_error_detail"),
+                upstream_request_id=error_facts.get("upstream_request_id"),
+                client_request_id=error_facts.get("client_request_id"),
+                execution_backend=execution_backend,
+                gateway_version=gateway_facts.get("gateway_version"),
+                gateway_request_id=gateway_facts.get("request_id"),
+                gateway_stage=gateway_facts.get("gateway_stage"),
             )
             yield next_event("done", ok=False, stage_timings=timings)
             return
@@ -809,7 +931,8 @@ class SystemAgentRuntime:
         for ev in deferred_events:
             yield ev
 
-        assistant_text = result.text or ""
+        assistant_text = redact_turn_text(result.text or "")
+        assistant_reasoning = redact_turn_text(result.reasoning_content or "")
         timings = finalize_stage_timings(ok=True)
         usage_payload = _usage_payload(
             result.usage,
@@ -825,12 +948,16 @@ class SystemAgentRuntime:
             route_domains=list(route.domains),
             stage_timings=timings,
             elapsed_ms=timings.get("total_ms"),
+            execution_backend=result.execution_backend,
+            gateway_version=result.gateway_version,
+            gateway_request_id=result.gateway_request_id,
+            gateway_stage=result.gateway_stage,
         )
 
         yield next_event(
             "assistant_message",
             content=assistant_text,
-            reasoning=result.reasoning_content or "",
+            reasoning=assistant_reasoning,
             usage=usage_payload,
         )
         yield next_event(
@@ -849,26 +976,32 @@ class SystemAgentRuntime:
         async def _handler(arguments: dict[str, Any]) -> Any:
             if spec.read_handler is None:
                 return {"error": "handler_missing", "message": f"工具 {spec.name} 未实现"}
-            try:
-                result = await spec.read_handler(tool_ctx, arguments or {})
-                # 所有只读工具统一经过脱敏与体积门禁后才进入模型上下文。
-                return summarize_tool_result(result, max_chars=8000)
-            except PermissionError as exc:
-                return {
-                    "error": "permission_denied",
-                    "message": self._safe_tool_error(exc, tool_ctx.chat_secrets),
-                }
-            except Exception as exc:  # noqa: BLE001
-                log.warning(
-                    "tool %s failed error_type=%s",
-                    spec.name,
-                    type(exc).__name__,
-                )
-                return {
-                    "error": type(exc).__name__,
-                    "message": self._safe_tool_error(exc, tool_ctx.chat_secrets),
-                    "business_changed": False,
-                }
+            async with self._tool_session_factory() as tool_db:
+                isolated_ctx = replace(tool_ctx, db=tool_db)
+                try:
+                    result = await spec.read_handler(isolated_ctx, arguments or {})
+                    # 所有只读工具统一经过脱敏与体积门禁后才进入模型上下文。
+                    safe_result = summarize_tool_result(result, max_chars=8000)
+                    await tool_db.commit()
+                    return safe_result
+                except PermissionError as exc:
+                    await tool_db.rollback()
+                    return {
+                        "error": "permission_denied",
+                        "message": self._safe_tool_error(exc, tool_ctx.chat_secrets),
+                    }
+                except Exception as exc:  # noqa: BLE001
+                    await tool_db.rollback()
+                    log.warning(
+                        "tool %s failed error_type=%s",
+                        spec.name,
+                        type(exc).__name__,
+                    )
+                    return {
+                        "error": type(exc).__name__,
+                        "message": self._safe_tool_error(exc, tool_ctx.chat_secrets),
+                        "business_changed": False,
+                    }
 
         return _handler
 
@@ -885,6 +1018,7 @@ class SystemAgentRuntime:
         fallback_provider_id: int | None = None,
         progress_callback: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
         known_secrets: list[str] | None = None,
+        client_runtime_metadata: dict[str, Any] | None = None,
     ) -> ToolRoute:
         domains = available_domains(all_tool_specs)
         local = route_locally(user_text, available=domains, memory_state=memory_state)
@@ -925,6 +1059,7 @@ class SystemAgentRuntime:
                             "max_retries_per_model": 1,
                             "retry_delay_seconds": 0.0,
                             "known_secrets": list(known_secrets or []),
+                            **dict(client_runtime_metadata or {}),
                         },
                     ),
                     account_id=account_id,
@@ -1036,12 +1171,14 @@ class SystemAgentRuntime:
                 )
                 return payload
             except PermissionError as exc:
+                await tool_ctx.db.rollback()
                 return {
                     "error": "permission_denied",
                     "message": self._safe_tool_error(exc, tool_ctx.chat_secrets),
                     "business_changed": False,
                 }
             except Exception as exc:  # noqa: BLE001
+                await tool_ctx.db.rollback()
                 log.warning(
                     "write tool preview %s failed error_type=%s",
                     spec.name,
@@ -1137,6 +1274,10 @@ def _usage_payload(
     route_domains: list[str] | None = None,
     stage_timings: dict[str, Any] | None = None,
     elapsed_ms: int | None = None,
+    execution_backend: str | None = None,
+    gateway_version: str | None = None,
+    gateway_request_id: str | None = None,
+    gateway_stage: str | None = None,
 ) -> dict[str, Any]:
     """usage schema_version=2：实际调用数与暴露工具数分拆；含 stage_timings。"""
 
@@ -1148,6 +1289,10 @@ def _usage_payload(
         "provider_name": provider.name,
         "model": model,
         "api_format": str(getattr(provider, "api_format", None) or "chat_completions"),
+        "execution_backend": execution_backend or getattr(provider, "execution_backend", "direct"),
+        "gateway_version": gateway_version,
+        "gateway_request_id": gateway_request_id,
+        "gateway_stage": gateway_stage,
         "requested_provider_id": req_p.id,
         "requested_provider_name": req_p.name,
         "requested_model": req_m,
@@ -1190,16 +1335,76 @@ def _normalize_model_selection(raw: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(raw, dict):
         return {"mode": "auto"}
     mode = str(raw.get("mode") or "auto").strip().lower()
+    execution_backend = str(raw.get("execution_backend") or "provider").strip().lower()
+    if execution_backend not in {"provider", "direct", "codex_gateway"}:
+        execution_backend = "provider"
+    identity = str(raw.get("client_identity_profile") or "").strip().lower() or None
+    if identity not in {
+        None,
+        "auto",
+        "minimal",
+        "openai_sdk",
+        "codex_tui",
+        "codex_desktop",
+        "claude_code",
+        "claude_desktop",
+        "grok_cli",
+    }:
+        identity = None
+    common: dict[str, Any] = {}
+    if execution_backend != "provider":
+        common["execution_backend"] = execution_backend
+    if identity is not None:
+        common["client_identity_profile"] = identity
     if mode != "pinned":
-        return {"mode": "auto"}
+        return {"mode": "auto", **common}
     try:
         provider_id = int(raw.get("provider_id"))
     except (TypeError, ValueError):
-        return {"mode": "auto"}
+        return {"mode": "auto", **common}
     model = str(raw.get("model") or "").strip()
     if not model:
-        return {"mode": "auto"}
-    return {"mode": "pinned", "provider_id": provider_id, "model": model}
+        return {"mode": "auto", **common}
+    return {"mode": "pinned", "provider_id": provider_id, "model": model, **common}
+
+
+def _apply_client_selection(resolved: Any, selection: dict[str, Any]) -> Any | str:
+    """把会话级调用客户端覆盖应用到本轮 Provider 链，不修改持久化配置。"""
+
+    from dataclasses import replace
+
+    from .config import ResolvedAgentProviders, tools_model_for_dto
+
+    execution_backend = str(selection.get("execution_backend") or "provider")
+    identity = selection.get("client_identity_profile")
+    if execution_backend == "provider":
+        return resolved
+
+    providers = {}
+    for provider_id, dto in dict(getattr(resolved, "providers", {}) or {}).items():
+        if execution_backend == "codex_gateway":
+            if dto.execution_backend != "codex_gateway":
+                continue
+            providers[provider_id] = dto
+        else:
+            providers[provider_id] = replace(
+                dto,
+                execution_backend="direct",
+                client_identity_profile=str(identity or "auto"),
+            )
+
+    primary = providers.get(resolved.primary.id)
+    model = resolved.model
+    if primary is None:
+        if selection.get("mode") == "pinned":
+            return "该 Provider 未配置为 Codex 客户端兼容模式（Gateway），不能在 Agent 中临时切换"
+        if not providers:
+            return "当前 Agent 路由中没有已配置 Codex 客户端兼容模式（Gateway）的 Provider"
+        primary = next(iter(providers.values()))
+        model = tools_model_for_dto(primary) or primary.default_model
+        if not model:
+            return f"Provider「{primary.name}」没有可供 Agent 使用的 Tools 模型"
+    return ResolvedAgentProviders(primary=primary, model=model, providers=providers)
 
 
 async def _apply_pinned_selection(

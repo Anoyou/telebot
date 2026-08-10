@@ -17,13 +17,572 @@
 
 > 不要为每个微小提交单独迭代版本号。开发过程中先把变更积累在 `Unreleased`；只有准备 beta 检查点、稳定发布、推送稳定检查点、创建 release/PR，或用户明确要求“推一版/发一版”时，才按本批改动的最高影响级别统一 bump 一次版本号。
 >
-> beta 检查点和稳定发布时，版本号在 4 处必须保持同步：`backend/app/__init__.py`、`backend/pyproject.toml`、`frontend/package.json`、`frontend/src/lib/version.ts`。同时把 `Unreleased` 内容移动到对应版本段落，并使用中文更新说明。`backend/app/main.py` 通过 `from . import __version__` 自动跟随，无需单独改。
+> beta 检查点和稳定发布时，四个源版本文件必须保持同步：`backend/app/__init__.py`、`backend/pyproject.toml`、`frontend/package.json`、`frontend/src/lib/version.ts`；随后运行 `make codegen`，确保 `openapi/telepilot.openapi.json` 的 `info.version` 作为第五处版本信息同步更新。同时把 `Unreleased` 内容移动到对应版本段落，并使用中文更新说明。`backend/app/main.py` 通过 `from . import __version__` 自动跟随，无需单独改。
 >
 > 2026-07-26 起，原 `0.73.0-beta.2` 至 `0.73.0-beta.15` 按阶段性能力回溯重整为 `0.74.0-beta.1` 至 `0.80.0-beta.3`；已存在的 Git 提交标题保留原始版本标记，不重写仓库历史。
 
 ---
 
 ## [Unreleased]
+
+## [0.93.0] - 2026-08-10 · minor（次版本） · Gateway、插件交互与运行安全升级
+
+### 新增
+
+- 新增内置 Codex Gateway，以独立 Go 运行时和 Unix Socket 承载 Responses 请求，支持 Provider 精确路由、模型列表、流式与非流式响应、工具调用、取消、健康状态和客户端版本维护。
+- 插件新增受控的第三方 Bot Inline Keyboard 按钮识别与点击能力，并统一 UserBot、Interaction Bot、Event Bus、MessageOps、会话状态和标准事件信封契约。
+- System Agent 与模型测活支持按会话或单次请求选择直连/Gateway 执行后端，并保留真实上游错误、请求标识、用量和运行轨迹。
+
+### 改进
+
+- 统一 Gateway、普通 LLM、插件 AI 与 System Agent 的 Provider、代理、错误和 fallback 语义；Provider 切换执行后端时保留兼容配置，并让桌面端与 PWA 的状态、测活和长文本展示保持一致。
+- 完善生产增量更新、三张 GHCR 多架构镜像、构建来源证明、失败回滚和前后端版本同步，发布检查点会切换到当前提交对应的 Web、Frontend 与 Updater 镜像。
+- 清理断路的旧前端入口、无调用组件和后端私有僵尸代码，收紧插件示例、开发文档、Session 存储与规则配置页的当前维护口径。
+
+### 修复与安全
+
+- 修复 Telethon 1.44 事件方向、Community peer 转换、插件按钮投递、账号孤儿配置、Trace 父子写入竞态、Durable Run 调度竞态和预构建镜像发布链路中的回归。
+- 对 Gateway 身份、请求头、错误详情、日志与插件事件执行统一脱敏和隔离；插件点击在执行前复核权限、实例、消息与按钮，并以幂等锁覆盖并发和结果未知场景。
+- 停止声明未完整实现的 MTProxy 支持；账号、Telegram worker、注销、Gateway、插件 LLM 与插件 HTTP 对缺失、停用或无效代理统一 fail-closed，并提供旧绑定迁移提示和确定性暂停状态。
+- 升级存在已知漏洞的前端生产依赖，修复默认统计窗口不一致，并加固仅数据库灾备恢复、历史 sessions 卷替换和旧代理跨协议凭据清理。
+
+### 测试与发布
+
+- 补充 Gateway、插件按钮与权限、Provider/代理 fail-closed、System Agent、Trace、迁移、灾备、前端交互、无障碍和视觉回归覆盖。
+- `0.93.0-beta.9` 已通过完整 CI Gate；Web、Frontend 与 Updater 三张 `beta` 镜像均发布 `linux/amd64`、`linux/arm64` 清单。
+
+## [0.93.0-beta.9] - 2026-08-10 · patch（补丁预发布） · 代理兼容与发布安全收口
+
+### 修复
+
+- 升级 Axios、React Router 与 ECharts 到已修复安全版本，清除生产依赖审计中的请求处理、跳转与图表 XSS 漏洞。
+- 统一运营统计与资金台账的默认 30 天查询窗口，避免未指定时间范围时混用全部历史动作和近期资金数据。
+- 停止声明未完整实现的 MTProxy 支持；新建、编辑、账号绑定和 System Agent 均只接受 SOCKS5/HTTP/HTTPS。登录、Telegram worker/注销、direct/Gateway/插件 LLM 与插件 HTTP 对缺失、已停用或非空无效代理统一 fail-closed，不再静默降级为直连；纯本地插件配置动作不受无关代理状态阻断。
+- 完善旧代理迁移：账号向导和 LLM Provider 会保留当前旧绑定的禁用提示并阻止保存/测活，代理库跨协议迁移由前后端共同保证默认清空旧凭据；worker 遇到确定性代理配置错误时暂停账号并提示迁移，不再重试到 `dead`。
+- 明确 SOCKS4 仅保留为 Telegram 全局默认代理与旧账号绑定的运行时兼容；代理库不允许新建、更新或重新绑定，插件 HTTP、LLM 与 Gateway 不支持该类型。
+- 允许灾备脚本仅凭数据库备份和原 `MASTER_KEY` 恢复当前账号 Session；历史 sessions 卷改为可选兼容归档，卷内容先校验并暂存后再替换，交换中途失败会按阶段保留或恢复全部旧数据，并同步部署说明。
+- 修正插件仓库安装状态、旧插件管理入口和插件依赖校验的注释与错误文案，使生成 API 契约跟随当前 `installed_plugin` 与 loader 行为。
+- 限制移动端侧栏更新日志菜单的可视高度，长 `Unreleased` 内容保持在视口内滚动。
+
+### 清理
+
+- 删除已断路的 Forward 专属配置页、旧账号/别名/模板入口、旧桌宠预览、无调用的前端组件与兼容 helper，并开启 TypeScript 未使用符号检查。
+- 删除无消费者的插件安装钩子运行时字段、旧交互 schema、后端私有僵尸 helper、废弃自动命令派发与不可达 AI 流式分支；旧插件传入 `on_install` 时仅保留无状态构造兼容，不执行也不序列化。
+- 删除旧品牌占位图标生成脚本、历史 translate 插件示例，以及未使用的 React Hook Form、resolver 与 Zod 前端依赖。
+
+### 文档与测试
+
+- 为最小插件示例补齐 installed loader 必需的 `plugin.json`，同步规则配置页、System Agent Bot 命令、Session 存储和插件示例维护口径。
+- 明确插件 HTTP DNS 预解析无法独立防御 DNS rebinding，并补充可信域名与网络层隔离建议。
+- 增加运营统计默认窗口、全链路代理 fail-closed、旧代理迁移、数据库单独恢复、Manifest 契约和旧插件 API 文案回归测试。
+
+## [0.93.0-beta.8] - 2026-08-07 · patch（补丁预发布） · 恢复预构建镜像发布
+
+### 修复
+
+- 将 Telethon 的不可变提交依赖切换到可稳定访问的 GitHub 同步源，避免 Codeberg 读取超时导致后端与 API 契约 CI 失败、预构建镜像发布被跳过。
+- 保持 Telethon 1.44、Layer 228、Community 与 CommunityForbidden 协议能力不变；切换前已对全新安装包与当前依赖进行逐文件校验。
+
+## [0.93.0-beta.7] - 2026-08-05 · patch（补丁预发布） · 修复 Telethon 事件方向兼容性
+
+### 修复
+
+- 修复插件 `owner_only` 门禁依赖 Telethon 旧版 `event.outgoing` 的兼容性问题；现在优先使用 loader 已确认的消息方向，并兼容 Telethon 1.44 的 `message.out` 字段。
+- 增强事件 `sender_id` 提取的原生字段回退，避免事件代理对象缺少 sender 实体时误判权限。
+
+### 文档与测试
+
+- 更新插件基类、API 参考和安全清单中的事件方向示例，明确 Telethon 1.44 的正确字段。
+- 增加 outgoing/incoming 及旧属性残留场景的 owner_only 门禁回归测试。
+
+## [0.93.0-beta.6] - 2026-08-05 · patch（补丁预发布） · 清理交互 Bot 孤儿配置
+
+### 修复
+
+- 删除账号时同步清理 `account_bot_transfer_notice:<account_id>` 配置，避免 `SystemSetting` 无外键级联导致残留。
+- 交互 Bot 管理器启动扫描会校验账号存在性，跳过并清理已删除账号的残留配置；删除与启动扫描并发时也会收敛 `ACCOUNT_NOT_FOUND`，不再触发无限重试。
+
+### 测试
+
+- 增加账号删除清理和启动扫描孤儿配置收敛的回归测试。
+
+## [0.93.0-beta.5] - 2026-08-05 · patch（补丁预发布） · 修复脱敏正则灾难性回溯
+
+### 修复
+
+- 为 Authorization 与键值密钥脱敏正则的重复前缀增加原子组，阻断恶意长连字符输入触发的灾难性回溯，避免日志接口和 worker 被卡死。
+- 保持现有凭据脱敏语义不变，并增加长异常键前缀的性能回归测试。
+
+## [0.93.0-beta.4] - 2026-08-04 · patch（补丁预发布） · US Trace 父子落库顺序修复
+
+### 修复
+
+- 修复 beta.3 仍会在 US PostgreSQL 记录 `event_span_trace_id_fkey` 的根因：同一批新建的父 Trace 和子 Span/Action 没有 ORM relationship，SQLAlchemy 可能先 flush 子表；现在先显式 flush 新父 Trace，再在同一事务提交子记录，避免首次批量提交产生外键错误及后续 split retry。
+
+### 测试
+
+- 增加启用真实外键约束的 SQLAlchemy 回归测试，锁定同批写入顺序必须为 `event_trace → event_span`。
+
+## [0.93.0-beta.3] - 2026-08-04 · patch（补丁预发布） · US Trace 写入竞态收口
+
+### 修复
+
+- 修复父 Trace 已被事务外检查确认后、子 Span/Action 实际写入前又被并发清理，导致整批子记录持续触发 PostgreSQL 外键错误的问题；子记录现在会在同一写事务内重新确认并以 `FOR KEY SHARE` 锁定父 Trace，缺失父记录时跳过无效子写入并保留可诊断记录。
+
+### 测试
+
+- 增加父 Trace 在事务外检查后消失的回归场景，验证不会提交孤立 Span，且会记录明确的父记录缺失原因。
+
+## [0.93.0-beta.2] - 2026-08-04 · patch（补丁预发布） · US 线上 Telegram 异常收口
+
+### 修复
+
+- 升级 Telethon 到包含 Community 与 CommunityForbidden peer 转换的上游提交，修复 US UserBot 遇到社区会话时无法转换 peer 的异常。
+- UserBot 会话过期扫描遇到 Python/Redis 瞬时超时时退避并仅安全重试一次，避免偶发扫描告警。
+- 过期 callback query 与 Telegram 明确不可删除的消息记录为 skipped，不再产生误导性失败告警，同时保持后续交互动作继续执行。
+- 清理 US 数据库中已不存在插件 `reply_anchor_test` 的残留启用项，避免持续产生插件加载告警。
+
+### 测试
+
+- 增加 Community/CommunityForbidden peer 契约、扫描超时重试、过期 callback、不可删除消息及 UserBot 动作回归测试。
+
+## [0.93.0-beta.1] - 2026-08-04 · minor（次版本预发布） · Codex Gateway 契约维护与真实上游错误诊断
+
+### 新增
+
+- Gateway 状态新增 Codex 客户端版本检测、应用和恢复入口，并展示 Gateway 协议版本、程序版本、构建提交、上游提交与契约复核日期；保存后会刷新运行状态，模型列表、模型测活和 Agent 调用共用当前版本。
+- LLM 错误链路新增真实上游状态码、错误码、错误消息、错误详情、上游 Request ID 与 Client Request ID 等结构化事实，并在模型测活、完整巡检和 Agent 错误提示中分层展示。
+
+### 优化
+
+- Gateway 为每次 Codex Responses 调用生成受保护的会话、线程、轮次、窗口、安装标识、`client_metadata` 与 `prompt_cache_key`，并按当前 Codex 版本维护身份头；Provider 自定义头不能覆盖这些 Gateway 身份字段。
+- 将 Provider 的调用方式明确区分为「标准 API 直连」与「Codex 客户端兼容模式（Gateway）」，统一模型列表入口为「获取模型列表」，补充 Gateway 的用途、运行边界和版本维护说明。
+- Gateway 状态弹窗适配 375px PWA 与长版本、提交和错误文本，避免横向溢出。
+
+### 修复
+
+- 修复外层 502/503 包装覆盖真实上游 4xx 的问题；错误归一化现在优先使用结构化上游事实，只有确实为 5xx 时才提示临时故障可重试。对于已核实的示例链路会展示「上游 HTTP 400：Unsupported parameter: max_output_tokens」。
+- 修复普通 `request_id` 被误作上游 Request ID 的问题，TelePilot、Gateway、上游和客户端请求标识保持独立。
+- 修复 Responses 流式失败事件只读取内层通用错误、丢失外层结构化上游字段的问题。
+- 加强错误详情脱敏，Gateway 会在转发流式 `response.failed` 前清理失败事件中的敏感值，避免 API Key、Authorization、Provider 地址及 HTTP、SOCKS、MTProxy 代理地址通过嵌套错误内容进入日志或界面；正常流内容保持原样。
+- 修正 Codex 版本保存提示，避免 Gateway 热同步失败时仍错误宣称已经同步成功；实际健康状态由 Gateway 状态入口展示。
+
+### 测试
+
+- 增加真实上游 400 被外层 502 包装、Responses 失败事件、Request ID 分层、结构化错误脱敏、Codex 版本热更新和 Gateway 身份头防覆盖回归。
+- 增加 Gateway 状态桌面端与 375px PWA 视觉回归，并覆盖版本检测、应用、恢复和长文本布局。
+
+## [0.92.0-beta.1] - 2026-08-04 · minor（次版本预发布） · Provider 临时 Gateway 与 Agent 客户端控制
+
+### 新增
+
+- 模型测活的成功与失败结果都可使用临时执行后端、协议和客户端身份再次测试，支持把单次请求切到内置 Codex Gateway，且不改写 Provider 配置。
+- System Agent 输入区新增会话级调用客户端选择，可跟随 Provider、临时使用指定直连身份或选择已配置的 Gateway Provider；选择即时生效并随当前会话保存。
+
+### 优化
+
+- Provider 切换执行后端后可直接读取模型列表和测活，无需先保存；同次编辑切回原后端会恢复表单中的直连协议配置，模型列表不会被强制清空或要求重新读取。
+- Agent 的全局默认模型入口收进模型选择器，发送与停止按钮改为圆形；PWA 输入区为客户端和模型选择器使用独立紧凑宽度。
+- 将“直接 API”统一改名为“Provider 直连”，并在模型提供商页并排提供模型测活、请求配置和 Gateway 状态入口。
+
+### 修复
+
+- 修复流式测活在客户端断开时未关闭内层模型任务、因而漏记 cancelled 用量的问题。
+
+## [0.91.0-beta.4] - 2026-08-04 · minor（次版本预发布） · 前端发布镜像切换修复
+
+### 修复
+
+- 修复生产增量更新把前端版本号误判为“无需重新编译”的问题；发布检查点即使只有版本元数据变化，也会切换到当前提交对应的前端镜像，避免后端已升级但页面仍显示上一版本。
+
+### 测试
+
+- 更新生产更新计划回归用例，明确发布元数据必须同时安排 Web 文件同步与 Frontend 预构建镜像切换。
+
+## [0.91.0-beta.3] - 2026-08-04 · minor（次版本预发布） · Gateway 保存与 Trace 写入修复
+
+### 修复
+
+- 新增数据库迁移扩展 LLM Provider 协议档案约束，允许 OpenAI、DeepSeek 与 Codex Responses 档案正常落库，修复切换「内置 Codex Gateway」保存时返回服务器内部错误的问题。
+- 修复 UserBot 事件跨进程处理时，子 Span 可能抢在父 Trace 的批量事务提交前写库、持续触发 PostgreSQL 外键错误的问题；子记录现在会等待父记录可见，永久缺失时记录可诊断错误且不执行无效写入。
+- 修正生产环境生成脚本未按 Compose 内可信前端反代设置 `TRUST_FORWARDED_FOR=true` 的问题，避免新部署忽略真实客户端 IP 并持续输出安全告警；开发环境默认值保持关闭。
+
+### 测试
+
+- 新增协议约束升级与安全降级、跨进程 Trace 可见性竞争、父 Trace 永久缺失及生产环境生成脚本回归；并在真实 PostgreSQL 中验证完整迁移、降级再升级与并发写入结果。
+
+## [0.91.0-beta.2] - 2026-08-03 · minor（次版本预发布） · Codex Gateway 请求身份与发布收口
+
+### 修复
+
+- 补齐 Gateway 的 Codex Responses 请求身份：为每个 Provider 隔离生成 prompt cache、session/thread/turn/window/installation 元数据，并同步请求体与兼容头，避免仅模拟 UA 时仍被上游判定为非官方客户端。
+- 为 Gateway 健康与配置控制面保留独立并发通道，避免数据面满载时配置同步 503 触发整个 Gateway 级联停止。
+- 修正客户端受限错误建议：不再笼统归因 API Key，Responses Provider 会优先提示内置 Gateway，确需 OAuth/官方账号时保持明确拒绝伪造。
+- 修正生产更新失败后的人工回滚提示，要求同时恢复记录的 commit 与 Web、Frontend、Updater 三张镜像；涉及迁移时明确恢复迁移前备份，避免代码与镜像混装。
+
+### 文档
+
+- 按当前代码反向同步 System Agent 持久队列、运行中 steer/输入/审批、租约恢复、待确认收件箱和 Gateway 可观测性边界。
+- 补齐插件 MessageOps 上下文方法矩阵、`apply` 与 message-id 存储契约、账号配置存储、专属配置页路由、Webhook 执行链和命中调试入口。
+- 扩充内置 Codex Gateway 的 Unix Socket 契约、生产镜像、插件 AI、部署验收、密钥轮换及回滚说明，并明确真实受限 Provider 与多架构/线上门禁仍需外部验收。
+
+## [0.91.0-beta.1] - 2026-08-03 · minor（次版本预发布） · 内置 Codex Gateway 与全链路 Agent 接入
+
+### 新增
+
+- 新增独立 Go `telepilot-gateway`，通过权限收紧的 Unix Socket 按需启动，使用原子 Provider 快照、精确 Provider/模型路由和 Responses 数据面承载流式、非流式、reasoning、工具调用、工具结果回放、模型列表与取消。
+- Provider 新增「直接 API / 内置 Codex Gateway」执行后端；Gateway 模式固定 Responses/Codex 档案并由 Gateway 管理身份，切换后端时保留 API Key、代理、兼容请求头和已有客户端身份配置。
+- 系统健康新增 `not_required`、`ready`、`degraded` Gateway 状态；模型测活、完整巡检、Recent Usage 与 System Agent RunTrace 记录实际 backend、Gateway 版本、request ID 和阶段。
+- 生产 Web 镜像多阶段构建并内置 Gateway 静态二进制；新增 `make gateway-build`、`make gateway-test` 与 `make gateway-run` 开发入口，不新增 Compose 服务、端口、volume 或用户安装步骤。
+
+### 优化
+
+- 统一 LLM HTTP、流式、模型列表、协议探测、测活、Agent、插件和 usage 的错误事实，区分客户端受限、官方账号运行时要求、额度耗尽、Gateway 不可用、限流、超时、网络、协议和上游服务错误。
+- Gateway 失败后允许 TelePilot runtime 按既有策略切换其它 Provider，但不会在同一 Provider 内偷跑 direct；插件 Agent 成功切换后保持 Provider，避免后续工具轮次重复撞击已知故障路径。
+- Gateway Provider 的模型列表通过真实上游候选端点读取；推理、测活和模型列表兼容请求头按 scope 隔离。
+- Gateway Provider 与引用代理的 Web/System Agent 写入通过进程锁和 PostgreSQL 事务 advisory lock 串行同步候选快照；事务失败或取消后会在新锁事务内按已提交数据库补偿，模型列表更新也会立即刷新 Gateway 路由。
+
+### 安全
+
+- Gateway 凭据仅驻留内存，不读取或同步 Codex OAuth、账号身份、设备证明或 `~/.codex/auth.json`；日志、错误、usage 与 Trace 统一脱敏 API Key、Authorization、兼容头和代理信息。
+- Gateway 边界剥离内部请求头、拒绝回指 Socket 的转发环路和自动上游重定向，避免自定义鉴权头跨 origin 泄露；语音转写和图片生成明确拒绝 Gateway，不绕过 Unix Socket。
+- 未配置 Provider 代理时 Gateway 强制直连，不继承进程环境代理；网络错误使用稳定文案，不向 usage 或界面暴露上游 Base URL。
+
+### 文档
+
+- 新增内置 Codex Gateway 配置、健康、错误排查、部署升级、开发命令、System Agent 集成和安全边界文档，并同步 README、架构、生产部署、安全运维和开发指南。
+
+### 测试
+
+- 补充 Gateway 路由隔离、快照 revision、敏感日志、SSE/工具调用/取消、错误分类、fallback、usage 元数据、System Agent 与插件链路、Provider backend 切换和系统健康回归。
+
+## [0.90.0-beta.1] - 2026-08-02 · minor（次版本预发布） · 插件受控识别与点击第三方 Bot 按钮
+
+### 新增
+
+- 为普通插件和 UserBot 插件增加正式的 `ctx.messages.click_callback_button(...)` 能力：插件只提交会话、消息和按钮行列，平台临近执行时重新读取 Telegram 消息与真实 callback data，并校验发送 Bot、按钮类型和可选按钮文字。
+- 标准事件信封新增安全的按钮布局投影，公开行列、文字和按钮类型；`tp_event.message.reply_markup` 提供 `ReplyMarkupRef` / `ButtonRef`，不暴露 callback data、URL、原始按钮对象或客户端。
+- 新增 `click_bot_button` 安装插件权限与前端中文标签；插件检查器可从 MessageOps 调用或标准 action 自动推导该高风险权限。
+
+### 安全
+
+- 安装插件的 legacy、命令和裸直通事件统一净化嵌套按钮，旧 `message.buttons[row][column].click()` 与 raw MTProto 穿透路径被阻断；Interaction Bot 插件入口及其 `ctx.messages.apply(...)` 不能绕过边界代点第三方按钮。
+- 点击动作在限流等待后再次读取并复核消息，发送前再次确认插件仍为同一活跃实例且权限未撤销；插件禁用、热重载、Redis 异常或重复请求均失败关闭。
+- 幂等锁按账号、消息和按钮位置覆盖跨插件并发：明确成功后保护 20 秒，Telegram 超时或结果未知时保守保护 5 分钟；callback answer 文本、URL 和可能包含 request 内容的异常原文不进入 Trace 或 ActionEvent。
+
+### 修复
+
+- 修复普通 Reply Keyboard 被标准事件错误标记为 Inline Keyboard 的问题，Bot API 与 Telethon 两种输入现在都会保留真实键盘类型。
+
+### 文档
+
+- 按实际运行时代码统一更新插件 API、快速开始、远程插件、安全、规则、速查表和开发指南，明确三条消息链路、允许会话留空、两种 Inline 按钮语义、各入口 MessageOps 能力以及裸直通的沙箱边界。
+
+### 测试
+
+- 新增标准按钮投影与防泄露、Reply Keyboard 类型、按钮权限、Interaction Bot 绕过、裸直通沙箱、限流后二次复核、插件关闭竞态、跨插件并发、未知结果幂等和插件检查器权限推导回归。
+
+## [0.89.1-beta.1] - 2026-08-01 · patch（补丁预发布） · 修复插件自主按钮回调投递
+
+### 修复
+
+- 修复插件自主发送的 Inline Keyboard 在未配置交互规则、允许会话留空且订阅未声明 `entry_key` 时，按钮点击无法投递给插件的问题；Interaction Bot Event Bus 现在与 UserBot 一致优先调用标准 `on_event`，允许会话留空继续表示全部会话，同时保留旧规则、活跃会话与 `on_interaction` 入口的兼容行为。
+
+### 测试
+
+- 新增自主按钮的空允许会话、零规则路由、无 `entry_key` 投递与 `on_event` 优先级回归测试。
+
+## [0.89.0-beta.3] - 2026-08-01 · minor（次版本预发布） · Agent 测活续接与移动端队列交互修复
+
+### 优化
+
+- 将 Agent Provider 测活总超时从 45 秒统一为 90 秒，与手动测活保持一致，减少协议自动探测和慢响应上游被提前中断的假失败。
+- 重新设计 Agent 运行中的消息处理入口：将“稍后执行、补充要求、改做这条”移到输入框上方，直接解释每种方式的执行结果；队列编辑、前移、后移、取消和恢复按钮在窄屏下可换行并显示易懂中文。
+
+### 修复
+
+- 修复用户发送“重试、再试一次、retry”后丢失上一轮 Provider 工具域、模型转而解释请求头或无法继续测活的问题。
+- 修复 Provider 测活失败后单独补发 API Key 时无法续接上一轮任务的问题；密钥只用于当前轮工具调用，持久化前继续脱敏，不写入会话记忆。
+
+### 测试
+
+- 补充 Agent 与手动测活共享超时、Provider 重试路由、单独密钥续接与持久化脱敏回归，并复测 System Agent、前端单元测试、类型检查和生产构建。
+
+## [0.89.0-beta.2] - 2026-08-01 · minor（次版本预发布） · Provider 真实测活探针与请求头修复
+
+### 优化
+
+- 统一 Agent“测活并添加”与新建 Provider 页面的真实对话探针：不再发送 `ping` 或带责备语气的测试句，改为要求模型针对日常专注场景给出两句可执行建议；最大输出统一为 512 Token，为强制推理模型保留足够的推理与正文空间，同时维持单次探针的成本边界。
+
+### 修复
+
+- 修复 System Agent 在 Provider 测活工具已经携带 API Key 时，又把同一密钥误注入为 `request_headers`，导致请求尚未发往上游就被本地安全校验拦截、并被错误解释成“服务端要求自定义请求头”的问题；请求头安全错误现在会明确说明属于本地拒绝且尚未访问上游。
+
+### 测试
+
+- 新增多敏感字段的聊天密钥合并回归，确保已有真实密钥时不会继续污染其他缺失字段；同步校验 Provider 工具只允许从聊天注入 API Key。
+
+## [0.89.0-beta.1] - 2026-08-01 · minor（次版本预发布） · Provider 协议档案与客户端会话运行时
+
+### 新增
+
+- 为 AI Provider 增加可执行协议档案：标准协议、OpenAI Responses、DeepSeek Responses、Codex Responses 与 Claude Code 反代不再共用隐含兼容逻辑；前端可显式选择，协议检测会推荐匹配档案。
+- 扩展模型能力事实层，支持上下文窗口、最大输出、输入/输出模态、并行工具、联网搜索、支持协议与 reasoning 传输方式；协议硬限制优先于用户模型元数据。
+- 为 System Agent 增加客户端会话运行时：上游会话 ID 按 Provider/档案隔离并伪名化，每次 HTTP 请求使用唯一 request ID，不发送原始 TelePilot 会话、账号或 Telegram 标识。
+
+### 优化
+
+- 拆分 Chat Completions、Responses、Anthropic 与 SSE Codec；SSE 按完整事件块和字节流解析，支持多行 data、UTF-8 跨分片、无尾分隔符与传输大小限制。
+- 模型发现支持有序候选端点；仅在 404/405 时继续尝试，401/403、429 与服务端错误保留真实失败，避免把鉴权或限流问题误判为路径不兼容。
+- 标准 Responses 与 DeepSeek 默认使用 OpenAI SDK 身份，只有明确选择 Codex Responses 档案时才使用 Codex 身份；动态请求 ID 与稳定会话 ID 已分离，并停止模拟 Grok Agent Identity。
+
+### 修复
+
+- 适配 DeepSeek 官方 Responses API：`https://api.deepseek.com` 不再被错误补成 `/v1`，`deepseek-v4-flash` 的协议探测会优先推荐原生 Responses。
+- 支持 Responses 流以 `response.incomplete` 正常收尾，并从 `response.output_item.done` 修复终态缺失的 reasoning / function call；DeepSeek 工具续轮会回传明文 reasoning input，避免达到输出上限或继续调用工具时被误判失败、丢失上下文。
+- 在 AI Provider 配置页补充 DeepSeek V4 Flash 的 Responses、Base URL 与当前能力限制说明。
+
+### 测试
+
+- 新增协议档案、能力硬约束、会话伪名化与 Provider 隔离、模型端点候选、Responses cache usage、并行 function call、失败终态、迟到事件及 SSE 分片边界回归。
+
+## [0.88.0-beta.11] - 2026-07-31 · patch（补丁版本预发布） · 在线更新补丁镜像判空修复
+
+### 修复
+
+- 修复 web 运行文件补丁镜像成功切换后，镜像引用被错误当作 Bash 算术表达式解析，导致在线增量更新在 updater handoff 前以 `unbound variable` 退出的问题。
+
+### 测试
+
+- 新增补丁镜像引用字符串判空回归，防止包含仓库名与标签的镜像引用再次进入算术条件。
+
+## [0.88.0-beta.10] - 2026-07-31 · patch（补丁版本预发布） · 在线更新分类与累计恢复修复
+
+### 修复
+
+- 将生成的 OpenAPI JSON 快照明确归为无独立运行时影响的发布产物，避免版本同步文件把纯 Web/前端改动误判成“完整生产更新”；未知运行文件仍保持失败关闭。
+- 修复 Git 已前进但容器部署未完成时，下一版只计算最后一个版本差异、可能跳过中间 Compose 或前端变化的问题；更新预览与实际执行现在都会从最初未部署的 commit 累计生成计划。
+- 修复点击执行更新后接口默认值覆盖检查阶段分类计划的问题，任务运行期间会继续保留服务范围、重建动作与分类依据，并同步补齐执行更新响应的 OpenAPI 字段。
+- 修复 Agent 页头布局视觉回归使用严格亚像素中心值导致 GitHub Actions 偶发失败、预构建镜像被跳过的问题，改为验证控件确实位于页头且具有有效可见尺寸。
+- 镜像拉取失败时不再笼统提示“等待构建”，而是明确区分镜像不存在或构建失败，并给出目标 commit 与 GitHub Actions 检查入口。
+
+### 优化
+
+- 在线更新弹窗和执行日志现在会展示分类依据，便于直接识别触发完整更新、数据库备份或服务重建的具体原因。
+- 保留未知文件默认走完整更新的安全兜底，同时细化已知生成物、测试文件、文件同步与镜像重建的服务级分类。
+
+### 测试
+
+- 新增 OpenAPI 快照分类、跨版本 pending 累计、前端分类依据透传和生产更新脚本行为回归，并复测 beta.8 到 beta.9 的真实差异为 `web + frontend` 服务级增量更新。
+
+## [0.88.0-beta.9] - 2026-07-31 · patch（补丁版本预发布） · Agent 布局与在线更新日志修复
+
+### 优化
+
+- 将桌面端 Agent 的 Provider 与账号上下文配置整合到“系统助手”页头右侧，并移除窄屏和移动端的重复配置行，为会话区域释放更多空间。
+- 将 Agent 输入框的默认提示语更新为“想让 Agent 怎么帮你？直接用自然语言问她吧！”，强化自然语言调用引导。
+
+### 修复
+
+- 修复 updater 容器内执行 Compose 时相对路径被宿主 Docker 错误解析，导致在线更新后的更新日志目录挂载错位、前端读取 `CHANGELOG.md` 返回 404 的问题。
+- 复用旧 Beta 已传入的宿主机绝对项目目录，让旧版可从系统前端直接发起在线更新并正确重建 Web 与前端服务，无需登录服务器手工修复。
+
+### 测试
+
+- 补充桌面端与 375px 窄屏 Agent 布局视觉回归，以及生产更新脚本和运行时内容绝对路径挂载回归。
+
+## [0.88.0-beta.8] - 2026-07-31 · patch（补丁版本预发布） · 旧 updater 一次性脱困收口
+
+### 修复
+
+- 为 `v0.87.0-beta.5` 等旧版 updater 提供可审计的一次性修复脚本：同时安装 GitHub CLI，并通过兼容包装器让旧验签命令从 GHCR OCI 读取证明。
+- 修复旧命令安装 `gh` 后仍触发 `gh auth login` 的非交互阻塞；验证继续保留仓库、workflow、source commit 和自托管 runner 限制，证明不匹配时仍然失败关闭。
+- 明确 beta.5 的脱困路径：从已 fetch 的目标 Git 提交导出并审计脚本后注入现有 updater 容器，避免执行未经查看的远程脚本。
+
+### 测试
+
+- 新增一次性修复脚本的安装、自检、幂等重跑、外部包装器覆盖保护、OCI 参数去重、真实 token 透传和非 attestation 命令转发回归。
+
+## [0.88.0-beta.7] - 2026-07-31 · patch（补丁版本预发布） · 在线更新自举时序修复
+
+### 修复
+
+- 修复 `v0.87.0-beta.5` 等旧 updater 在 fast-forward 目标代码前就调用启动时加载的旧版镜像验签函数，导致目标版本新增的 GitHub CLI 自举逻辑无法生效、在线更新反复报缺少 `gh` 的问题。
+- 在线更新现在先写入可恢复的 pending 标记并 fast-forward，随后立即重新执行目标版本更新脚本，再预拉取和验签镜像；目标脚本可接管兼容与安全逻辑，镜像未就绪或验签失败时运行服务仍保持旧镜像并允许直接重试。
+- 补充 `v0.87.0-beta.5` 的一次性升级说明：仅为现有 updater 容器安装 GitHub CLI，不跳过 GHCR 构建来源证明，也不改动数据库或业务容器。
+
+### 测试
+
+- 新增跨版本更新时序回归，固定“fast-forward → 目标脚本接管 → 镜像验证”的执行顺序，防止镜像校验再次移动到旧脚本仍在运行的阶段。
+
+## [0.88.0-beta.6] - 2026-07-31 · patch（补丁版本预发布） · Durable Run 测试隔离修复
+
+### 修复
+
+- 修复用量脱敏回归测试意外启动真实 System Agent service 的隔离缺口；测试库只包含 Durable Run 表时，后台执行不再查询未创建的系统设置表并干扰运行取消。
+- 在写入模拟用量前显式等待可控 service 进入执行阶段，使脱敏与 `running → cancelled` 状态验证建立在确定同步点上，不再受本机或 Linux CI 调度差异影响。
+
+### 测试
+
+- 目标用例连续复跑二十轮，并在 macOS 与 Linux 容器中通过 Run Manager 全文件测试；同步扫描所有未注入 service 的启动用例，确认其余用例均在执行 service 前完成所有权或冲突校验。
+
+## [0.88.0-beta.5] - 2026-07-31 · patch（补丁版本预发布） · Durable Run 测试竞态收口
+
+### 修复
+
+- 为 Durable Run 测试统一区分“数据库已提交运行状态”和“后台执行服务已实际启动”两个异步阶段，消除 Linux CI 调度下服务调用断言偶发抢跑的问题。
+- 同步收口幂等启动、过期停止替换、跨进程恢复与未关联消息恢复中的同型断言，避免相同竞态继续以不同用例轮流阻断预构建镜像发布。
+
+### 测试
+
+- Run Manager 全文件在 macOS 连续复跑五轮并在 Linux 容器复跑，随后通过后端全量测试、前端测试与生产构建。
+
+## [0.88.0-beta.4] - 2026-07-31 · patch（补丁版本预发布） · 发布流水线回归修复
+
+### 修复
+
+- 隔离 Ubuntu CI Runner 预装的系统 GitHub CLI，确保旧版 Alpine updater 的自举回归测试始终验证真实的“容器内缺少可用 `gh`”升级路径，不再因主机环境泄漏误报失败并阻断 GHCR 镜像发布。
+- 为 Durable Run 关闭恢复测试增加执行服务启动的确定同步点，消除 Run 已提交为 `running`、但后台服务尚未记录调用时抢先断言的竞态及其伴随的 SQLite teardown 锁冲突。
+
+### 测试
+
+- 在 macOS 与 Linux 容器中验证旧 updater 自举和 Durable Run 跨进程恢复回归，并通过后端全量测试、前端测试与生产构建及 updater Alpine 镜像构建。
+
+## [0.88.0-beta.3] - 2026-07-30 · patch（补丁版本预发布） · 在线更新兼容修复
+
+### 修复
+
+- 修复旧版 Alpine updater 在线更新到启用 GHCR 构建证明校验的新版本时，因容器缺少 GitHub CLI 或未执行 `gh auth login` 而在镜像预拉取阶段退出的问题；旧容器会一次性补齐 attestation 能力，OCI 证明验证保持无人值守且失败关闭，新 updater 镜像则直接内置依赖。
+
+### 测试
+
+- 为旧 updater 自举、无 GitHub 登录的非交互证明校验、已有 token 透传和 OpenAPI 快照版本同步门禁补充回归覆盖。
+
+## [0.88.0-beta.2] - 2026-07-30 · patch（补丁版本预发布） · System Agent 浏览器验收收口
+
+### 修复
+
+- 为视觉测试统一夹具补充 System Agent 队列查询响应，避免任务中心的合法轮询被误判为未声明 API 请求。
+- 将移动端助手浮钮上移一个标准间距单位，确保展开助手后与底部输入框保持稳定间隔。
+- 将桌宠待机眨眼检查改为短间隔轮询，避免测试采样周期与 90ms 眨眼窗口重合时漏检真实动画帧。
+
+### 测试
+
+- 重新运行受影响的移动端与桌面端浏览器用例，并连续复跑移动端助手布局和动画检查。
+
+## [0.88.0-beta.1] - 2026-07-30 · minor（次版本预发布） · System Agent 队列与持久运行体验升级
+
+### 新增
+
+- System Agent 新增 PostgreSQL 持久化多消息队列，支持运行中继续发送、编辑、置顶、排序、删除、清空和失败后恢复；同一会话严格串行执行，刷新页面、断开进度连接或应用重启后仍可继续。
+- 新增运行中 Steer 与“停止并替换”：Steer 在模型和工具调用的安全边界注入新指令，停止并替换在单事务中取消旧任务并把替代消息放到队首。
+- 新增跨会话任务中心、会话状态徽标和队列数量，集中展示运行、等待、失败、阶段、耗时与错误；桌面和移动端均可直接管理当前会话队列。
+- 新增按登录用户和会话隔离的输入草稿，以及用户主动授权后的后台任务完成/失败浏览器通知。
+- 新增 `waiting_input` 与 `waiting_approval` 持久等待状态，Web 可补充信息、批准或拒绝后继续同一个 Run；后续队列在等待、失败或取消时暂停，并支持显式恢复。
+
+### 改进
+
+- Web 与 Telegram Bot 统一使用 Durable Run、持久事件流、幂等请求和队列语义；Bot 支持排队位置、运行中停止、恢复队列、直接补充等待输入及审批兜底命令。
+- 任务执行新增阶段、用量、耗时、心跳、worker claim 与 lease 信息；启动和运行期间都会自动接管过期 lease，多实例并发扫描通过行锁和 worker fencing 保证只执行一次。
+- 会话列表区分 Web、Telegram 与定时来源，并同步显示运行、等待、失败和排队状态；切换会话时可恢复草稿、当前 Run 与事件游标。
+- 应用退出时优雅停止调度和心跳，将本进程占用的运行回退到可恢复队列；进度订阅断开不再取消后台任务。
+- 小连接池下，鉴权、Run 所有权查询和 Runtime 初始化读取会在进入独立 Manager 或长模型调用前释放事务；只读工具改用独立短 session，`pool_size=2` 且无 overflow 时跨会话并发不再互相等待第二条连接。
+- 等待态流结束会按最终 Run 状态保留游标和提示，不再误报失败通知；审批拒绝、手动取消会清理终态游标，按用户和会话隔离的草稿不再回退到旧的共享键。
+- 暂停队列在恢复扫描中保持暂停；从等待态停止并替换时先执行队首替代任务，随后继续原队列；启动恢复失败后自愈创建的 Manager 也会在应用退出时正常回收。
+
+### 安全
+
+- 队列正文和运行中补充输入使用 `MASTER_KEY` 加密落库，并纳入 rekey；事件、用量、模型输出、Authorization、Provider Key、Telegram Bot URL 与代理凭据在持久化前统一递归脱敏。
+- Web API 与 Manager 双层校验 Run、会话、渠道和所有者；等待输入类型、审批工具集合、幂等键与请求内容保持严格绑定，阻止跨用户、跨渠道和状态机绕过。
+- Steer 消费会先在同一事务中追加到加密 Pending Turn，再标记输入已应用；旧 Worker 失去 claim 后不能提前消费新输入，Steer 新携带的密钥会立即加入当轮动态脱敏集合，覆盖模型进度、流式正文、工具参数与结果、最终消息和异常。
+
+### 数据库
+
+- 新增 PostgreSQL 迁移 `0052`，创建 `system_agent_pending_turn`、`system_agent_run_input`，并为 Durable Run 增加渠道、Bot 所有者、队列关联、阶段、lease、heartbeat、usage 与 elapsed 字段及并发查询索引；支持安全升级和降级。
+
+### 测试
+
+- 补充队列容量、编辑排序、加密、幂等、Steer、等待恢复、审批拒绝、停止替换、断线续订、优雅关闭、过期 lease、运行期多实例接管、旧 worker fencing、Bot/Web 语义、敏感信息脱敏和 `0052` 迁移回归。
+- 使用 PostgreSQL 16 验证 `0051 → 0052 → 0051 → 0052`，并验证并发创建、双重替换、重复等待输入及多实例运行期恢复只产生一次有效执行。
+- 使用 PostgreSQL 16.14 额外验证 5 个同幂等请求只创建 1 个 Run、双 Manager 只接管 1 次、普通取消与停止替换崩溃恢复正确收敛，以及 2 连接无 overflow 时两个长模型调用仍可释放连接供第三个查询使用。
+
+## [0.87.0-beta.6] - 2026-07-30 · patch（补丁版本预发布） · 插件派奖权限收口
+### 修复
+
+- 将 `payout` 纳入插件沙箱可识别的非客户端权限，并在已安装插件执行派奖动作前校验 Manifest 显式授权，避免正确声明被误报未知权限，也阻止未授权插件绕过高风险权限声明直接付款。
+- 修正 AI 平台能力热切换文档：正常关闭后现有上下文的 `ctx.ai` 会置为 `None`，只有竞态中继续持有旧 facade 时才抛出结构化不可用错误。
+
+### 文档
+
+- 在插件开发指南和 API 参考中明确 `payout` 的显式权限要求、拒绝错误码与严格 Trace 建议。
+
+### 测试
+
+- 补充 `payout` 沙箱权限识别及已安装插件派奖动作允许、拒绝路径的回归覆盖。
+
+## [0.87.0-beta.5] - 2026-07-29 · patch（补丁版本预发布） · 定时目标与工作台界面修复
+
+### 变更
+
+- 插件管理页移除空置的“推荐插件”快捷区，首次安装统一通过已配置的 Git 插件仓库或本地导入完成。
+
+### 修复
+
+- 定时任务通过 `@username` 连续发送时，每次重新解析包含 `access_hash` 的完整 Telegram 输入实体，不再把首次结果降级为无法稳定复用的纯整数 ID。
+- AI 中心“调用成功率”改用与同组指标一致的状态卡片结构，统一标题图标、顶部状态条、内边距、数字排版和悬浮反馈；无调用记录时使用中性状态。
+
+### 测试
+
+- 补充定时任务重复解析完整实体的回归测试，校验成功率卡片在移动端、平板和桌面端与同组卡片保持同高，并确认插件管理页不再出现“推荐插件”区域。
+
+## [0.87.0-beta.4] - 2026-07-29 · patch（补丁版本预发布） · 跨 Runner 桌宠门禁稳定
+
+### 修复
+
+- 修复较慢 CI Runner 在跳跃动画结束后采到合法待机帧，却被视觉回归误判为多出动画帧的问题。
+- 允许 macOS 与 Chromium 组合下不足 1 个 CSS 像素的盒模型取整差异，同时继续拦截真实的桌宠居中偏移。
+
+## [0.87.0-beta.3] - 2026-07-29 · patch（补丁版本预发布） · 镜像发布依赖链修复
+
+### Fixed
+
+- 镜像发布任务在分范围 CI 跳过浏览器等非必要检查时显式继续求值，避免 `CI Gate` 已成功但 GitHub 仍沿依赖链自动跳过 GHCR 发布。
+
+### Tests
+
+- 校验 workflow 语法、版本同步与完整 CI Gate；发布完成后核对三项多架构镜像和对应构建来源证明。
+
+## [0.87.0-beta.2] - 2026-07-29 · patch（补丁版本预发布） · OpenAPI 新版路由兼容
+
+### Fixed
+
+- 兼容 FastAPI 0.141 对 `include_router()` 路由引入的惰性容器，OpenAPI 契约增强现在会递归处理全部有效路由，不再在全新 CI 环境中丢失 Cookie 鉴权、CSRF、Webhook Token 与统一错误响应声明。
+
+### Tests
+
+- 补充惰性路由上下文遍历回归，并使用全新 Python 3.12 依赖环境验证生成结果与仓库契约快照一致。
+
+## [0.87.0-beta.1] - 2026-07-29 · minor（次版本预发布） · 增量更新、镜像发布与 API 契约治理
+
+### Added
+
+- 新增 CI Gate 后触发的 GHCR 多架构应用镜像发布、SLSA/Sigstore 构建来源证明、按 commit SHA 固定镜像的生产更新链路，以及仓库/签发 workflow/source commit 校验、健康检查失败回滚和部署前镜像状态记录；生产服务器默认只拉取受信镜像，源码构建保留为显式救援模式。
+- 新增内部 OpenAPI 契约快照与 TypeScript 类型生成，统一声明 Cookie 鉴权、CSRF、Webhook Token 和错误包络，并由 CI 阻止接口或生成类型漂移。
+- 资源概览新增存活账号 Worker 的 USS/RSS 中位内存基线，以及宿主机内存、磁盘和容器内存容量告警。
+
+### Changed
+
+- 插件开发文档、更新日志和运行 commit 改由只读运行时目录提供；修改文档后只需同步文件并刷新页面，不再参与前端打包，公开路径限制为明确的 Markdown 白名单。
+- `Beta` CI 改为按变更范围运行后端、前端、浏览器、插件和 API 契约检查；`main` 与 Pull Request 继续执行完整门禁，并为同一分支的旧任务启用并发取消。
+- 生产更新按文件影响范围选择文档同步、Git 跟踪插件同步、后端运行文件补丁镜像或预构建服务镜像；版本展示统一读取后端运行时版本与 revision，避免前端编译版本滞后。
+
+### Fixed
+
+- HTTP 异常响应现在保留 `Retry-After` 等原始响应头；更新脚本会拒绝未知 Git 远程和非法分支名，并在目标插件目录为空时仍可正确完成删除同步。
+
+### Tests
+
+- 补充运行时内容、CI 变更分类、生产更新计划与镜像约束、OpenAPI 鉴权矩阵及快照、HTTP 异常头、Worker 内存统计和容量告警回归测试。
 
 ## [0.86.2] - 2026-07-30 · patch（补丁版本） · 插件派奖权限收口
 

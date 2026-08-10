@@ -8,7 +8,10 @@ TelePilot 0.x 阶段只保留一个默认插件模式：**个人可信插件标�
 
 - 管理员安装并启用插件后，即视为信任该插件的业务逻辑；远程插件风险由管理员自行承担。
 - 平台不做公共插件市场式强沙箱，但会通过 `Manifest.permissions`、`ctx.client`、`ctx.http`、`ctx.ai`、`ctx.messages` 等 facade 收口常用能力，并保留频控、审计、急停、日志脱敏和 token/session 隔离。
-- 插件可以通过两类调度方式接入：管理员带前缀命令、群友关键词/付款开局。触发方式决定整段会话通道：命令会话默认走 UserBot，关键词/付款/按钮会话默认走交互 Bot；插件普通回复不要手写通道，平台会按 `session.channel` 路由。涉及收款确认、发奖、补发等钱相关动作仍由 UserBot 或平台受控结算链路处理。群里已有的转账结果通知 Bot 只作为外部付款证据来源，不是插件主动发送通道。
+- 插件有三条消息链路：裸直通只接 UserBot 实时事件（安装插件仍经过 `SandboxEvent` 权限包装）；UserBot 标准消息链路包括 Event Bus、前缀命令和 legacy `on_message`；Interaction Bot 标准消息链路包括 Event Bus 自主订阅与旧规则会话。自主订阅不要求先配置旧规则或建立活跃会话。
+- 只有进入会话时，触发方式才决定整段普通收发通道：命令开局默认走 UserBot，关键词/付款/按钮回调开局默认走 Interaction Bot；插件普通回复不要手写通道，平台会按 `session.channel` 路由。涉及收款确认、发奖、补发等钱相关动作仍由 UserBot 或平台受控结算链路处理。群里已有的转账结果通知 Bot 只作为外部付款证据来源，不是插件主动发送通道。
+- 账号级“允许会话”留空表示全部会话放行；非空时仅放行名单内会话。
+- Inline 按钮要区分两种场景：Interaction Bot 收到用户点击后用 `answer_callback` ACK；UserBot 主动点击第三方 Bot 的按钮需声明 `click_bot_button` 权限并调用 `ctx.messages.click_callback_button(...)`。旧嵌套 `button.click()` 已被安全阻断。完整说明见 [API 参考](./PLUGIN-API-REFERENCE.md#inline-按钮的两种完全不同场景)。
 
 如果未来要开放“任意第三方上传、未经人工审核”的公共市场，需要另行设计 subprocess/容器隔离、资源配额、文件系统/网络沙箱和供应链扫描。它不属于当前 0.x 默认方案；本文当前所有示例、CI 和安全边界都按个人可信插件标准模式编写。
 
@@ -26,6 +29,7 @@ TelePilot 0.x 阶段只保留一个默认插件模式：**个人可信插件标�
 plugins/installed/{插件名}/
 ├── __init__.py        # 导出 PLUGIN_CLASS 和 MANIFEST
 ├── manifest.py        # Manifest 元数据
+├── plugin.json        # 安装前静态元数据；installed loader 必需
 ├── plugin.py          # 插件主类
 └── (其他插件)
 ```
@@ -82,6 +86,29 @@ MANIFEST = Manifest(
 )
 ```
 
+**plugin.json：**
+```json
+{
+  "name": "event_ping",
+  "display_name": "Event Ping",
+  "description": "演示 Event Bus + MessageOps 的最小插件",
+  "author": "example",
+  "version": "0.1.0",
+  "entry": "plugin.py",
+  "category": "utility",
+  "permissions": ["send_message"],
+  "usage": "在允许会话内发送 ping，插件会按当前会话通道回复 pong。",
+  "event_subscriptions": [
+    {
+      "source": ["userbot", "interaction_bot"],
+      "events": ["message"],
+      "scope": "all_allowed_chats"
+    }
+  ],
+  "capabilities": {}
+}
+```
+
 **__init__.py：**
 ```python
 from .manifest import MANIFEST
@@ -91,7 +118,7 @@ PLUGIN_CLASS = EventPingPlugin
 __all__ = ["PLUGIN_CLASS", "MANIFEST"]
 ```
 
-通过安装接口安装并在账号上启用后，Event Bus 会按 `event_subscriptions` 投递事件。插件只读取标准事件信封，并通过 `ctx.messages` 或标准 action 请求发送、编辑、删除、按钮 ACK、Inline answer 和 settlement。
+`plugin.json.name`、`MANIFEST.key`、插件类 `key` 与目录名必须一致。通过安装接口安装并在账号上启用后，Event Bus 会按 `event_subscriptions` 投递事件。插件只读取标准事件信封，并通过 `ctx.messages` 或标准 action 请求发送、编辑、删除、按钮 ACK、Inline answer 和 settlement。
 
 可直接参考最终版主模板：`examples/plugins/event_bus_demo`。它覆盖 message、command、callback、inline、chosen inline 和 payment fixtures。
 

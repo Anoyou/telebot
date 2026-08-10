@@ -9,7 +9,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from .registry import ToolSpec
-from .secrets import looks_like_provider_credential_paste
+from .secrets import (
+    looks_like_provider_credential_paste,
+    looks_like_standalone_provider_key,
+)
 
 # 插件动态域（plugin_<key>）运行时追加，不写入此常量本体
 _DYNAMIC_DOMAIN_CATALOG: dict[str, tuple[str, tuple[str, ...]]] = {}
@@ -499,7 +502,21 @@ _ACTION_HINTS = (
     "disable",
     "restart",
 )
-_REFERENCE_HINTS = ("它", "这个", "这条", "刚才", "上一个", "那个", "继续", "it", "that", "again")
+_REFERENCE_HINTS = (
+    "它",
+    "这个",
+    "这条",
+    "刚才",
+    "上一个",
+    "那个",
+    "继续",
+    "重试",
+    "再试一次",
+    "it",
+    "that",
+    "again",
+    "retry",
+)
 _CORRECTION_HINTS = (
     "排查错",
     "查错",
@@ -618,6 +635,8 @@ def route_locally(
 ) -> ToolRoute | None:
     raw_lower = str(text or "").lower()
     normalized = re.sub(r"\s+", "", raw_lower)
+    state = memory_state if isinstance(memory_state, dict) else {}
+    previous = [str(item) for item in (state.get("last_domains") or []) if str(item) in available]
     general_help = any(
         (
             bool(re.search(r"(?<![a-z0-9_-])help(?![a-z0-9_-])", raw_lower))
@@ -639,6 +658,11 @@ def route_locally(
         if "providers" in available:
             return ToolRoute(("providers",), "local", "provider_credential_paste")
         return ToolRoute((), "local", "provider_credential_paste_without_provider_tools")
+
+    # 上一轮已经是 Provider 测活时，允许用户在下一轮只补发一个 Key。
+    # Key 仅用于当前轮路由与工具调用，不写入 memory_state。
+    if "providers" in previous and looks_like_standalone_provider_key(text):
+        return ToolRoute(("providers",), "memory", "provider_key_continuation")
 
     matched: list[str] = []
     for domain, (_description, keywords) in domain_catalog().items():
@@ -748,8 +772,6 @@ def route_locally(
         matched.append("source")
     if matched:
         return ToolRoute(tuple(dict.fromkeys(matched[:3])), "local", "keyword_match")
-    state = memory_state if isinstance(memory_state, dict) else {}
-    previous = [str(item) for item in (state.get("last_domains") or []) if str(item) in available]
     if previous and any(re.sub(r"\s+", "", hint.lower()) in normalized for hint in _CORRECTION_HINTS):
         return ToolRoute(tuple(previous[:3]), "memory", "correction_to_previous_domain")
     if previous and any(hint in normalized for hint in _REFERENCE_HINTS):

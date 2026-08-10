@@ -15,15 +15,20 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 import time as _time
+from contextlib import aclosing, asynccontextmanager
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 from fastapi import APIRouter, HTTPException, Response
 from fastapi.responses import StreamingResponse
 
+from ..crypto import encrypt_str
 from ..deps import CurrentUser, DBSession
 from ..schemas.command import (
     AccountCommandItem,
@@ -68,7 +73,12 @@ from ..services.llm_identity import (
     default_identity_for_format,
     resolve_identity,
 )
-from ..services.llm_protocol import normalize_base_url, provider_endpoint, provider_models_endpoint
+from ..services.llm_profiles import infer_protocol_profile, resolve_protocol_profile
+from ..services.llm_protocol import (
+    normalize_base_url,
+    provider_endpoint,
+    provider_models_endpoints,
+)
 from ..services.llm_request_headers import (
     REQUEST_SCOPE_LIVENESS,
     REQUEST_SCOPE_MODELS,
@@ -77,7 +87,15 @@ from ..services.llm_request_headers import (
     request_headers_for_scope,
 )
 
+log = logging.getLogger(__name__)
 router = APIRouter(tags=["commands"])
+
+
+def _is_deepseek_v4_responses_target(base_url: str, model: str) -> bool:
+    """DeepSeek 官方 Responses API 当前仅开放给 deepseek-v4-flash。"""
+
+    host = (urlsplit(base_url).hostname or "").lower()
+    return host == "api.deepseek.com" and model.strip().lower() == "deepseek-v4-flash"
 
 
 async def _require_ai_enabled(db: DBSession) -> None:
@@ -101,6 +119,7 @@ async def _emit_llm_diagnostic_usage(
     model: str | None,
     result=None,
     error: Exception | None = None,
+    execution_backend_override: str | None = None,
     api_format_override: str | None = None,
     identity_override: str | None = None,
 ) -> None:
@@ -127,15 +146,33 @@ async def _emit_llm_diagnostic_usage(
         pass
 
     success = error is None
-    effective_api_format = (
-        api_format_override
-        or getattr(provider_row, "api_format", None)
-        or default_api_format_for(getattr(provider_row, "provider", "openai"))
+    effective_execution_backend = execution_backend_override or str(
+        getattr(provider_row, "execution_backend", "direct") or "direct"
     )
-    client_identity_profile = resolve_identity(
-        identity_override or getattr(provider_row, "client_identity_profile", None),
-        effective_api_format,
-    ).profile
+    gateway_mode = effective_execution_backend == "codex_gateway"
+    effective_api_format = (
+        "responses"
+        if gateway_mode
+        else (
+            api_format_override
+            or getattr(provider_row, "api_format", None)
+            or default_api_format_for(getattr(provider_row, "provider", "openai"))
+        )
+    )
+    client_identity_profile = (
+        "gateway_managed"
+        if gateway_mode
+        else resolve_identity(
+            identity_override or getattr(provider_row, "client_identity_profile", None),
+            effective_api_format,
+            recommended_profile=resolve_protocol_profile(
+                effective_api_format,
+                getattr(provider_row, "protocol_profile", None),
+                base_url=getattr(provider_row, "base_url", None),
+                model=model or getattr(provider_row, "default_model", None),
+            ).recommended_identity,
+        ).profile
+    )
     await llm_runtime._emit_usage(
         UsageRecord(
             provider_id=getattr(provider_row, "id", None),
@@ -152,6 +189,7 @@ async def _emit_llm_diagnostic_usage(
             fallback_chain=[str(getattr(provider_row, "name", "") or getattr(provider_row, "id", ""))],
             request_preview=request_preview_for_usage(system, user_prompt),
             response_preview=preview_text_for_usage(getattr(result, "text", None)),
+            **llm_runtime.usage_transport_fields(provider_row, result or error),
         )
     )
 
@@ -159,6 +197,9 @@ async def _emit_llm_diagnostic_usage(
 def _diagnostic_error_type(error: Exception | None) -> str | None:
     if error is None:
         return None
+    category = str(getattr(error, "category", "") or "").strip()
+    if category:
+        return category
     msg = str(error).lower()
     if "timeout" in msg:
         return "timeout"
@@ -231,9 +272,7 @@ async def create_template(
     return CommandTemplateOut.model_validate(tpl)
 
 
-@router.patch(
-    "/api/commands/templates/{tpl_id}", response_model=CommandTemplateOut
-)
+@router.patch("/api/commands/templates/{tpl_id}", response_model=CommandTemplateOut)
 async def update_template(
     tpl_id: int,
     payload: CommandTemplateUpdate,
@@ -257,9 +296,7 @@ async def update_template(
 
 
 @router.delete("/api/commands/templates/{tpl_id}")
-async def delete_template(
-    tpl_id: int, db: DBSession, user: CurrentUser
-) -> dict[str, bool]:
+async def delete_template(tpl_id: int, db: DBSession, user: CurrentUser) -> dict[str, bool]:
     """删除命令模板；级联删 link。"""
     aids = await command_service.delete_template(db, tpl_id)
     await audit.write(
@@ -280,13 +317,17 @@ async def _aids_using_template(db, tpl_id: int) -> list[int]:
     from ..db.models.command import AccountCommandLink
 
     rows = (
-        await db.execute(
-            select(AccountCommandLink.account_id).where(
-                AccountCommandLink.template_id == tpl_id,
-                AccountCommandLink.enabled.is_(True),
+        (
+            await db.execute(
+                select(AccountCommandLink.account_id).where(
+                    AccountCommandLink.template_id == tpl_id,
+                    AccountCommandLink.enabled.is_(True),
+                )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     return list(rows)
 
 
@@ -295,9 +336,7 @@ async def _aids_using_template(db, tpl_id: int) -> list[int]:
 # ════════════════════════════════════════════════════════════
 
 
-@router.get(
-    "/api/commands/llm-providers", response_model=list[LLMProviderOut]
-)
+@router.get("/api/commands/llm-providers", response_model=list[LLMProviderOut])
 async def list_providers(db: DBSession, _user: CurrentUser) -> list[LLMProviderOut]:
     """列出全部 LLM provider；不含明文 key。"""
     await _require_ai_enabled(db)
@@ -348,12 +387,36 @@ async def reveal_provider_api_key(
     return LLMProviderApiKeyReveal(api_key=api_key)
 
 
-@router.post(
-    "/api/commands/llm-providers", response_model=LLMProviderOut
-)
-async def create_provider(
-    payload: LLMProviderCreate, db: DBSession, user: CurrentUser
-) -> LLMProviderOut:
+async def _sync_gateway_candidate_or_raise(db: Any) -> None:
+    """在 Provider 事务提交前同步同一事务可见的完整 Gateway 快照。"""
+
+    from ..services.gateway_runtime import reconcile_gateway_runtime_from_session
+    from ..util.proxy import ProxyConfigError
+
+    try:
+        gateway_status = await reconcile_gateway_runtime_from_session(db)
+    except ProxyConfigError as exc:
+        raise _llm_err("LLM_PROXY_INVALID", str(exc), 422) from None
+    if gateway_status.state == "degraded":
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "LLM_GATEWAY_UNAVAILABLE",
+                "message": gateway_status.error or "内置 Gateway 配置同步失败",
+            },
+        )
+
+
+async def _rollback_and_restore_gateway(db: Any) -> None:
+    """事务失败或取消时，用已提交 DB 真相源补偿 Gateway 候选快照。"""
+
+    from ..services.gateway_runtime import rollback_and_restore_gateway
+
+    await rollback_and_restore_gateway(db)
+
+
+@router.post("/api/commands/llm-providers", response_model=LLMProviderOut)
+async def create_provider(payload: LLMProviderCreate, db: DBSession, user: CurrentUser) -> LLMProviderOut:
     """新建 LLM provider；api_key 加密落库。
 
     通知 worker reload：理论上新建的 provider 还没有模板引用它，但用户场景里
@@ -363,16 +426,29 @@ async def create_provider(
     第二次 reload 也无害（重新拉同样数据）。
     """
     await _require_ai_enabled(db)
-    out = await command_service.create_provider(db, payload)
-    await audit.write(
-        db,
-        user.id,
-        "llm_provider.create",
-        target=f"llm_provider:{out.id}",
-        # 仅记录元信息，不记录 api_key 是否提供（元信息有限）
-        detail={"name": out.name, "provider": out.provider, "default_model": out.default_model},
-    )
-    await db.commit()
+    from ..services.gateway_runtime import gateway_configuration_transaction
+
+    gateway_changed = payload.execution_backend == "codex_gateway"
+    async with gateway_configuration_transaction(db, enabled=gateway_changed):
+        try:
+            out = await command_service.create_provider(db, payload)
+            await audit.write(
+                db,
+                user.id,
+                "llm_provider.create",
+                target=f"llm_provider:{out.id}",
+                # 仅记录元信息，不记录 api_key 是否提供（元信息有限）
+                detail={"name": out.name, "provider": out.provider, "default_model": out.default_model},
+            )
+            if gateway_changed:
+                await _sync_gateway_candidate_or_raise(db)
+            await db.commit()
+        except BaseException:
+            if gateway_changed:
+                await _rollback_and_restore_gateway(db)
+            else:
+                await db.rollback()
+            raise
     aids = await command_service.list_all_account_ids(db)
     await command_service.notify_reload(aids)
     return out
@@ -394,9 +470,7 @@ def _provider_update_audit_detail(payload: LLMProviderUpdate) -> dict[str, objec
     return detail
 
 
-@router.patch(
-    "/api/commands/llm-providers/{pid}", response_model=LLMProviderOut
-)
+@router.patch("/api/commands/llm-providers/{pid}", response_model=LLMProviderOut)
 async def update_provider(
     pid: int,
     payload: LLMProviderUpdate,
@@ -412,16 +486,36 @@ async def update_provider(
     避免 api_key / base_url / tags 改动后"TG 里没生效"。
     """
     await _require_ai_enabled(db)
-    out = await command_service.update_provider(db, pid, payload)
-    audit_detail = _provider_update_audit_detail(payload)
-    await audit.write(
-        db,
-        user.id,
-        "llm_provider.update",
-        target=f"llm_provider:{out.id}",
-        detail=audit_detail,
-    )
-    await db.commit()
+    from ..services.gateway_runtime import gateway_configuration_transaction
+
+    gateway_changed = False
+    async with gateway_configuration_transaction(db):
+        try:
+            # 必须在进程锁和 DB advisory lock 内首次读取，避免 identity map 复用旧 Key。
+            current = await command_service.get_provider_row(db, pid)
+            await db.refresh(current)
+            gateway_changed = (
+                str(getattr(current, "execution_backend", "direct") or "direct") == "codex_gateway"
+                or payload.execution_backend == "codex_gateway"
+            )
+            out = await command_service.update_provider(db, pid, payload)
+            audit_detail = _provider_update_audit_detail(payload)
+            await audit.write(
+                db,
+                user.id,
+                "llm_provider.update",
+                target=f"llm_provider:{out.id}",
+                detail=audit_detail,
+            )
+            if gateway_changed:
+                await _sync_gateway_candidate_or_raise(db)
+            await db.commit()
+        except BaseException:
+            if gateway_changed:
+                await _rollback_and_restore_gateway(db)
+            else:
+                await db.rollback()
+            raise
     # 通知所有启用了 ai 类型模板的账号热加载
     aids = await command_service.list_all_account_ids(db)
     await command_service.notify_reload(aids)
@@ -429,9 +523,7 @@ async def update_provider(
 
 
 @router.delete("/api/commands/llm-providers/{pid}")
-async def delete_provider(
-    pid: int, db: DBSession, user: CurrentUser
-) -> dict[str, bool]:
+async def delete_provider(pid: int, db: DBSession, user: CurrentUser) -> dict[str, bool]:
     """删除 LLM provider；引用此 provider 的 ai 命令调用之后会失败。
 
     同样要通知 worker reload，让 ctx.providers 把这条删掉——否则被引用的
@@ -439,15 +531,33 @@ async def delete_provider(
     "我都删了它还在用"。
     """
     await _require_ai_enabled(db)
-    aids = await command_service.list_all_account_ids(db)
-    await command_service.delete_provider(db, pid)
-    await audit.write(
-        db,
-        user.id,
-        "llm_provider.delete",
-        target=f"llm_provider:{pid}",
-    )
-    await db.commit()
+    from ..services.gateway_runtime import gateway_configuration_transaction
+
+    gateway_changed = False
+    async with gateway_configuration_transaction(db):
+        try:
+            current = await command_service.get_provider_row(db, pid)
+            await db.refresh(current)
+            gateway_changed = (
+                str(getattr(current, "execution_backend", "direct") or "direct") == "codex_gateway"
+            )
+            aids = await command_service.list_all_account_ids(db)
+            await command_service.delete_provider(db, pid)
+            await audit.write(
+                db,
+                user.id,
+                "llm_provider.delete",
+                target=f"llm_provider:{pid}",
+            )
+            if gateway_changed:
+                await _sync_gateway_candidate_or_raise(db)
+            await db.commit()
+        except BaseException:
+            if gateway_changed:
+                await _rollback_and_restore_gateway(db)
+            else:
+                await db.rollback()
+            raise
     await command_service.notify_reload(aids)
     return {"ok": True}
 
@@ -457,12 +567,8 @@ async def delete_provider(
 # ════════════════════════════════════════════════════════════
 
 
-@router.get(
-    "/api/accounts/{aid}/commands", response_model=list[AccountCommandItem]
-)
-async def list_account_commands(
-    aid: int, db: DBSession, _user: CurrentUser
-) -> list[AccountCommandItem]:
+@router.get("/api/accounts/{aid}/commands", response_model=list[AccountCommandItem])
+async def list_account_commands(aid: int, db: DBSession, _user: CurrentUser) -> list[AccountCommandItem]:
     """列出该账号已启用 + 可用全部命令模板。"""
     return await command_service.list_for_account(db, aid)
 
@@ -471,22 +577,16 @@ async def list_account_commands(
     "/api/commands/ai/enablement-summary",
     response_model=AICommandEnablementSummary,
 )
-async def ai_command_enablement_summary(
-    db: DBSession, _user: CurrentUser
-) -> AICommandEnablementSummary:
+async def ai_command_enablement_summary(db: DBSession, _user: CurrentUser) -> AICommandEnablementSummary:
     """统计已有多少账号启用了至少一条 AI 命令模板。"""
-    return AICommandEnablementSummary(
-        **await command_service.ai_command_enablement_summary(db)
-    )
+    return AICommandEnablementSummary(**await command_service.ai_command_enablement_summary(db))
 
 
 @router.post(
     "/api/accounts/{aid}/commands/{tpl_id}",
     response_model=dict,
 )
-async def enable_account_command(
-    aid: int, tpl_id: int, db: DBSession, user: CurrentUser
-) -> dict[str, bool]:
+async def enable_account_command(aid: int, tpl_id: int, db: DBSession, user: CurrentUser) -> dict[str, bool]:
     """启用某账号的某模板。"""
     await command_service.enable_for_account(db, aid, tpl_id)
     await audit.write(
@@ -504,9 +604,7 @@ async def enable_account_command(
     "/api/accounts/{aid}/commands/{tpl_id}",
     response_model=dict,
 )
-async def disable_account_command(
-    aid: int, tpl_id: int, db: DBSession, user: CurrentUser
-) -> dict[str, bool]:
+async def disable_account_command(aid: int, tpl_id: int, db: DBSession, user: CurrentUser) -> dict[str, bool]:
     """禁用某账号的某模板。"""
     await command_service.disable_for_account(db, aid, tpl_id)
     await audit.write(
@@ -529,6 +627,35 @@ def _llm_err(code: str, message: str, status: int = 400) -> HTTPException:
     return HTTPException(status_code=status, detail={"code": code, "message": message})
 
 
+def _llm_upstream_err(code: str, prefix: str, exc: BaseException) -> HTTPException:
+    """保留已核实的上游错误事实，不把包装层状态冒充真实上游状态。"""
+
+    direct_status = getattr(exc, "status_code", None)
+    upstream_status = getattr(exc, "upstream_status_code", None)
+    response_status = upstream_status or direct_status
+    if not isinstance(response_status, int) or response_status < 400 or response_status > 599:
+        response_status = 502
+    category = str(getattr(exc, "category", None) or "").strip() or None
+    detail: dict[str, Any] = {
+        "code": code,
+        "message": f"{prefix}：{llm_diagnostics.format_diagnostic_error(exc)}",
+        "status_code": direct_status,
+        "error_category": category,
+        "suggestion": llm_diagnostics.suggestion_for(category) if category else None,
+        "upstream_status_code": upstream_status,
+        "upstream_error_code": getattr(exc, "upstream_error_code", None),
+        "upstream_error_message": getattr(exc, "upstream_error_message", None),
+        "upstream_error_detail": getattr(exc, "upstream_error_detail", None),
+        "upstream_request_id": getattr(exc, "upstream_request_id", None),
+        "client_request_id": getattr(exc, "client_request_id", None),
+        "gateway_request_id": getattr(exc, "request_id", None),
+    }
+    return HTTPException(
+        status_code=response_status,
+        detail={key: value for key, value in detail.items() if value is not None},
+    )
+
+
 async def _resolve_proxy_url(db, proxy_id: int | None) -> str | None:
     """把 provider.proxy_id 翻译成 httpx 接受的 ``socks5://...`` / ``http://...`` URL。
 
@@ -536,8 +663,12 @@ async def _resolve_proxy_url(db, proxy_id: int | None) -> str | None:
     主进程内（不能 import worker.runtime——后者持有 telethon 等重依赖）。
     """
     from ..services.llm_proxy_service import resolve_proxy_url
+    from ..util.proxy import ProxyConfigError
 
-    return await resolve_proxy_url(db, proxy_id)
+    try:
+        return await resolve_proxy_url(db, proxy_id)
+    except ProxyConfigError as exc:
+        raise _llm_err("LLM_PROXY_INVALID", str(exc), 422) from None
 
 
 @router.post(
@@ -561,29 +692,92 @@ async def fetch_models_preview(
     await _require_ai_enabled(db)
 
     from ..crypto import decrypt_str
-    from ..db.models.command import LLM_API_FORMAT_ANTHROPIC_MESSAGES
+    from ..db.models.command import (
+        LLM_API_FORMAT_ANTHROPIC_MESSAGES,
+        LLM_EXECUTION_BACKEND_CODEX_GATEWAY,
+    )
 
     # api_key：优先入参，否则回落到 DB 里已存的
     api_key = (payload.api_key or "").strip()
     stored_request_headers_token: str | None = None
+    stored_row = None
     if payload.pid is not None:
         try:
-            row = await command_service.get_provider_row(db, payload.pid)
-            if not api_key and row.api_key_enc:
-                api_key = decrypt_str(row.api_key_enc) or ""
-            stored_request_headers_token = getattr(row, "request_headers_enc", None)
+            stored_row = await command_service.get_provider_row(db, payload.pid)
+            if not api_key and stored_row.api_key_enc:
+                api_key = decrypt_str(stored_row.api_key_enc) or ""
+            stored_request_headers_token = getattr(stored_row, "request_headers_enc", None)
         except Exception:  # noqa: BLE001
             # pid 错也无所谓，继续走"无 key"路径让用户看到具体的 401
             api_key = ""
+
+    if payload.execution_backend == LLM_EXECUTION_BACKEND_CODEX_GATEWAY:
+        from ..services.gateway_runtime import temporary_gateway_provider
+        from ..services.llm_client import GatewayResponsesClient, LLMError, build_client
+        from ..services.llm_dto import LLMProviderDTO
+        from ..services.llm_request_headers import encrypt_request_headers
+
+        if not api_key:
+            raise _llm_err("FETCH_GATEWAY_KEY_REQUIRED", "内置 Gateway 需要 API Key", 422)
+        base_url = normalize_base_url(
+            payload.base_url
+            or {
+                "openai": "https://api.openai.com/v1",
+                "anthropic": "https://api.anthropic.com/v1",
+                "ollama": "http://localhost:11434/v1",
+            }[payload.provider]
+        )
+        proxy_url = await _resolve_proxy_url(db, payload.proxy_id)
+        try:
+            request_headers_enc = encrypt_request_headers(
+                payload.request_headers,
+                existing_token=stored_request_headers_token,
+            )
+        except RequestHeaderConfigError as exc:
+            raise _llm_err("FETCH_REQUEST_HEADERS_INVALID", str(exc), 422) from None
+        draft = LLMProviderDTO(
+            id=0,
+            name=str(getattr(stored_row, "name", "") or "Gateway 模型预览"),
+            provider=payload.provider,
+            api_format="responses",
+            protocol_profile="codex_responses",
+            execution_backend=LLM_EXECUTION_BACKEND_CODEX_GATEWAY,
+            base_url=base_url,
+            default_model="__telepilot_models_preview__",
+            api_key_enc=encrypt_str(api_key),
+            request_headers_enc=request_headers_enc,
+            proxy_url=proxy_url,
+            models=[{"id": "__telepilot_models_preview__", "enabled": True}],
+        )
+        try:
+            async with temporary_gateway_provider(db, draft) as temporary:
+                gateway_client = build_client(temporary, request_scope=REQUEST_SCOPE_MODELS)
+                if not isinstance(gateway_client, GatewayResponsesClient):
+                    raise RuntimeError("Gateway Provider 未使用 Gateway transport")
+                gateway_ids = await gateway_client.list_models()
+        except (LLMError, RuntimeError, ValueError) as exc:
+            raise _llm_upstream_err("FETCH_GATEWAY", "Gateway 拉取模型失败", exc) from None
+        new_ids = list(dict.fromkeys(str(item).strip() for item in gateway_ids if str(item).strip()))[:200]
+        await audit.write(
+            db,
+            user.id,
+            "llm_provider.fetch_models_preview",
+            target=f"llm_provider:{payload.pid or 'new'}",
+            detail={
+                "fetched": len(new_ids),
+                "provider": payload.provider,
+                "execution_backend": "codex_gateway",
+            },
+        )
+        await db.commit()
+        return FetchModelsPreviewResponse(fetched=len(new_ids), ids=new_ids)
 
     default_base_urls = {
         "openai": "https://api.openai.com/v1",
         "anthropic": "https://api.anthropic.com/v1",
         "ollama": "http://localhost:11434/v1",
     }
-    base_url = normalize_base_url(
-        payload.base_url or default_base_urls[payload.provider]
-    )
+    base_url = normalize_base_url(payload.base_url or default_base_urls[payload.provider])
     proxy_url = await _resolve_proxy_url(db, payload.proxy_id)
 
     headers = {"Accept": "application/json"}
@@ -595,9 +789,7 @@ async def fetch_models_preview(
 
     try:
         compatibility_headers = request_headers_for_scope(
-            payload.request_headers
-            if payload.request_headers is not None
-            else stored_request_headers_token,
+            payload.request_headers if payload.request_headers is not None else stored_request_headers_token,
             REQUEST_SCOPE_MODELS,
             existing_token=stored_request_headers_token,
         )
@@ -616,10 +808,14 @@ async def fetch_models_preview(
 
     try:
         async with httpx.AsyncClient(**client_kwargs) as cli:
-            resp = await cli.get(
-                provider_models_endpoint(base_url, payload.api_format),
-                headers=headers,
-            )
+            for endpoint in provider_models_endpoints(
+                base_url,
+                payload.api_format,
+                protocol_profile=payload.protocol_profile,
+            ):
+                resp = await cli.get(endpoint, headers=headers)
+                if resp.status_code not in {404, 405}:
+                    break
     except httpx.HTTPError as exc:
         raise _llm_err(
             "FETCH_NETWORK",
@@ -696,7 +892,7 @@ async def stream_quick_verify_provider(
     except RequestHeaderConfigError as exc:
         raise _llm_err("QUICK_VERIFY_REQUEST_HEADERS", str(exc), 422) from None
 
-    async def event_source():
+    async def run_events(*, provider_override=None):
         async with llm_liveness.diagnostic_slot():
             async for event in llm_quick_verify.quick_verify_events(
                 base_url=base_url,
@@ -712,8 +908,60 @@ async def stream_quick_verify_provider(
                 max_tokens=payload.max_tokens,
                 timeout_seconds=payload.timeout_seconds,
                 request_headers=payload.request_headers,
+                provider_override=provider_override,
             ):
                 yield json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
+
+    async def event_source():
+        if payload.execution_backend != "codex_gateway":
+            stream = run_events()
+            async with aclosing(stream):
+                async for line in stream:
+                    yield line
+            return
+
+        from ..services.gateway_runtime import temporary_gateway_provider
+        from ..services.llm_dto import LLMProviderDTO
+        from ..services.llm_request_headers import encrypt_request_headers
+
+        draft = LLMProviderDTO(
+            id=0,
+            name="Gateway 快速验证",
+            provider=llm_quick_verify.suggested_provider(
+                payload.api_format,
+                base_url,
+                payload.api_key or "",
+            ),
+            api_format="responses",
+            protocol_profile="codex_responses",
+            execution_backend="codex_gateway",
+            web_search_api_format="responses",
+            base_url=base_url,
+            default_model=payload.model or "",
+            api_key_enc=encrypt_str(payload.api_key) if payload.api_key else None,
+            request_headers_enc=encrypt_request_headers(payload.request_headers),
+            proxy_url=proxy_url,
+            models=[{"id": payload.model or "", "enabled": True}],
+        )
+        try:
+            async with temporary_gateway_provider(db, draft) as temporary:
+                stream = run_events(provider_override=temporary)
+                async with aclosing(stream):
+                    async for line in stream:
+                        yield line
+        except Exception as exc:
+            yield json.dumps(
+                {
+                    "type": "error",
+                    "ok": False,
+                    "error": _temporary_backend_error(exc),
+                    "requires_model": False,
+                    "models": [],
+                    "api_format": "responses",
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ) + "\n"
 
     return StreamingResponse(
         event_source(),
@@ -761,9 +1009,7 @@ async def detect_provider_protocols(
     proxy_url = await _resolve_proxy_url(db, payload.proxy_id)
     try:
         header_source = (
-            payload.request_headers
-            if payload.request_headers is not None
-            else stored_request_headers_token
+            payload.request_headers if payload.request_headers is not None else stored_request_headers_token
         )
         liveness_headers = request_headers_for_scope(
             header_source,
@@ -866,10 +1112,13 @@ async def detect_provider_protocols(
         )
         started = _time.monotonic()
         try:
-            resp = await cli.get(
-                provider_models_endpoint(base_url, "chat_completions"),
-                headers=headers,
-            )
+            for endpoint in provider_models_endpoints(
+                base_url,
+                "chat_completions",
+            ):
+                resp = await cli.get(endpoint, headers=headers)
+                if resp.status_code not in {404, 405}:
+                    break
             latency_ms = int((_time.monotonic() - started) * 1000)
             result = _probe_result(resp, latency_ms, api_key=api_key, base_url=base_url, stage="credentials")
             await _record_protocol_probe(result, started, "models")
@@ -903,10 +1152,7 @@ async def detect_provider_protocols(
                 api_format=api_format,
             )
             result.client_identity_profile = identity_profile
-            if (
-                api_format == "responses"
-                and _probe_unsupported_parameter(resp, "max_output_tokens")
-            ):
+            if api_format == "responses" and _probe_unsupported_parameter(resp, "max_output_tokens"):
                 result.error = "该 Responses 接口拒绝 max_output_tokens；为避免失去输出与成本上限，运行时不会自动省略该参数。"
             await _record_protocol_probe(result, started, api_format)
             return result
@@ -934,6 +1180,12 @@ async def detect_provider_protocols(
                     error_category=result.error_category,
                     error=result.error,
                     suggestion=result.suggestion,
+                    upstream_status_code=result.upstream_status_code,
+                    upstream_error_code=result.upstream_error_code,
+                    upstream_error_message=result.upstream_error_message,
+                    upstream_error_detail=result.upstream_error_detail,
+                    upstream_request_id=result.upstream_request_id,
+                    client_request_id=result.client_request_id,
                 )
             )
             if best is None or result.ok:
@@ -964,13 +1216,24 @@ async def detect_provider_protocols(
             note = "Anthropic provider 需要 /messages 可用。"
     else:
         if chat.ok:
-            recommended_api_format = "chat_completions"
-            recommended_web_search_api_format = "auto" if responses.ok else "chat_completions"
+            # DeepSeek 官方文档当前仅为 deepseek-v4-flash 开放 Responses；
+            # 该模型即使同时保留 Chat 兼容入口，也应优先落到原生协议。
+            if responses.ok and _is_deepseek_v4_responses_target(base_url, model):
+                recommended_api_format = "responses"
+                recommended_web_search_api_format = "responses"
+            else:
+                recommended_api_format = "chat_completions"
+                recommended_web_search_api_format = "auto" if responses.ok else "chat_completions"
         elif responses.ok:
             recommended_api_format = "responses"
             recommended_web_search_api_format = "responses"
         response_compat_note = responses.error if responses.ok and responses.error else ""
-        if chat.ok and responses.ok:
+        if chat.ok and responses.ok and _is_deepseek_v4_responses_target(base_url, model):
+            note = (
+                "检测到 DeepSeek 官方 deepseek-v4-flash；已优先选择原生 Responses API。"
+                "该协议当前不支持 conversation、previous_response_id、图片输入等 OpenAI 扩展参数。"
+            )
+        elif chat.ok and responses.ok:
             note = (
                 "该 API 同时支持 chat/completions 与 responses；建议日常 chat，联网搜索自动切 responses。"
                 if not response_compat_note
@@ -989,6 +1252,7 @@ async def detect_provider_protocols(
 
     # 阶段 B：推荐身份 = 推荐协议下探测成功所用的身份；无则按协议 auto 默认。
     recommended_client_identity_profile: str | None = None
+    recommended_protocol_profile: str | None = None
     if recommended_api_format:
         result_by_format = {
             "chat_completions": chat,
@@ -999,9 +1263,18 @@ async def detect_provider_protocols(
         if chosen is not None and chosen.ok and chosen.client_identity_profile:
             recommended_client_identity_profile = chosen.client_identity_profile
         else:
-            recommended_client_identity_profile = default_identity_for_format(
-                recommended_api_format
-            )
+            recommended_client_identity_profile = default_identity_for_format(recommended_api_format)
+        recommended_protocol_profile = infer_protocol_profile(
+            recommended_api_format,
+            base_url=base_url,
+            model=model,
+        )
+        if (
+            recommended_api_format == "responses"
+            and recommended_client_identity_profile in {"codex_tui", "codex_desktop"}
+            and recommended_protocol_profile == "standard"
+        ):
+            recommended_protocol_profile = "codex_responses"
 
     await audit.write(
         db,
@@ -1015,6 +1288,7 @@ async def detect_provider_protocols(
             "anthropic": anthropic.ok,
             "models": models.ok,
             "recommended_identity": recommended_client_identity_profile,
+            "recommended_protocol_profile": recommended_protocol_profile,
         },
     )
     await db.commit()
@@ -1025,6 +1299,7 @@ async def detect_provider_protocols(
         anthropic_messages=anthropic,
         models=models,
         recommended_api_format=recommended_api_format,
+        recommended_protocol_profile=recommended_protocol_profile,
         recommended_client_identity_profile=recommended_client_identity_profile,
         identity_attempts=identity_attempts,
         recommended_web_search_api_format=recommended_web_search_api_format,
@@ -1122,16 +1397,26 @@ def _probe_result(
             latency_ms=latency_ms,
             stage=stage,
         )
-    body = diag.redact(resp.text, api_key=api_key or None, base_url=base_url)
-    category = diag.classify_status_code(resp.status_code, resp.text or "")
+    fact = diag.diagnose_http_error(
+        resp.status_code,
+        resp.text or "",
+        api_key=api_key or None,
+        base_url=base_url,
+    )
     return ProtocolProbeResult(
         ok=False,
         status_code=resp.status_code,
         latency_ms=latency_ms,
         stage=stage,
-        error_category=category,
-        suggestion=diag.suggestion_for(category),
-        error=f"HTTP {resp.status_code}: {body}",
+        error_category=fact.category,
+        suggestion=diag.suggestion_for(fact.category),
+        error=diag.format_diagnostic_error(fact),
+        upstream_status_code=fact.upstream_status_code,
+        upstream_error_code=fact.upstream_error_code,
+        upstream_error_message=fact.upstream_error_message,
+        upstream_error_detail=fact.upstream_error_detail,
+        upstream_request_id=fact.upstream_request_id,
+        client_request_id=fact.client_request_id,
     )
 
 
@@ -1140,14 +1425,11 @@ def _probe_unsupported_parameter(resp: httpx.Response, parameter: str) -> bool:
         return False
     lowered = (resp.text or "").lower()
     parameter = parameter.lower()
-    return (
-        parameter in lowered
-        and (
-            "unsupported parameter" in lowered
-            or "unknown parameter" in lowered
-            or "unrecognized parameter" in lowered
-            or "invalid parameter" in lowered
-        )
+    return parameter in lowered and (
+        "unsupported parameter" in lowered
+        or "unknown parameter" in lowered
+        or "unrecognized parameter" in lowered
+        or "invalid parameter" in lowered
     )
 
 
@@ -1176,9 +1458,7 @@ def _probe_error(
     "/api/commands/llm-providers/{pid}/fetch-models",
     response_model=FetchModelsResponse,
 )
-async def fetch_models(
-    pid: int, db: DBSession, user: CurrentUser
-) -> FetchModelsResponse:
+async def fetch_models(pid: int, db: DBSession, user: CurrentUser) -> FetchModelsResponse:
     """从 ``GET {base_url}/models`` 拉模型列表，合并到 provider.models。
 
     URL 选择基于 ``api_format``：
@@ -1194,15 +1474,29 @@ async def fetch_models(
     from ..crypto import decrypt_str
     from ..db.models.command import (
         LLM_API_FORMAT_ANTHROPIC_MESSAGES,
+        LLM_EXECUTION_BACKEND_CODEX_GATEWAY,
         default_api_format_for,
     )
 
     row = await command_service.get_provider_row(db, pid)
 
-    fmt = (
-        getattr(row, "api_format", None)
-        or default_api_format_for(row.provider)
-    )
+    async def _source_signature() -> tuple[object, ...]:
+        return (
+            getattr(row, "execution_backend", "direct") or "direct",
+            row.provider,
+            row.base_url,
+            row.default_model,
+            row.api_key_enc,
+            getattr(row, "request_headers_enc", None),
+            row.api_format,
+            getattr(row, "protocol_profile", None),
+            row.proxy_id,
+            await _resolve_proxy_url(db, row.proxy_id),
+        )
+
+    source_signature = await _source_signature()
+
+    fmt = getattr(row, "api_format", None) or default_api_format_for(row.provider)
     if fmt == LLM_API_FORMAT_ANTHROPIC_MESSAGES:
         raise _llm_err(
             "FETCH_NOT_SUPPORTED",
@@ -1210,109 +1504,143 @@ async def fetch_models(
             422,
         )
 
-    base_url = normalize_base_url(row.base_url or "https://api.openai.com/v1")
-    api_key = decrypt_str(row.api_key_enc) if row.api_key_enc else ""
-    proxy_url = await _resolve_proxy_url(db, row.proxy_id)
+    if getattr(row, "execution_backend", "direct") == LLM_EXECUTION_BACKEND_CODEX_GATEWAY:
+        from ..services.llm_client import GatewayResponsesClient, LLMError, build_client
 
-    headers = {"Accept": "application/json"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-    try:
-        headers = plan_request_headers(
-            system_headers=headers,
-            compatibility_headers=request_headers_for_scope(
-                getattr(row, "request_headers_enc", None),
-                REQUEST_SCOPE_MODELS,
-            ),
-        )
-    except RequestHeaderConfigError as exc:
-        raise _llm_err("FETCH_REQUEST_HEADERS_INVALID", str(exc), 422) from None
+        gateway_client = build_client(row, request_scope=REQUEST_SCOPE_MODELS)
+        if not isinstance(gateway_client, GatewayResponsesClient):
+            raise _llm_err("FETCH_GATEWAY_INVALID", "Gateway Provider 未使用 Gateway transport", 500)
+        try:
+            new_ids = await gateway_client.list_models()
+        except LLMError as exc:
+            raise _llm_upstream_err("FETCH_GATEWAY", "Gateway 拉取模型失败", exc) from None
+    else:
+        base_url = normalize_base_url(row.base_url or "https://api.openai.com/v1")
+        api_key = decrypt_str(row.api_key_enc) if row.api_key_enc else ""
+        proxy_url = await _resolve_proxy_url(db, row.proxy_id)
 
-    client_kwargs: dict[str, object] = {"timeout": httpx.Timeout(15.0, connect=8.0)}
-    if proxy_url:
-        client_kwargs["proxy"] = proxy_url
-
-    try:
-        async with httpx.AsyncClient(**client_kwargs) as cli:
-            resp = await cli.get(
-                provider_models_endpoint(base_url, fmt),
-                headers=headers,
-            )
-    except httpx.HTTPError as exc:
-        raise _llm_err(
-            "FETCH_NETWORK",
-            f"拉取失败：{type(exc).__name__}: {str(exc) or '(无详情；常见 SSL/DNS/代理问题)'}",
-            502,
-        ) from None
-
-    if resp.status_code >= 400:
-        # 把 api_key 从 body 里剥掉再返
-        body = resp.text[:300]
+        headers = {"Accept": "application/json"}
         if api_key:
-            body = body.replace(api_key, "<redacted>")
-        raise _llm_err(
-            "FETCH_HTTP",
-            f"接口返回 {resp.status_code}: {body}",
-            502,
-        )
+            headers["Authorization"] = f"Bearer {api_key}"
+        try:
+            headers = plan_request_headers(
+                system_headers=headers,
+                compatibility_headers=request_headers_for_scope(
+                    getattr(row, "request_headers_enc", None),
+                    REQUEST_SCOPE_MODELS,
+                ),
+            )
+        except RequestHeaderConfigError as exc:
+            raise _llm_err("FETCH_REQUEST_HEADERS_INVALID", str(exc), 422) from None
 
-    try:
-        data = resp.json()
-    except Exception:
-        raise _llm_err("FETCH_BAD_JSON", "响应不是合法 JSON") from None
+        client_kwargs: dict[str, object] = {"timeout": httpx.Timeout(15.0, connect=8.0)}
+        if proxy_url:
+            client_kwargs["proxy"] = proxy_url
 
-    # OpenAI 兼容：{data: [{id, object: "model", ...}, ...]}
-    items = data.get("data") if isinstance(data, dict) else None
-    if not isinstance(items, list):
-        raise _llm_err(
-            "FETCH_BAD_SHAPE",
-            f"响应缺 'data' 数组（实际顶层 keys: {list(data.keys())[:5] if isinstance(data, dict) else type(data).__name__}）",
-        )
-    new_ids: list[str] = []
-    for it in items:
-        if isinstance(it, dict) and isinstance(it.get("id"), str):
-            mid = it["id"].strip()
-            if mid:
-                new_ids.append(mid)
+        try:
+            async with httpx.AsyncClient(**client_kwargs) as cli:
+                for endpoint in provider_models_endpoints(
+                    base_url,
+                    fmt,
+                    protocol_profile=getattr(row, "protocol_profile", None),
+                ):
+                    resp = await cli.get(endpoint, headers=headers)
+                    if resp.status_code not in {404, 405}:
+                        break
+        except httpx.HTTPError as exc:
+            raise _llm_err(
+                "FETCH_NETWORK",
+                f"拉取失败：{type(exc).__name__}: {str(exc) or '(无详情；常见 SSL/DNS/代理问题)'}",
+                502,
+            ) from None
 
-    # 合并：保留已 enabled 状态 + custom 条目
-    existing: dict[str, dict] = {
-        m["id"]: m for m in (row.models or []) if isinstance(m, dict) and "id" in m
-    }
-    merged: list[dict] = []
-    for mid in new_ids:
-        if mid in existing:
-            # 老条目：保留 enabled / label，custom 改成 false（毕竟现在 fetch 拿到了）
-            old = existing[mid]
-            merged.append({
-                "id": mid,
-                "enabled": bool(old.get("enabled", False)),
-                "custom": False,
-                "label": old.get("label"),
-            })
-        else:
-            merged.append({"id": mid, "enabled": False, "custom": False, "label": None})
+        if resp.status_code >= 400:
+            body = resp.text[:300]
+            if api_key:
+                body = body.replace(api_key, "<redacted>")
+            raise _llm_err("FETCH_HTTP", f"接口返回 {resp.status_code}: {body}", 502)
 
-    # 用户的自定义条目（fetch 没拿到 ID 的）保留
-    fetched_ids = set(new_ids)
-    for mid, old in existing.items():
-        if mid not in fetched_ids and old.get("custom"):
-            merged.append({
-                "id": mid,
-                "enabled": bool(old.get("enabled", False)),
-                "custom": True,
-                "label": old.get("label"),
-            })
+        try:
+            data = resp.json()
+        except Exception:
+            raise _llm_err("FETCH_BAD_JSON", "响应不是合法 JSON") from None
 
-    row.models = merged
-    await audit.write(
-        db,
-        user.id,
-        "llm_provider.fetch_models",
-        target=f"llm_provider:{pid}",
-        detail={"fetched": len(new_ids), "total": len(merged)},
-    )
-    await db.commit()
+        items = data.get("data") if isinstance(data, dict) else None
+        if not isinstance(items, list):
+            raise _llm_err(
+                "FETCH_BAD_SHAPE",
+                f"响应缺 'data' 数组（实际顶层 keys: {list(data.keys())[:5] if isinstance(data, dict) else type(data).__name__}）",
+            )
+        new_ids = []
+        for item in items:
+            if isinstance(item, dict) and isinstance(item.get("id"), str):
+                model_id = item["id"].strip()
+                if model_id:
+                    new_ids.append(model_id)
+
+    from ..services.gateway_runtime import gateway_configuration_transaction
+
+    gateway_changed = False
+    async with gateway_configuration_transaction(db):
+        try:
+            # 网络请求期间连接源可能已改变；旧结果不能写入新 Provider 配置。
+            await db.refresh(row)
+            if await _source_signature() != source_signature:
+                raise _llm_err(
+                    "FETCH_PROVIDER_CHANGED",
+                    "拉取期间 Provider 连接配置已变化，请重新拉取模型列表",
+                    409,
+                )
+            gateway_changed = str(getattr(row, "execution_backend", "direct") or "direct") == "codex_gateway"
+            existing: dict[str, dict] = {
+                m["id"]: m for m in (row.models or []) if isinstance(m, dict) and "id" in m
+            }
+            merged: list[dict] = []
+            for mid in new_ids:
+                if mid in existing:
+                    old = existing[mid]
+                    merged.append(
+                        {
+                            **old,
+                            "id": mid,
+                            "enabled": bool(old.get("enabled", False)),
+                            "custom": False,
+                            "label": old.get("label"),
+                        }
+                    )
+                else:
+                    merged.append({"id": mid, "enabled": False, "custom": False, "label": None})
+
+            fetched_ids = set(new_ids)
+            for mid, old in existing.items():
+                if mid not in fetched_ids and old.get("custom"):
+                    merged.append(
+                        {
+                            **old,
+                            "id": mid,
+                            "enabled": bool(old.get("enabled", False)),
+                            "custom": True,
+                            "label": old.get("label"),
+                        }
+                    )
+
+            row.models = merged
+            await audit.write(
+                db,
+                user.id,
+                "llm_provider.fetch_models",
+                target=f"llm_provider:{pid}",
+                detail={"fetched": len(new_ids), "total": len(merged)},
+            )
+            if gateway_changed:
+                await _sync_gateway_candidate_or_raise(db)
+            await db.commit()
+        except BaseException:
+            if gateway_changed:
+                await _rollback_and_restore_gateway(db)
+            else:
+                await db.rollback()
+            raise
     await db.refresh(row)
     # 通知 worker reload；让下游能看到新模型清单
     aids = await command_service.list_all_account_ids(db)
@@ -1363,8 +1691,13 @@ async def test_model(
             model=payload.model.strip(),
             error=e,
         )
-        # LLMError 已脱敏
-        return TestModelResponse(ok=False, latency_ms=elapsed_ms, error=str(e))
+        return TestModelResponse(
+            ok=False,
+            latency_ms=elapsed_ms,
+            error=llm_diagnostics.format_diagnostic_error(e),
+            status_code=e.status_code,
+            **_diagnostic_result_metadata(e),
+        )
     except Exception as e:  # noqa: BLE001
         elapsed_ms = int((_time.monotonic() - started) * 1000)
         await _emit_llm_diagnostic_usage(
@@ -1418,6 +1751,62 @@ def _build_chat_test_prompt(
     return "\n".join(lines).strip()
 
 
+def _effective_liveness_overrides(
+    row: Any,
+    payload: ChatTestModelsRequest,
+) -> tuple[str, str | None, str | None]:
+    """Gateway 测活只允许真实支持的 Responses 传输且不模拟 direct 身份。"""
+
+    execution_backend = payload.execution_backend_override or str(
+        getattr(row, "execution_backend", "direct") or "direct"
+    )
+    if execution_backend == "codex_gateway":
+        return execution_backend, "responses", None
+    return execution_backend, payload.api_format_override, payload.client_identity_profile_override
+
+
+def _temporary_backend_error(exc: Exception) -> str:
+    from ..services.redactor import redact_text
+
+    detail = redact_text(f"{type(exc).__name__}: {exc}")[:300]
+    return f"临时调用方式准备失败：{detail}"
+
+
+@asynccontextmanager
+async def _liveness_provider_context(
+    db: DBSession,
+    row: Any,
+    payload: ChatTestModelsRequest,
+):
+    """为一次诊断请求装配临时执行后端，结束后恢复 Gateway 已提交快照。"""
+
+    from ..services.gateway_runtime import temporary_gateway_provider
+    from ..services.llm_dto import LLMProviderDTO
+
+    execution_backend, api_format_override, identity_override = _effective_liveness_overrides(
+        row,
+        payload,
+    )
+    provider = LLMProviderDTO.from_orm_row(row)
+    provider.proxy_url = await _resolve_proxy_url(db, getattr(row, "proxy_id", None))
+    if execution_backend == "codex_gateway":
+        provider = replace(
+            provider,
+            execution_backend="codex_gateway",
+            api_format="responses",
+            protocol_profile="codex_responses",
+            models=[
+                {"id": model, "enabled": True}
+                for model in dict.fromkeys([*provider.enabled_model_ids(), *payload.models])
+            ],
+        )
+        async with temporary_gateway_provider(db, provider) as temporary:
+            yield temporary, execution_backend, api_format_override, identity_override
+        return
+    provider = replace(provider, execution_backend="direct")
+    yield provider, execution_backend, api_format_override, identity_override
+
+
 @router.post(
     "/api/commands/llm-providers/{pid}/chat-test-models",
     response_model=ChatTestModelsResponse,
@@ -1439,128 +1828,178 @@ async def chat_test_models(
     from ..services.llm_client import LLMError, build_client
 
     row = await command_service.get_provider_row(db, pid)
-    proxy_url = await _resolve_proxy_url(db, row.proxy_id)
-    transport_metadata = _liveness_transport_metadata(
-        row,
-        api_format_override=payload.api_format_override,
-        identity_override=payload.client_identity_profile_override,
-    )
 
-    async def run_one_unbounded(model_id: str) -> ChatTestModelResult:
-        started = _time.monotonic()
-        user_prompt = _build_chat_test_prompt(payload, model_id)
-        try:
-            cli = build_client(
-                row,
-                override_model=model_id,
-                proxy_url=proxy_url,
-                api_format_override=payload.api_format_override,
-                identity_override=payload.client_identity_profile_override,
-                request_scope=REQUEST_SCOPE_LIVENESS,
-            )
-            result = await cli.complete(
-                payload.system_prompt,
-                user_prompt,
-                max_tokens=payload.max_tokens,
-                timeout_seconds=payload.timeout_seconds,
-            )
-            elapsed_ms = int((_time.monotonic() - started) * 1000)
-            await _emit_llm_diagnostic_usage(
-                provider_row=row,
-                source="diagnostic:chat-test",
-                api_format_override=payload.api_format_override,
-                identity_override=payload.client_identity_profile_override,
-                started=started,
-                system=payload.system_prompt,
-                user_prompt=user_prompt,
-                model=result.model or model_id,
-                result=result,
-            )
-            text = (result.text or "").strip()
-            return ChatTestModelResult(
-                ok=bool(text),
-                requested_model=model_id,
-                model=result.model,
-                latency_ms=elapsed_ms,
-                response=text or None,
-                preview=text[:240] if text else None,
-                input_tokens=int(result.input_tokens or 0),
-                output_tokens=int(result.output_tokens or 0),
-                empty_response=not bool(text),
-                error=None if text else "上游请求已完成，但返回文本为空。",
-                **transport_metadata,
-            )
-        except asyncio.CancelledError:
-            cancelled = LLMError("模型对话测活已取消")
+    async def execute(
+        provider: Any,
+        execution_backend: str,
+        api_format_override: str | None,
+        identity_override: str | None,
+    ) -> ChatTestModelsResponse:
+        usage_provider = replace(provider, id=pid)
+        transport_metadata = _liveness_transport_metadata(
+            provider,
+            execution_backend_override=execution_backend,
+            api_format_override=api_format_override,
+            identity_override=identity_override,
+        )
+
+        async def run_one_unbounded(model_id: str) -> ChatTestModelResult:
+            started = _time.monotonic()
+            user_prompt = _build_chat_test_prompt(payload, model_id)
+            cli = None
             try:
-                await asyncio.shield(
-                    _emit_llm_diagnostic_usage(
-                        provider_row=row,
-                        source="diagnostic:chat-test",
-                        api_format_override=payload.api_format_override,
-                        identity_override=payload.client_identity_profile_override,
-                        started=started,
-                        system=payload.system_prompt,
-                        user_prompt=user_prompt,
-                        model=model_id,
-                        error=cancelled,
-                    )
+                cli = build_client(
+                    provider,
+                    override_model=model_id,
+                    proxy_url=getattr(provider, "proxy_url", None),
+                    api_format_override=api_format_override,
+                    identity_override=identity_override,
+                    request_scope=REQUEST_SCOPE_LIVENESS,
                 )
-            except Exception:  # noqa: BLE001 - 取消路径不能被记账失败阻塞
-                pass
-            raise
-        except LLMError as exc:
-            elapsed_ms = int((_time.monotonic() - started) * 1000)
-            await _emit_llm_diagnostic_usage(
-                provider_row=row,
-                source="diagnostic:chat-test",
-                api_format_override=payload.api_format_override,
-                identity_override=payload.client_identity_profile_override,
-                started=started,
-                system=payload.system_prompt,
-                user_prompt=user_prompt,
-                model=model_id,
-                error=exc,
-            )
-            return ChatTestModelResult(
-                ok=False,
-                requested_model=model_id,
-                latency_ms=elapsed_ms,
-                error=str(exc),
-                status_code=exc.status_code,
-                **transport_metadata,
-            )
-        except Exception as exc:  # noqa: BLE001
-            elapsed_ms = int((_time.monotonic() - started) * 1000)
-            await _emit_llm_diagnostic_usage(
-                provider_row=row,
-                source="diagnostic:chat-test",
-                api_format_override=payload.api_format_override,
-                identity_override=payload.client_identity_profile_override,
-                started=started,
-                system=payload.system_prompt,
-                user_prompt=user_prompt,
-                model=model_id,
-                error=exc,
-            )
-            return ChatTestModelResult(
-                ok=False,
-                requested_model=model_id,
-                latency_ms=elapsed_ms,
-                error=f"{type(exc).__name__}: {str(exc)[:200]}",
-                **transport_metadata,
-            )
+                result = await cli.complete(
+                    payload.system_prompt,
+                    user_prompt,
+                    max_tokens=payload.max_tokens,
+                    timeout_seconds=payload.timeout_seconds,
+                )
+                elapsed_ms = int((_time.monotonic() - started) * 1000)
+                await _emit_llm_diagnostic_usage(
+                    provider_row=usage_provider,
+                    source="diagnostic:chat-test",
+                    execution_backend_override=execution_backend,
+                    api_format_override=api_format_override,
+                    identity_override=identity_override,
+                    started=started,
+                    system=payload.system_prompt,
+                    user_prompt=user_prompt,
+                    model=result.model or model_id,
+                    result=result,
+                )
+                text = (result.text or "").strip()
+                return ChatTestModelResult(
+                    ok=bool(text),
+                    requested_model=model_id,
+                    model=result.model,
+                    latency_ms=elapsed_ms,
+                    response=text or None,
+                    preview=text[:240] if text else None,
+                    input_tokens=int(result.input_tokens or 0),
+                    output_tokens=int(result.output_tokens or 0),
+                    empty_response=not bool(text),
+                    error=None if text else "上游请求已完成，但返回文本为空。",
+                    **transport_metadata,
+                    **_gateway_transport_metadata(result),
+                )
+            except asyncio.CancelledError:
+                cancelled = LLMError(
+                    "模型对话测活已取消",
+                    category=llm_diagnostics.DIAG_CANCELLED,
+                    **_gateway_error_metadata(cli),
+                )
+                try:
+                    await asyncio.shield(
+                        _emit_llm_diagnostic_usage(
+                            provider_row=usage_provider,
+                            source="diagnostic:chat-test",
+                            execution_backend_override=execution_backend,
+                            api_format_override=api_format_override,
+                            identity_override=identity_override,
+                            started=started,
+                            system=payload.system_prompt,
+                            user_prompt=user_prompt,
+                            model=model_id,
+                            error=cancelled,
+                        )
+                    )
+                except Exception:  # noqa: BLE001 - 取消路径不能被记账失败阻塞
+                    pass
+                raise
+            except LLMError as exc:
+                elapsed_ms = int((_time.monotonic() - started) * 1000)
+                await _emit_llm_diagnostic_usage(
+                    provider_row=usage_provider,
+                    source="diagnostic:chat-test",
+                    execution_backend_override=execution_backend,
+                    api_format_override=api_format_override,
+                    identity_override=identity_override,
+                    started=started,
+                    system=payload.system_prompt,
+                    user_prompt=user_prompt,
+                    model=model_id,
+                    error=exc,
+                )
+                return ChatTestModelResult(
+                    ok=False,
+                    requested_model=model_id,
+                    latency_ms=elapsed_ms,
+                    error=llm_diagnostics.format_diagnostic_error(exc),
+                    status_code=exc.status_code,
+                    **_diagnostic_result_metadata(exc),
+                    **transport_metadata,
+                    **_gateway_transport_metadata(exc),
+                )
+            except Exception as exc:  # noqa: BLE001
+                elapsed_ms = int((_time.monotonic() - started) * 1000)
+                await _emit_llm_diagnostic_usage(
+                    provider_row=usage_provider,
+                    source="diagnostic:chat-test",
+                    execution_backend_override=execution_backend,
+                    api_format_override=api_format_override,
+                    identity_override=identity_override,
+                    started=started,
+                    system=payload.system_prompt,
+                    user_prompt=user_prompt,
+                    model=model_id,
+                    error=exc,
+                )
+                return ChatTestModelResult(
+                    ok=False,
+                    requested_model=model_id,
+                    latency_ms=elapsed_ms,
+                    error=f"{type(exc).__name__}: {str(exc)[:200]}",
+                    **transport_metadata,
+                )
 
-    async def run_one(model_id: str) -> ChatTestModelResult:
-        async with llm_liveness.diagnostic_slot():
-            return await run_one_unbounded(model_id)
+        async def run_one(model_id: str) -> ChatTestModelResult:
+            async with llm_liveness.diagnostic_slot():
+                return await run_one_unbounded(model_id)
 
-    results = await asyncio.gather(*(run_one(model_id) for model_id in payload.models))
-    return ChatTestModelsResponse(
-        provider_id=pid,
-        provider_name=row.name,
-        results=list(results),
-    )
+        results = await asyncio.gather(*(run_one(model_id) for model_id in payload.models))
+        return ChatTestModelsResponse(
+            provider_id=pid,
+            provider_name=row.name,
+            results=list(results),
+        )
+
+    try:
+        async with _liveness_provider_context(db, row, payload) as context:
+            return await execute(*context)
+    except Exception as exc:  # 临时 Gateway 尚未就绪时仍返回可展示的逐模型结果
+        execution_backend, api_format_override, identity_override = _effective_liveness_overrides(
+            row,
+            payload,
+        )
+        transport_metadata = _liveness_transport_metadata(
+            row,
+            execution_backend_override=execution_backend,
+            api_format_override=api_format_override,
+            identity_override=identity_override,
+        )
+        error = _temporary_backend_error(exc)
+        return ChatTestModelsResponse(
+            provider_id=pid,
+            provider_name=row.name,
+            results=[
+                ChatTestModelResult(
+                    ok=False,
+                    requested_model=model_id,
+                    latency_ms=0,
+                    error=error,
+                    **transport_metadata,
+                )
+                for model_id in payload.models
+            ],
+        )
 
 
 def _chat_stream_can_fallback(exc: Exception) -> bool:
@@ -1577,9 +2016,10 @@ def _chat_stream_can_fallback(exc: Exception) -> bool:
     if exc.status_code in {405, 406, 415, 501}:
         return True
     message = str(exc).lower()
-    return exc.status_code in {400, 422} and "stream" in message and any(
-        marker in message
-        for marker in ("不支持", "unsupported", "not support", "unknown parameter")
+    return (
+        exc.status_code in {400, 422}
+        and "stream" in message
+        and any(marker in message for marker in ("不支持", "unsupported", "not support", "unknown parameter"))
     )
 
 
@@ -1597,14 +2037,67 @@ async def stream_chat_test_models(
     from ..services.llm_client import LLMError, LLMResult, build_client
 
     row = await command_service.get_provider_row(db, pid)
-    proxy_url = await _resolve_proxy_url(db, row.proxy_id)
-    transport_metadata = _liveness_transport_metadata(
-        row,
-        api_format_override=payload.api_format_override,
-        identity_override=payload.client_identity_profile_override,
-    )
 
     async def event_source():
+        try:
+            async with _liveness_provider_context(db, row, payload) as context:
+                provider, execution_backend, api_format_override, identity_override = context
+                transport_metadata = _liveness_transport_metadata(
+                    provider,
+                    execution_backend_override=execution_backend,
+                    api_format_override=api_format_override,
+                    identity_override=identity_override,
+                )
+                stream = _stream_with_provider(
+                    provider,
+                    execution_backend,
+                    api_format_override,
+                    identity_override,
+                    transport_metadata,
+                )
+                # StreamingResponse 被客户端关闭时，显式关闭内层 generator，确保
+                # 其 finally 能取消模型任务并记录一次 cancelled 用量。
+                async with aclosing(stream):
+                    async for event in stream:
+                        yield event
+        except Exception as exc:
+            execution_backend, api_format_override, identity_override = _effective_liveness_overrides(
+                row,
+                payload,
+            )
+            transport_metadata = _liveness_transport_metadata(
+                row,
+                execution_backend_override=execution_backend,
+                api_format_override=api_format_override,
+                identity_override=identity_override,
+            )
+            error = _temporary_backend_error(exc)
+            for model_id in payload.models:
+                result = ChatTestModelResult(
+                    ok=False,
+                    requested_model=model_id,
+                    latency_ms=0,
+                    error=error,
+                    **transport_metadata,
+                )
+                yield json.dumps(
+                    {
+                        "type": "error",
+                        "requested_model": model_id,
+                        "result": result.model_dump(mode="json"),
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ) + "\n"
+
+    async def _stream_with_provider(
+        provider: Any,
+        execution_backend: str,
+        api_format_override: str | None,
+        identity_override: str | None,
+        transport_metadata: dict[str, str | None],
+    ):
+        usage_provider = replace(provider, id=pid)
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=256)
 
         async def emit(event: dict[str, Any]) -> None:
@@ -1623,6 +2116,7 @@ async def stream_chat_test_models(
             stream_fallback = False
             fallback_response_consumed = False
             stream_terminal_received = False
+            gateway_outcome: object | None = None
             await emit(
                 {
                     "type": "start",
@@ -1633,11 +2127,11 @@ async def stream_chat_test_models(
             )
             try:
                 cli = build_client(
-                    row,
+                    provider,
                     override_model=model_id,
-                    proxy_url=proxy_url,
-                    api_format_override=payload.api_format_override,
-                    identity_override=payload.client_identity_profile_override,
+                    proxy_url=getattr(provider, "proxy_url", None),
+                    api_format_override=api_format_override,
+                    identity_override=identity_override,
                     request_scope=REQUEST_SCOPE_LIVENESS,
                 )
                 try:
@@ -1657,6 +2151,7 @@ async def stream_chat_test_models(
                                     output_tokens = int(chunk.output_tokens)
                                 if chunk.done:
                                     stream_terminal_received = True
+                                    gateway_outcome = chunk
                                 if getattr(chunk, "stream_fallback", False):
                                     streaming = False
                                     stream_fallback = True
@@ -1672,9 +2167,7 @@ async def stream_chat_test_models(
                                             "requested_model": model_id,
                                             "delta": chunk.delta,
                                             "model": actual_model,
-                                            "stream_fallback": bool(
-                                                getattr(chunk, "stream_fallback", False)
-                                            ),
+                                            "stream_fallback": bool(getattr(chunk, "stream_fallback", False)),
                                         }
                                     )
                         except (LLMError, NotImplementedError) as exc:
@@ -1701,6 +2194,7 @@ async def stream_chat_test_models(
                             actual_model = completed.model or actual_model
                             input_tokens = int(completed.input_tokens or 0)
                             output_tokens = int(completed.output_tokens or 0)
+                            gateway_outcome = completed
                         elif not stream_terminal_received:
                             raise LLMError(
                                 "模型流式响应提前结束，没有返回最终状态。",
@@ -1716,12 +2210,19 @@ async def stream_chat_test_models(
                     model=actual_model or model_id,
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
+                    execution_backend=str(
+                        getattr(gateway_outcome, "execution_backend", "direct") or "direct"
+                    ),
+                    gateway_version=getattr(gateway_outcome, "gateway_version", None),
+                    gateway_request_id=getattr(gateway_outcome, "gateway_request_id", None),
+                    gateway_stage=getattr(gateway_outcome, "gateway_stage", None),
                 )
                 await _emit_llm_diagnostic_usage(
-                    provider_row=row,
+                    provider_row=usage_provider,
                     source="diagnostic:chat-test",
-                    api_format_override=payload.api_format_override,
-                    identity_override=payload.client_identity_profile_override,
+                    execution_backend_override=execution_backend,
+                    api_format_override=api_format_override,
+                    identity_override=identity_override,
                     started=started,
                     system=payload.system_prompt,
                     user_prompt=user_prompt,
@@ -1742,6 +2243,7 @@ async def stream_chat_test_models(
                     streaming=streaming,
                     stream_fallback=stream_fallback,
                     **transport_metadata,
+                    **_gateway_transport_metadata(gateway_outcome),
                 )
                 await emit(
                     {
@@ -1756,15 +2258,24 @@ async def stream_chat_test_models(
                     model=actual_model or model_id,
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
+                    execution_backend=str(getattr(cli, "execution_backend", "direct") or "direct"),
+                    gateway_version=getattr(cli, "gateway_version", None),
+                    gateway_request_id=getattr(cli, "gateway_request_id", None),
+                    gateway_stage=getattr(cli, "gateway_stage", None),
                 )
-                cancelled = LLMError("模型流式测活已取消")
+                cancelled = LLMError(
+                    "模型流式测活已取消",
+                    category=llm_diagnostics.DIAG_CANCELLED,
+                    **_gateway_error_metadata(cli),
+                )
                 try:
                     await asyncio.shield(
                         _emit_llm_diagnostic_usage(
-                            provider_row=row,
+                            provider_row=usage_provider,
                             source="diagnostic:chat-test",
-                            api_format_override=payload.api_format_override,
-                            identity_override=payload.client_identity_profile_override,
+                            execution_backend_override=execution_backend,
+                            api_format_override=api_format_override,
+                            identity_override=identity_override,
                             started=started,
                             system=payload.system_prompt,
                             user_prompt=user_prompt,
@@ -1779,10 +2290,11 @@ async def stream_chat_test_models(
             except LLMError as exc:
                 elapsed_ms = int((_time.monotonic() - started) * 1000)
                 await _emit_llm_diagnostic_usage(
-                    provider_row=row,
+                    provider_row=usage_provider,
                     source="diagnostic:chat-test",
-                    api_format_override=payload.api_format_override,
-                    identity_override=payload.client_identity_profile_override,
+                    execution_backend_override=execution_backend,
+                    api_format_override=api_format_override,
+                    identity_override=identity_override,
                     started=started,
                     system=payload.system_prompt,
                     user_prompt=user_prompt,
@@ -1795,11 +2307,13 @@ async def stream_chat_test_models(
                     model=actual_model,
                     latency_ms=elapsed_ms,
                     response="".join(text_parts).strip() or None,
-                    error=str(exc),
+                    error=llm_diagnostics.format_diagnostic_error(exc),
                     status_code=exc.status_code,
+                    **_diagnostic_result_metadata(exc),
                     streaming=streaming,
                     stream_fallback=stream_fallback,
                     **transport_metadata,
+                    **_gateway_transport_metadata(exc),
                 )
                 await emit(
                     {
@@ -1811,10 +2325,11 @@ async def stream_chat_test_models(
             except Exception as exc:  # noqa: BLE001
                 elapsed_ms = int((_time.monotonic() - started) * 1000)
                 await _emit_llm_diagnostic_usage(
-                    provider_row=row,
+                    provider_row=usage_provider,
                     source="diagnostic:chat-test",
-                    api_format_override=payload.api_format_override,
-                    identity_override=payload.client_identity_profile_override,
+                    execution_backend_override=execution_backend,
+                    api_format_override=api_format_override,
+                    identity_override=identity_override,
                     started=started,
                     system=payload.system_prompt,
                     user_prompt=user_prompt,
@@ -1873,9 +2388,7 @@ async def stream_chat_test_models(
 # ════════════════════════════════════════════════════════════
 
 
-async def _load_liveness_provider_rows(
-    db: DBSession, only_provider_ids: list[int] | None
-) -> list[Any]:
+async def _load_liveness_provider_rows(db: DBSession, only_provider_ids: list[int] | None) -> list[Any]:
     """加载测活范围内的 Provider 行（None=全部；否则按 id 过滤）。"""
     from sqlalchemy import select
 
@@ -1937,8 +2450,18 @@ def _liveness_result_items(raw: list[dict[str, Any]]) -> list[LivenessResultItem
             status_code=r.get("status_code"),
             error_category=r.get("error_category"),
             suggestion=r.get("suggestion"),
+            upstream_status_code=r.get("upstream_status_code"),
+            upstream_error_code=r.get("upstream_error_code"),
+            upstream_error_message=r.get("upstream_error_message"),
+            upstream_error_detail=r.get("upstream_error_detail"),
+            upstream_request_id=r.get("upstream_request_id"),
+            client_request_id=r.get("client_request_id"),
             client_identity_profile=r.get("client_identity_profile"),
             effective_api_format=r.get("effective_api_format"),
+            execution_backend=r.get("execution_backend"),
+            gateway_version=r.get("gateway_version"),
+            gateway_request_id=r.get("gateway_request_id"),
+            gateway_stage=r.get("gateway_stage"),
             skipped=bool(r.get("skipped")),
         )
         for r in raw
@@ -1948,18 +2471,99 @@ def _liveness_result_items(raw: list[dict[str, Any]]) -> list[LivenessResultItem
 def _liveness_transport_metadata(
     row: Any,
     *,
+    execution_backend_override: str | None = None,
     api_format_override: str | None = None,
     identity_override: str | None = None,
 ) -> dict[str, str | None]:
     """返回本次测活真正采用的协议与客户端身份。"""
-    effective_api_format = api_format_override or getattr(row, "api_format", None)
+    from ..db.models.command import default_api_format_for
+
+    execution_backend = execution_backend_override or str(
+        getattr(row, "execution_backend", "direct") or "direct"
+    )
+    if execution_backend == "codex_gateway":
+        return {
+            "effective_api_format": "responses",
+            "client_identity_profile": "gateway_managed",
+            "execution_backend": execution_backend,
+        }
+    effective_api_format = (
+        api_format_override
+        or getattr(row, "api_format", None)
+        or default_api_format_for(getattr(row, "provider", "openai"))
+    )
+    protocol_profile = resolve_protocol_profile(
+        effective_api_format,
+        getattr(row, "protocol_profile", None),
+        base_url=getattr(row, "base_url", None),
+        model=getattr(row, "default_model", None),
+    )
     effective_identity = llm_identity.resolve_identity(
         identity_override or getattr(row, "client_identity_profile", None),
         effective_api_format,
+        recommended_profile=protocol_profile.recommended_identity,
     ).profile
     return {
         "effective_api_format": effective_api_format,
         "client_identity_profile": effective_identity,
+        "execution_backend": execution_backend,
+    }
+
+
+def _gateway_transport_metadata(outcome: object | None) -> dict[str, str | None]:
+    if str(getattr(outcome, "execution_backend", "") or "") != "codex_gateway":
+        return {
+            "gateway_version": None,
+            "gateway_request_id": None,
+            "gateway_stage": None,
+        }
+    return {
+        "gateway_version": str(getattr(outcome, "gateway_version", None) or "").strip() or None,
+        "gateway_request_id": str(
+            getattr(outcome, "gateway_request_id", None) or getattr(outcome, "request_id", None) or ""
+        ).strip()
+        or None,
+        "gateway_stage": str(getattr(outcome, "gateway_stage", None) or "").strip() or None,
+    }
+
+
+def _gateway_error_metadata(outcome: object | None) -> dict[str, str | None]:
+    metadata = _gateway_transport_metadata(outcome)
+    return {
+        "gateway_version": metadata["gateway_version"],
+        "request_id": metadata["gateway_request_id"],
+        "gateway_stage": metadata["gateway_stage"],
+    }
+
+
+def _diagnostic_result_metadata(outcome: object | None) -> dict[str, Any]:
+    """返回已经核实、可安全展示的上游错误事实。"""
+
+    category = str(getattr(outcome, "category", None) or "").strip() or None
+    return {
+        "error_category": category,
+        "suggestion": llm_diagnostics.suggestion_for(category) if category else None,
+        "upstream_status_code": getattr(outcome, "upstream_status_code", None),
+        "upstream_error_code": str(
+            getattr(outcome, "upstream_error_code", None) or ""
+        ).strip()
+        or None,
+        "upstream_error_message": str(
+            getattr(outcome, "upstream_error_message", None) or ""
+        ).strip()
+        or None,
+        "upstream_error_detail": str(
+            getattr(outcome, "upstream_error_detail", None) or ""
+        ).strip()
+        or None,
+        "upstream_request_id": str(
+            getattr(outcome, "upstream_request_id", None) or ""
+        ).strip()
+        or None,
+        "client_request_id": str(
+            getattr(outcome, "client_request_id", None) or ""
+        ).strip()
+        or None,
     }
 
 
@@ -2022,8 +2626,7 @@ async def full_liveness_run(
             detail={
                 "code": "LIVENESS_TASK_LIMIT",
                 "message": (
-                    f"单次测活最多允许 {llm_liveness.MAX_LIVENESS_TASKS} 个模型，"
-                    "请缩小 Provider 或模型范围"
+                    f"单次测活最多允许 {llm_liveness.MAX_LIVENESS_TASKS} 个模型，请缩小 Provider 或模型范围"
                 ),
             },
         )
@@ -2033,9 +2636,7 @@ async def full_liveness_run(
             status_code=409,
             detail={
                 "code": "LIVENESS_CONFIRMATION_REQUIRED",
-                "message": (
-                    f"本次将测试 {len(tasks)} 个模型，请先确认真实上游额度消耗"
-                ),
+                "message": (f"本次将测试 {len(tasks)} 个模型，请先确认真实上游额度消耗"),
                 "task_total": len(tasks),
             },
         )
@@ -2085,11 +2686,7 @@ async def full_liveness_run(
                 result=result,
             )
             text = (result.text or "").strip()
-            status = (
-                llm_liveness.diag.DIAG_HEALTHY
-                if text
-                else llm_liveness.diag.DIAG_EMPTY_RESPONSE
-            )
+            status = llm_liveness.diag.DIAG_HEALTHY if text else llm_liveness.diag.DIAG_EMPTY_RESPONSE
             return (
                 status,
                 {
@@ -2098,10 +2695,15 @@ async def full_liveness_run(
                     "output_tokens": int(result.output_tokens or 0),
                     "preview": text[:240] or None,
                     **transport_metadata,
+                    **_gateway_transport_metadata(result),
                 },
             )
         except asyncio.CancelledError:
-            cancelled = LLMError("全局模型巡检已取消")
+            cancelled = LLMError(
+                "全局模型巡检已取消",
+                category=llm_diagnostics.DIAG_CANCELLED,
+                **_gateway_error_metadata(cli),
+            )
             try:
                 await asyncio.shield(
                     _emit_llm_diagnostic_usage(
@@ -2133,11 +2735,11 @@ async def full_liveness_run(
                 status,
                 {
                     "latency_ms": elapsed_ms,
-                    "error": llm_liveness.diag.redact(str(exc)),
+                    "error": llm_diagnostics.format_diagnostic_error(exc),
                     "status_code": exc.status_code,
-                    "error_category": status,
-                    "suggestion": llm_liveness.diag.suggestion_for(status),
+                    **_diagnostic_result_metadata(exc),
                     **transport_metadata,
+                    **_gateway_transport_metadata(exc),
                 },
             )
         except Exception as exc:  # noqa: BLE001
@@ -2163,9 +2765,7 @@ async def full_liveness_run(
                 },
             )
 
-    def on_result(
-        _task: llm_liveness.LivenessTask, _status: str, entry: dict[str, Any]
-    ) -> None:
+    def on_result(_task: llm_liveness.LivenessTask, _status: str, entry: dict[str, Any]) -> None:
         job.results.append(entry)
         job.updated_at = _time.monotonic()
 
@@ -2205,9 +2805,7 @@ async def full_liveness_run(
     "/api/commands/llm-providers/liveness/{run_id}",
     response_model=FullLivenessRunResponse,
 )
-async def full_liveness_status(
-    run_id: str, _user: CurrentUser
-) -> FullLivenessRunResponse:
+async def full_liveness_status(run_id: str, _user: CurrentUser) -> FullLivenessRunResponse:
     """轮询测活 Job：返回当前已完成的逐项结果与汇总计数。"""
     job = llm_liveness.liveness_jobs.get(run_id)
     if job is None:
@@ -2219,9 +2817,7 @@ async def full_liveness_status(
     "/api/commands/llm-providers/liveness/{run_id}/cancel",
     response_model=FullLivenessRunResponse,
 )
-async def full_liveness_cancel(
-    run_id: str, _user: CurrentUser
-) -> FullLivenessRunResponse:
+async def full_liveness_cancel(run_id: str, _user: CurrentUser) -> FullLivenessRunResponse:
     """真实取消测活：停止发起新任务，并 cancel 在途 asyncio Task（中断上游请求）。"""
     job = llm_liveness.liveness_jobs.cancel(run_id)
     if job is None:
@@ -2231,16 +2827,13 @@ async def full_liveness_cancel(
 
 def _liveness_status_from_error(exc: Any) -> str:
     """把 LLMError 映射为诊断状态（用于测活结果分类）。"""
-    text = str(exc).lower()
-    if "429" in text or "rate" in text or "too many" in text:
-        return llm_liveness.diag.DIAG_RATE_LIMITED
-    if "401" in text or "unauthor" in text or "api key" in text:
-        return llm_liveness.diag.DIAG_AUTH_FAILED
-    if "timeout" in text or "timed out" in text:
-        return llm_liveness.diag.DIAG_TIMEOUT
-    if "空" in text or "empty" in text:
-        return llm_liveness.diag.DIAG_EMPTY_RESPONSE
-    return llm_liveness.diag.DIAG_UPSTREAM_ERROR
+    category = str(getattr(exc, "category", None) or "").strip()
+    if category in llm_liveness.diag.ALL_DIAGNOSTIC_STATUSES:
+        return category
+    return llm_liveness.diag.classify_message(
+        str(exc),
+        retryable=bool(getattr(exc, "retryable", False)),
+    )
 
 
 # ═══════════════ 客户端身份 UA 版本配置（0.57.0 收口） ═══════════════
@@ -2392,9 +2985,7 @@ async def _detect_grok_cli_latest() -> tuple[str | None, str | None]:
     latest = _parse_grok_update_check(output)
     if latest:
         return latest, None
-    return await _grok_detection_fallback(
-        "grok update --check 未返回可识别的版本号"
-    )
+    return await _grok_detection_fallback("grok update --check 未返回可识别的版本号")
 
 
 @router.post(
@@ -2406,9 +2997,7 @@ async def detect_client_identity_versions(_user: CurrentUser) -> ClientIdentityV
     current = llm_identity.current_client_versions()
     meta = llm_identity.version_key_metadata()
     detect_targets = [(k, str(v["registry"])) for k, v in meta.items() if v.get("registry")]
-    results = await asyncio.gather(
-        *(_detect_registry_latest(reg) for _, reg in detect_targets)
-    )
+    results = await asyncio.gather(*(_detect_registry_latest(reg) for _, reg in detect_targets))
     items: list[ClientIdentityVersionDetectItem] = []
     for (key, _registry), (latest, error) in zip(detect_targets, results, strict=True):
         cur = current.get(key, "")
@@ -2465,6 +3054,16 @@ async def update_client_identity_versions(
 
     # 立即应用到进程内目录，使新版本对后续请求生效。
     llm_identity.apply_version_overrides(cleaned)
+    # Gateway 与 Provider 直连共用同一份 Codex 版本真相源。版本覆盖保存后立即
+    # 重新生成配置快照；已运行的模型列表、测活与 Agent 请求无需重启即可生效。
+    from ..services.gateway_runtime import reconcile_gateway_runtime
+
+    try:
+        gateway_status = await reconcile_gateway_runtime()
+        if gateway_status.state == "degraded":
+            log.warning("Codex 版本保存后 Gateway 热同步未就绪：%s", gateway_status.error)
+    except Exception:  # noqa: BLE001 - 设置已提交，运行状态由健康页明确展示
+        log.exception("Codex 版本保存后 Gateway 热同步失败")
     # Telegram 命令与插件运行在 multiprocessing spawn worker 中，各自持有独立的
     # 身份目录。复用 reload_commands 让全部账号 worker 从 DB 重载版本覆盖；Redis
     # 消息未确认时仍会由 worker 的周期 reconcile 最终收敛。

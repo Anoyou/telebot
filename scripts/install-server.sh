@@ -68,6 +68,37 @@ ensure_base_packages() {
   warn "当前系统不是 apt 系发行版，跳过自动安装基础依赖。"
 }
 
+ensure_github_cli() {
+  if command -v gh >/dev/null 2>&1 && gh attestation verify --help >/dev/null 2>&1; then
+    ok "GitHub CLI attestation 验证能力已存在"
+    return 0
+  fi
+  command -v apt-get >/dev/null 2>&1 \
+    || die "需要安装支持 attestation 的 GitHub CLI（gh）后才能验证预构建镜像"
+
+  log "从 GitHub 官方 APT 仓库安装 GitHub CLI"
+  local key_file fingerprints
+  key_file="$(mktemp)"
+  curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o "$key_file"
+  fingerprints="$(gpg --show-keys --with-colons "$key_file" 2>/dev/null | awk -F: '$1 == "fpr" {print $10}')"
+  if ! grep -Fxq "2C6106201985B60E6C7AC87323F3D4EA75716059" <<<"$fingerprints" \
+    && ! grep -Fxq "7F38BBB59D064DBCB3D84D725612B36462313325" <<<"$fingerprints"; then
+    rm -f "$key_file"
+    die "GitHub CLI APT key fingerprint 校验失败"
+  fi
+  "${SUDO[@]}" install -m 0755 -d /etc/apt/keyrings /etc/apt/sources.list.d
+  "${SUDO[@]}" install -m 0644 "$key_file" /etc/apt/keyrings/githubcli-archive-keyring.gpg
+  rm -f "$key_file"
+  printf 'deb [arch=%s signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main\n' \
+    "$(dpkg --print-architecture)" \
+    | "${SUDO[@]}" tee /etc/apt/sources.list.d/github-cli.list >/dev/null
+  "${SUDO[@]}" apt-get update
+  apt_install gh
+  gh attestation verify --help >/dev/null 2>&1 \
+    || die "安装的 GitHub CLI 不支持 attestation 验证"
+  ok "GitHub CLI attestation 验证能力就绪"
+}
+
 docker_repo_id() {
   local id="" id_like="" ubuntu_codename="" version_codename=""
   # shellcheck disable=SC1091
@@ -325,11 +356,13 @@ create_env() {
   log "生成生产 .env"
   cp .env.example .env
 
-  local master_key jwt_secret updater_token pg_password pg_password_url
+  local master_key jwt_secret updater_token pg_password pg_password_url image_channel
   master_key="$(random_fernet_key)"
   jwt_secret="$(random_token)"
   updater_token="$(random_token)"
   pg_password="$(random_password)"
+  image_channel="stable"
+  [[ "$TELEPILOT_BRANCH" == "Beta" ]] && image_channel="beta"
   pg_password_url="$(
     python3 - "$pg_password" <<'PY'
 from urllib.parse import quote
@@ -338,12 +371,12 @@ print(quote(sys.argv[1], safe=""))
 PY
   )"
 
-  python3 - "$master_key" "$jwt_secret" "$updater_token" "$pg_password" "$pg_password_url" "$WEB_PORT_PUBLISH" "$COOKIE_SECURE" <<'PY'
+  python3 - "$master_key" "$jwt_secret" "$updater_token" "$pg_password" "$pg_password_url" "$WEB_PORT_PUBLISH" "$COOKIE_SECURE" "$image_channel" <<'PY'
 import pathlib
 import re
 import sys
 
-master_key, jwt_secret, updater_token, pg_password, pg_password_url, web_port, cookie_secure = sys.argv[1:8]
+master_key, jwt_secret, updater_token, pg_password, pg_password_url, web_port, cookie_secure, image_channel = sys.argv[1:9]
 p = pathlib.Path(".env")
 text = p.read_text()
 
@@ -362,7 +395,11 @@ put("UPDATER_TOKEN", updater_token)
 put("POSTGRES_PASSWORD", pg_password)
 put("DATABASE_URL", f"postgresql+asyncpg://telebot:{pg_password_url}@postgres:5432/telebot")
 put("COOKIE_SECURE", cookie_secure.lower())
+put("TRUST_FORWARDED_FOR", "true")
 put("WEB_PORT_PUBLISH", web_port)
+put("TELEPILOT_WEB_IMAGE", f"ghcr.io/anoyou/telepilot-web:{image_channel}")
+put("TELEPILOT_FRONTEND_IMAGE", f"ghcr.io/anoyou/telepilot-frontend:{image_channel}")
+put("TELEPILOT_UPDATER_IMAGE", f"ghcr.io/anoyou/telepilot-updater:{image_channel}")
 p.write_text(text)
 PY
 
@@ -373,10 +410,15 @@ PY
 run_prod_up() {
   cd "$TELEPILOT_DIR"
   log "启动 TelePilot 生产栈"
+  local prod_up_args=()
+  if [[ -n "$TELEPILOT_BRANCH" && "$TELEPILOT_BRANCH" != "main" && "$TELEPILOT_BRANCH" != "Beta" ]]; then
+    warn "自定义分支没有官方预构建镜像，首次安装改用维护者本地构建模式。"
+    prod_up_args+=("PROD_UP_ARGS=--source-build")
+  fi
   if [[ "${DOCKER_WITH_SUDO:-false}" == true ]]; then
-    "${SUDO[@]}" make prod-up
+    "${SUDO[@]}" make prod-up "${prod_up_args[@]}"
   else
-    make prod-up
+    make prod-up "${prod_up_args[@]}"
   fi
 }
 
@@ -403,6 +445,7 @@ print_done() {
 }
 
 ensure_base_packages
+ensure_github_cli
 ensure_docker
 sync_repo
 pick_publish_port

@@ -23,6 +23,11 @@ except ModuleNotFoundError:  # Python 3.10 生产宿主没有 tomllib
 
 _DOC_SUFFIXES = (".md", ".rst", ".txt")
 _BACKEND_TEST_PREFIXES = ("backend/app/tests/", "backend/tests/")
+_FRONTEND_TEST_PREFIXES = (
+    "frontend/e2e/",
+    "frontend/test-results/",
+    "frontend/tests/",
+)
 _NO_RUNTIME_PREFIXES = (
     ".github/",
     "docs/",
@@ -36,11 +41,13 @@ _NO_RUNTIME_FILES = {
     "Makefile",
     "README.md",
     "docker-compose.dev.yml",
+    # OpenAPI JSON 是由后端 schema 生成的发布快照，不会进入运行容器。
+    # 真正的运行影响由后端源码和生成的前端 API 类型各自触发。
+    "openapi/telepilot.openapi.json",
     "scripts/bootstrap.sh",
     "scripts/install-server.sh",
     "scripts/prod-up.sh",
 }
-_FRONTEND_BUNDLED_FILES = {"CHANGELOG.md", "docs/PLUGIN-DEV-GUIDE.md"}
 _FRONTEND_SOURCE_MIRROR_FILES = {
     "frontend/package.json",
     "frontend/tsconfig.app.json",
@@ -48,11 +55,8 @@ _FRONTEND_SOURCE_MIRROR_FILES = {
     "frontend/vite.config.ts",
 }
 _UPDATER_FILES = {
-    "backend/app/util/update_plan.py",
     "deploy/updater/Dockerfile",
     "deploy/updater/server.py",
-    "scripts/_lib.sh",
-    "scripts/prod-update.sh",
 }
 _KNOWN_SERVICES = {"postgres", "redis", "web", "frontend", "updater"}
 _INFRA_SERVICES = {"postgres", "redis"}
@@ -85,8 +89,6 @@ def _normalize(path: str) -> str:
 def _is_docs_file(path: str) -> bool:
     normalized = _normalize(path)
     lowered = normalized.lower()
-    if normalized in _FRONTEND_BUNDLED_FILES:
-        return False
     return (
         normalized in _NO_RUNTIME_FILES
         or normalized.startswith(_NO_RUNTIME_PREFIXES)
@@ -142,6 +144,7 @@ def classify_changed_files(
             unknown = compose_changed_services - _KNOWN_SERVICES
             if unknown or compose_changed_services & _INFRA_SERVICES:
                 requires_full_update = True
+                requires_backup = True
                 components.add("full_update")
                 components.add("infrastructure")
                 reasons.append("PostgreSQL、Redis 或未知 Compose 服务配置发生变化")
@@ -151,9 +154,8 @@ def classify_changed_files(
             continue
 
         if path == "backend/app/util/update_plan.py":
-            components.update({"backend", "updater"})
+            components.add("backend")
             require_file_sync("web")
-            require_rebuild("updater")
             continue
         if path in _UPDATER_FILES:
             components.add("updater")
@@ -161,17 +163,13 @@ def classify_changed_files(
             continue
 
         if path == ".dockerignore":
-            components.update({"frontend", "updater"})
+            components.update({"backend", "frontend", "updater"})
+            require_rebuild("web")
             require_rebuild("frontend")
             require_rebuild("updater")
             continue
-        if path == "backend/.dockerignore":
-            components.add("backend")
-            require_rebuild("web")
-            continue
-        if path == "frontend/.dockerignore":
-            components.add("frontend")
-            require_rebuild("frontend")
+        if path in {"backend/.dockerignore", "frontend/.dockerignore"}:
+            # Compose 三个应用镜像均以仓库根为 context，子目录 ignore 不生效。
             continue
 
         if path == "backend/pyproject.toml":
@@ -188,20 +186,23 @@ def classify_changed_files(
             # 备份、恢复、安装和人工部署脚本由挂载工作区直接读取，不改变运行容器。
             continue
 
-        if path in _FRONTEND_BUNDLED_FILES or path.startswith("frontend/"):
+        if path.startswith(_FRONTEND_TEST_PREFIXES) or path in {
+            "frontend/playwright.config.ts",
+            "frontend/vitest.config.ts",
+        }:
+            continue
+
+        if path.startswith("frontend/"):
             components.add("frontend")
             require_rebuild("frontend")
             if (
-                path == "CHANGELOG.md"
-                or path in _FRONTEND_SOURCE_MIRROR_FILES
+                path in _FRONTEND_SOURCE_MIRROR_FILES
                 or path.startswith("frontend/src/")
             ):
                 # System Agent 的只读源码镜像位于 web 镜像中，前端源码变化时
                 # 同步该快照，避免线上诊断读取到上一版代码。
                 components.add("backend")
                 require_file_sync("web")
-            if path == "CHANGELOG.md":
-                components.add("backend")
             continue
 
         if path.startswith(_BACKEND_TEST_PREFIXES):
@@ -214,7 +215,13 @@ def classify_changed_files(
             components.add("backend")
             require_file_sync("web")
             continue
-        if path.startswith("backend/") or path.startswith("plugins/"):
+        if path.startswith("plugins/"):
+            # Git 跟踪的插件文件会定向同步到持久卷，随后重启 web/worker；
+            # backend 镜像本身不 COPY 根 plugins，重建 web 无法部署这些改动。
+            components.add("backend")
+            require_file_sync("web")
+            continue
+        if path.startswith("backend/"):
             components.add("backend")
             require_rebuild("web")
             continue

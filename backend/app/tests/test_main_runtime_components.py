@@ -53,3 +53,27 @@ async def test_retry_runtime_component_retries_until_success(monkeypatch) -> Non
     assert attempts == 2
     assert sleep.await_count == 2
     assert main._RUNTIME_COMPONENTS["account_bot_manager"] is True
+
+
+@pytest.mark.asyncio
+async def test_restore_system_agent_runs_eagerly_reconciles_durable_queue(
+    monkeypatch,
+) -> None:
+    manager = AsyncMock()
+    monkeypatch.setattr(main, "get_system_agent_run_manager", lambda: manager)
+
+    restored = await main._restore_system_agent_runs()
+
+    assert restored is manager
+    manager.ensure_ready.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_restore_system_agent_runs_keeps_explicit_manager_on_failure() -> None:
+    manager = AsyncMock()
+    manager.ensure_ready.side_effect = RuntimeError("database unavailable")
+
+    with pytest.raises(RuntimeError, match="database unavailable"):
+        await main._restore_system_agent_runs(manager)
+
+    manager.ensure_ready.assert_awaited_once_with()

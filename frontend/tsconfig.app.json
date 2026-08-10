@@ -18,8 +18,8 @@
     "jsx": "react-jsx",
     "strict": false,
     "tsBuildInfoFile": "./node_modules/.cache/tsbuild/tsconfig.app.tsbuildinfo",
-    "noUnusedLocals": false,
-    "noUnusedParameters": false,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
     "baseUrl": ".",
     "paths": {

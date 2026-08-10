@@ -4,17 +4,17 @@
 
 ## 12. 安全边界
 
-### 三模式安全模型
+### 三链路安全模型
 
-插件安全边界先按三种运行模式判断：
+插件安全边界先按三条消息链路判断：
 
-| 模式 | 输入对象 | 默认收发 | 安全边界 |
+| 链路 | 输入对象 | 会话/发送语义 | 安全边界 |
 | --- | --- | --- | --- |
-| 裸直通 | userbot 原始 Telethon event | 插件自行处理 userbot 能力 | 只给 userbot，不覆盖 interaction bot；不自动生成标准 action、Trace 或 MessageOps 记录 |
-| userbot 命令会话 | UserBot 前缀命令进入标准事件信封 | 普通收发默认 userbot | 适合管理员命令和账号身份动作；按钮会降级成文本编号 |
-| interaction bot 规则会话 | 关键词、付款确认、按钮回调进入标准事件信封 | 普通收发默认 interaction bot | 适合高频群内互动、按钮、题面和会话提示 |
+| 裸直通 | userbot Telethon 实时事件；安装插件收到 `SandboxEvent` 权限包装 | 插件自行处理 userbot 能力 | 只给 userbot，不覆盖 interaction bot；平台记录路由/调用 Trace，显式 `ctx.messages` 与受支持的 `ctx.client` 操作仍统一审计 |
+| UserBot 标准消息链路 | Event Bus、前缀命令、legacy `on_message`；可含 incoming/outgoing | 建立会话后由 `session.channel=userbot` 路由普通收发 | 适合管理员命令、账号身份动作和第三方 Bot 消息监听；会话按钮会降级成文本编号 |
+| Interaction Bot 标准消息链路 | Event Bus 自主订阅或旧规则会话 | 建立会话后由 `session.channel=interaction_bot` 路由普通收发 | 适合高频群内互动、按钮、题面和会话提示 |
 
-固定路由例外有两类：`payout`、收付款、发奖永远由 userbot 执行；`send_rich_message` 默认由 interaction bot 执行，只有显式选择 `userbot_reply` 才进入 Layer 228 Userbot 路径。Event Bus、Trace、MessageOps 只是标准会话链路的内部契约，不是第四种模式。
+固定路由例外有两类：`payout`、收付款、发奖永远由 userbot 执行；`send_rich_message` 默认由 interaction bot 执行，只有显式选择 `userbot_reply` 才进入 Layer 228 Userbot 路径。Event Bus、Trace、MessageOps 只是两条标准消息链路的内部契约，不是第四种模式。
 
 ### 平台能力开关
 
@@ -38,6 +38,7 @@ Manifest 中的 `permissions` 字段声明插件需要的能力：
 | `send_file` | `send_file` | 发送图片或文件 |
 | `join_chat` | `join_chat` | 加入聊天 |
 | `delete_message` | `delete_messages` / `unpin_message` | 删除消息或取消指定消息置顶；高风险，必须有明确用户开关 |
+| `click_bot_button` | `ctx.messages.click_callback_button` | 以 UserBot 身份点击第三方 Bot callback；平台二次读取并复核真实消息，安装插件必须显式声明 |
 | `moderate_chat` | `ban_user` / `kick_user` / `mute_user` / `unban_user` | 受控成员管理；高危权限，不开放 raw MTProto |
 | `external_http` | `ctx.http.get` / `ctx.http.post` | 安全 HTTP facade；必须同时声明 `allowed_hosts` |
 | `external_http_bypass_proxy` | direct 网络出口 | 预留高危权限；当前直连还必须通过 Manifest `http.allow_direct` 和账号配置共同开启 |
@@ -46,7 +47,13 @@ Manifest 中的 `permissions` 字段声明插件需要的能力：
 
 `permissions` 默认是空列表。远程/本地/插件库安装型插件漏写权限时不会注入对应 facade，也不能调用未声明的 `ctx.client` / `event` helper 能力；核心平台兼容代码也建议显式写全，方便审计和后续迁移。
 
-TelePilot 按个人可信插件模式运行：管理员安装并启用插件后，远程插件的业务风险由管理员自行承担；平台不做公共插件市场式强沙箱，但仍保留频控、审计、急停、Trace 和 token/session 隔离。标准 Telegram 会话插件必须走 Event Bus + MessageOps：在 `plugin.json` 声明 `usage`、`event_subscriptions`、`capabilities`，运行时只读取标准事件信封，所有发送、编辑、删除、置顶、按钮 ACK、Inline answer 和结算都返回标准 action 或通过 `ctx.messages` 生成。裸直通插件只接 userbot 原始 Telethon event，不接 interaction bot，也不会自动获得标准 action/Trace。`ctx.client` 保留给管理员命令和高级兼容场景，不作为普通 Bot 按钮回调的主入口。群里已有的转账结果通知 Bot 只作为外部付款证据来源，不是插件主动发送通道。
+TelePilot 按个人可信插件模式运行：管理员安装并启用插件后，远程插件的业务风险由管理员自行承担；平台不做公共插件市场式强沙箱，但仍保留频控、审计、急停、Trace 和 token/session 隔离。标准 Telegram 会话插件必须走 Event Bus + MessageOps：在 `plugin.json` 声明 `usage`、`event_subscriptions`、`capabilities`，运行时只读取标准事件信封，所有发送、编辑、删除、置顶、按钮 ACK、Inline answer 和结算都返回标准 action 或通过 `ctx.messages` 生成。裸直通插件只接 userbot 实时事件，不接 interaction bot；安装插件仍经过 `SandboxEvent` / `SandboxClient` 权限包装，平台记录直通路由和调用 Trace，插件显式调用 `ctx.messages` 或受支持的 `ctx.client` 操作时仍走动作审计。`ctx.client` 保留给管理员命令和高级兼容场景，不作为普通 Bot 按钮回调的主入口。群里已有的转账结果通知 Bot 只作为外部付款证据来源，不是插件主动发送通道。
+
+安装插件的 `message.buttons` 与 `message.reply_markup.rows[].buttons[]` 都会净化为只读按钮
+对象，只暴露 `text` 和 `kind`，不暴露 callback data、真实客户端或 raw Telethon button；
+旧 `button.click()` 会明确抛出权限错误。
+UserBot 主动点击第三方 Bot callback 必须声明 `click_bot_button` 权限，并使用
+`ctx.messages.click_callback_button(...)` 正式接口。
 
 ### 安装来源与签名边界
 
@@ -60,9 +67,10 @@ TelePilot 按个人可信插件模式运行：管理员安装并启用插件后�
 
 ### 会话通道边界
 
-消息链路统一后，插件要额外记住三个安全边界：
+消息链路统一后，插件要额外记住这些安全边界：
 
 - 会话通道由触发方式决定。命令开局默认走 userbot，关键词/付款/按钮开局默认走 interaction bot；普通发送动作应继承 `session.channel`，不要每条消息手动改通道。
+- 账号级“允许会话”列表留空表示全部会话放行，非空时才只允许名单内会话；插件自己的 `allowed_chat_ids=[]` 是自定义配置，不能擅自套用平台语义。
 - `payout`、收付款、发奖永远经 userbot 执行，并进入 `RateLimitEngine`、trace 和失败回写。插件不要把 Bot 公告伪装成转账，也不要把发奖逻辑拆成“先发普通消息，再等旧文案协议补发”。
 - `send_rich_message` 默认经 Interaction Bot 执行。显式请求 `userbot_reply` 时使用 Telethon Layer 228，并要求 Premium 与 `rich_message_posting`；当前支持 HTML、Markdown 和可无损转换的纯文本 blocks，复杂/媒体 blocks、media、Bot `reply_markup` 必须明确失败，禁止静默转成普通 HTML 或纯文本。
 - TelePilot 自有的账号 Bot 控制页与系统告警可以在同一个 Bot 内从 Rich Message 回退到旧 HTML，以兼容 Bot API 暂不支持或格式拒绝；插件 `send_rich_message` 不继承这个内部兼容策略。
@@ -90,6 +98,9 @@ TelePilot 按个人可信插件模式运行：管理员安装并启用插件后�
 - 对外部请求必须做超时和异常处理
 - 不允许把旧 `notice` / `bbot_notice` / `notice_bot` 当主动发送通道
 - 不允许依赖旧 `raw_event` 或旧平铺 payload；需要原生字段必须声明 `capabilities.telegram_native_raw`
+- 不允许用 `answer_callback` 代替 UserBot 主动点击第三方 Bot 按钮；前者只 ACK 当前 Interaction Bot 收到的 callback
+- 不允许自动打开第三方 URL 按钮，或自动分享手机号、地理位置
+- 自动点击第三方 Bot callback 时推荐同时传 `expected_bot_id` 和 `expected_button_text`；callback data 只允许平台从 Telegram 重新读取
 
 ### 标准链路能力声明
 
@@ -101,7 +112,7 @@ TelePilot 按个人可信插件模式运行：管理员安装并启用插件后�
 | `event_subscriptions` | Telegram 事件插件必填 | 明确 message/command/callback/inline/payment 的来源和范围 |
 | `capabilities` | 必填，空能力写 `{}` | 暴露高风险能力，例如 `telegram_native_raw` |
 
-`capabilities.telegram_native_raw.enabled=true` 时必须写 `reason` 和 `sources`。插件只能把 `native_raw` 当排障补充，业务判断仍以标准事件信封为准；当 `native_raw_meta.enabled=false` 时必须降级运行。需要完全跳过标准信封的低延时场景，必须显式声明裸直通能力，并且只允许走 userbot 原始 Telethon event。
+`capabilities.telegram_native_raw.enabled=true` 时必须写 `reason` 和 `sources`。插件只能把 `native_raw` 当排障补充，业务判断仍以标准事件信封为准；当 `native_raw_meta.enabled=false` 时必须降级运行。需要完全跳过标准信封的低延时场景，必须显式声明裸直通能力，并且只允许读取 userbot 实时事件；安装插件仍经过 `SandboxEvent` 权限包装。
 
 ---
 
@@ -235,16 +246,17 @@ TelePilot 按个人可信插件模式运行：管理员安装并启用插件后�
 
 ### 消息发送能力边界
 
-标准 Telegram 会话插件的默认路径是 Event Bus + MessageOps + Trace：插件读取标准事件信封，返回标准 action，或通过 `ctx.messages` 生成同等 action；平台按当前会话通道和动作类型路由并记录 trace/action/reason_code。裸直通不走这条链路，只能接 userbot 原始 Telethon event。普通消息默认按 `parse_mode="plain"` 发送，只有显式声明 `parse_mode="html"` 时才启用普通 HTML；标题、任务列表、折叠详情、表格等原生结构使用独立的 `send_rich_message`。两种 HTML 都必须先转义动态文本再拼标签。旧 hook 仍可作为内置插件和迁移桥兼容，但不能作为远程插件的新模板。
+标准 Telegram 会话插件的默认路径是 Event Bus + MessageOps + Trace：插件读取标准事件信封，返回标准 action，或通过 `ctx.messages` 生成同等 action；平台按当前会话通道和动作类型路由并记录 trace/action/reason_code。裸直通绕过 Event Bus 标准信封，只接 userbot 实时事件；安装插件仍经过 `SandboxEvent` / `SandboxClient` 权限包装，`ctx.messages` 可显式提交受控动作，受支持的 `ctx.client` 常用操作也会记录动作审计。普通消息默认按 `parse_mode="plain"` 发送，只有显式声明 `parse_mode="html"` 时才启用普通 HTML；标题、任务列表、折叠详情、表格等原生结构使用独立的 `send_rich_message`。两种 HTML 都必须先转义动态文本再拼标签。旧 hook 仍可作为内置插件和迁移桥兼容，但不能作为远程插件的新模板。
 
 | 场景 | 标准会话主路径 | 旧 hook 兼容边界 |
 |------|--------------|------------------|
 | 普通消息/关键词 | 返回 `send_message` / `send_photo` / `send_file`，默认省略 `send_via` 并继承会话通道；原生结构化内容返回 `send_rich_message`，默认走 Interaction Bot，显式 Userbot 仅限受支持的 HTML、Markdown 或纯文本 blocks；媒体题面可保存 `save_message_id_key` 后用 `edit_caption` 原地更新 caption | `on_message` 的 `event.reply(...)` / `event.respond(...)` 仅用于历史内置或迁移桥 |
 | 管理员命令 | `command` 事件进入 Event Bus 后返回 action；需要编辑原指令时声明 `edit_message` | `on_command` 的 `event.edit(...)` 可保留；另发消息时不要绕过 MessageOps 记录 |
-| 按钮回调 | 返回 `answer_callback`，再按需返回 `send_message` / `edit_message` / `edit_caption` | 不直接拼 Bot API，不假设 incoming message 可编辑 |
+| 当前 Interaction Bot 的按钮回调 | 返回 `answer_callback`，再按需返回 `send_message` / `edit_message` / `edit_caption` | 只用于 ACK 已收到的 `callback_query`；不直接拼 Bot API，不假设 incoming message 可编辑 |
+| UserBot 主动点击第三方 Bot callback | 声明 `click_bot_button` 权限，在 UserBot 执行链路调用 `ctx.messages.click_callback_button(...)`；Interaction Bot 插件入口（包括 `ctx.messages.apply`）不支持 | 只允许 callback 类型；平台重新读取 callback data，并执行 Bot/文字复核、限流、Trace、ActionEvent、dry-run；成功后保护 20 秒，超时/未知结果保护 5 分钟 |
 | Inline Query | 返回 `answer_inline_query`；选择结果用 `chosen_inline_result` 记录 | 旧 hook 没有统一 trace，不作为新插件入口 |
 | 付款/发奖 | 返回 `settlement` 或 `userbot_reply` 受控动作；普通 Bot 只公告结果 | 不把外部转账通知 Bot 当主动发送通道 |
-| 定时任务/后台任务 | 保存目标 chat/session 后通过 `ctx.messages` 或标准 action 输出 | 直接使用受控 client 发消息只作为旧调度代码兼容，不作为新模板 |
+| 定时任务/后台任务 | 保存目标 chat/session 后通过 live `ctx.messages` 输出；媒体、caption、Rich edit 等没有 live helper 的动作使用 `ctx.messages.apply([标准 action])` | 不假设后台 facade 拥有交互缓冲 facade 的全部方法；直接使用受控 client 发消息只作为旧调度代码兼容 |
 | 启停阶段 | 默认不发；确需通知时必须有显式配置开关并记录日志 | 不在 `on_startup` / `on_shutdown` 里无条件群发 |
 | 成员管理 | 声明 `moderate_chat`，由受控 facade 执行并记录审计 | 不开放 raw MTProto 或 live client 给远程插件 |
 
@@ -583,7 +595,7 @@ await ctx.log(
 - [ ] 指令能触发，指令名改配置后能热重载生效。
 - [ ] 指令冲突时只由一个插件处理，`on_command` 正确返回 `True/False`。
 - [ ] 群聊、私聊、频道/匿名频道场景下不崩溃。
-- [ ] `event` 兼容裸 `Message`：不直接假设 `event.outgoing`、`event.message.id` 存在。
+- [ ] `event` 兼容裸 `Message`：方向读取 `event.message.out`（或裸 `Message.out`），不使用 Telethon 1.44 不存在的 `event.outgoing`；也不直接假设 `event.message.id` 存在。
 - [ ] 重复开局/重复创建规则会给出明确提示。
 - [ ] 抢答并发：两个答对消息同时到达只奖励一次。
 - [ ] 超时任务和答题消息同时发生时，只结束一次。

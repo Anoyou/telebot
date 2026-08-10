@@ -249,7 +249,7 @@ def _absolute_host_project_dir() -> str:
     )
 
 
-def _apply_job_env(remote: str, branch: str) -> dict[str, str]:
+def _apply_job_env(remote: str, branch: str, job_id: str | None = None) -> dict[str, str]:
     host_project_dir = _absolute_host_project_dir()
     env = {
         "COMPOSE_DOCKER_CLI_BUILD": "1",
@@ -260,6 +260,8 @@ def _apply_job_env(remote: str, branch: str) -> dict[str, str]:
         "TELEPILOT_SKIP_UPDATER_RECREATE": "1",
         "TELEPILOT_UPDATE_PREFETCHED": "1",
     }
+    if job_id:
+        env["TELEPILOT_UPDATE_JOB_ID"] = job_id
     project = _compose_project_name(Path(host_project_dir))
     if project:
         env["COMPOSE_PROJECT_NAME"] = project
@@ -594,9 +596,21 @@ def _check_plan(remote: str, branch: str) -> dict[str, Any]:
             pending_old, pending_target = pending_path.read_text().split()[:2]
         except (OSError, ValueError, IndexError):
             pending_old = pending_target = ""
-        if current_out == target_out and pending_target == target_out and pending_old:
-            diff_base = pending_old
-            deployment_pending = True
+        if pending_old and pending_target == current_out:
+            pending_commits_valid = all(
+                _run(["git", "cat-file", "-e", f"{revision}^{{commit}}"], timeout=10)[2]
+                == 0
+                for revision in (pending_old, pending_target)
+            )
+            _, _, pending_is_ancestor_rc = _run(
+                ["git", "merge-base", "--is-ancestor", pending_target, target_out],
+                timeout=10,
+            )
+            if pending_commits_valid and pending_is_ancestor_rc == 0:
+                # Git 已前进、容器尚未完成切换时，后续版本必须从最初未部署的
+                # commit 累计计算；否则会静默跳过中间版本的 Compose/前端变化。
+                diff_base = pending_old
+                deployment_pending = True
 
     behind_out, _, behind_rc = _run(
         ["git", "rev-list", "--count", f"{current_out}..{target_out}"], timeout=10
@@ -680,6 +694,13 @@ def _job_snapshot(job_id: str) -> dict[str, Any] | None:
 
 def _job_path(job_id: str) -> Path:
     return WORKSPACE / ".git" / "telepilot-update-jobs" / f"{job_id}.json"
+
+
+def _handoff_active() -> bool:
+    path = WORKSPACE / ".git" / "telepilot-updater-handoff-active"
+    # fail-closed：只有 handoff 成功或显式失败收尾才删除 marker。未知崩溃
+    # 不按时间自动放行第二个部署，避免两个进程并发修改 Compose/.env。
+    return path.is_file()
 
 
 def _persist_job(job_id: str, job: dict[str, Any]) -> None:
@@ -813,7 +834,7 @@ def _run_apply_job(job_id: str, remote: str, branch: str, force_full: bool) -> N
                 summary="当前已是最新版本。",
             )
             return
-        env = _apply_job_env(remote, branch)
+        env = _apply_job_env(remote, branch, job_id)
         cmd = ["bash", "scripts/prod-update.sh"]
         if force_full:
             cmd.append("--full")
@@ -949,6 +970,16 @@ class Handler(BaseHTTPRequestHandler):
             _json_response(self, 200, _check_plan(remote, branch))
             return
         if self.path == "/jobs":
+            if _handoff_active():
+                _json_response(
+                    self,
+                    409,
+                    {
+                        "ok": False,
+                        "error": "updater 正在完成跨容器 handoff，请等待当前任务收尾。",
+                    },
+                )
+                return
             job_id = uuid.uuid4().hex[:12]
             _set_job(
                 job_id,

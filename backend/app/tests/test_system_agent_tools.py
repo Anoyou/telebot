@@ -124,6 +124,30 @@ async def test_system_get_context_shape(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_system_get_resources_reuses_dashboard_collector(monkeypatch) -> None:
+    from app.api import system_health
+
+    snapshot = system_health.ResourceDashboard(
+        host=system_health.HostResource(sampled_at=1, memory_used_percent=42.0),
+        main_process=system_health.ProcessResource(pid=1, uss_mb=80.0),
+        project_total=system_health.ProcessResource(uss_mb=120.0),
+        logs=system_health.RuntimeLogStats(),
+    )
+
+    async def fake_dashboard(_user):
+        return snapshot
+
+    monkeypatch.setattr(system_health, "get_resource_dashboard", fake_dashboard)
+    ctx = ToolContext(db=AsyncMock(), channel="web", role="viewer")
+
+    result = await system_tools.get_resources(ctx, {})
+
+    assert result["host"]["memory_used_percent"] == 42.0
+    assert result["project_total"]["uss_mb"] == 120.0
+    assert result["business_changed"] is False
+
+
+@pytest.mark.asyncio
 async def test_product_get_changelog_reads_recent_sections(monkeypatch, tmp_path) -> None:
     changelog = tmp_path / "CHANGELOG.md"
     changelog.write_text(

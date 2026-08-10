@@ -135,6 +135,8 @@ python scripts/tp_replay.py run ../data/recordings/123/2026-07-10.jsonl --accoun
 
 命中调试器用于贴一条消息和账号上下文，看当前 worker 会怎样判定入口：直通、前缀命令、关键词、Event Bus 订阅是否命中，以及未命中原因。
 
+首选入口是 Web/PWA 侧栏一级「命中调试」（`/dispatch-debug`）：页面负责账号选择、表单校验、结果分阶段展示和常见 reason code 说明。下面的 API 适合自动化、抓取固定 fixture 或与 OpenAPI 对照，不要求开发者日常手写请求。
+
 请求端点：
 
 ```http

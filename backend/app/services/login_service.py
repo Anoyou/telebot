@@ -90,22 +90,42 @@ async def _build_proxy_tuple(db: AsyncSession, proxy_id: int | None):
     proxy_id 为空时，回落到 ``settings.tg_default_proxy`` 全局代理；
     仍未配置则真正直连（适用于宿主机能直连 TG 的网络）。
     """
-    if not proxy_id:
+    if proxy_id is None:
         from ..util.proxy import get_default_proxy_tuple
-        return get_default_proxy_tuple()
+        try:
+            return get_default_proxy_tuple()
+        except ValueError as exc:
+            raise _err("PROXY_TYPE_UNSUPPORTED", str(exc), 422) from exc
     proxy = await db.get(Proxy, proxy_id)
     if not proxy:
-        from ..util.proxy import get_default_proxy_tuple
-        return get_default_proxy_tuple()
-    password = decrypt_str(proxy.password_enc) if proxy.password_enc else None
+        raise _err("PROXY_NOT_FOUND", f"代理 #{proxy_id} 不存在", 404)
+    proxy_type = str(proxy.type or "").lower()
+    if proxy_type not in {"socks5", "socks4", "http", "https"}:
+        raise _err(
+            "PROXY_TYPE_UNSUPPORTED",
+            f"代理类型 {proxy.type!r} 当前不受支持，请改用 SOCKS5、SOCKS4、HTTP 或 HTTPS",
+            422,
+        )
+    try:
+        password = decrypt_str(proxy.password_enc) if proxy.password_enc else None
+    except Exception as exc:  # noqa: BLE001 - 坏凭据必须在构造 TelegramClient 前拒绝
+        raise _err(
+            "PROXY_CONFIG_INVALID",
+            "代理凭据无法解密，请重新保存或更换代理",
+            422,
+        ) from exc
     if "://" in proxy.host:
-        from ..util.proxy import parse_proxy_url
-        parsed = parse_proxy_url(proxy.host)
+        from ..util.proxy import ProxyConfigError, parse_proxy_url
+
+        try:
+            parsed = parse_proxy_url(proxy.host)
+        except ProxyConfigError as exc:
+            raise _err("PROXY_CONFIG_INVALID", str(exc), 422) from exc
         if parsed is not None:
             ptype, host, port, rdns, parsed_user, parsed_password = parsed
             return (ptype, host, port, rdns, proxy.username or parsed_user, password or parsed_password)
     return (
-        proxy.type,        # "socks5" | "http" | "mtproxy"
+        "http" if proxy_type == "https" else proxy_type,
         proxy.host,
         proxy.port,
         True,              # rdns（远端解析 DNS，避免泄漏）

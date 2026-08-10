@@ -15,6 +15,7 @@
 - `event_subscriptions[].events` 常用值：`message`、`command`、`callback_query`、`inline_query`、`chosen_inline_result`、`payment_confirmed`、`webhook`、`session_close`、`message_edited`、`session_expired`、`all_events`；`all_messages` 仍只等于 `message` / `command`。
 - `event_subscriptions[].source` 常用值：`userbot`、`interaction_bot`、`external_payment_notice`、`webhook`。
 - `event_subscriptions[].scope` 常用值：`all_allowed_chats`、`owner_only`、`known_users`、`rule_bound`、`inline_all`；Inline 插件必须显式用 `inline_all`。
+- 账号级“允许会话”留空表示全部会话；列表非空时才只允许名单内会话。插件自定义的 `allowed_chat_ids=[]` 不自动继承这条语义。
 - `known_users` 只认平台 state 提供的真实集合，不会自动把当前 sender 算进去。
 - `filters` 常见键：`keywords`、`contains`、`callback_data`、`commands`、`rule_id`、`hook_key`、`hook_keys`；未知 key 会保留但会告 warning。
 - 严格来说只有 `telegram_direct_passthrough` 叫裸直通；Event Bus、会话入口、legacy hook 都是消息分发/会话路由。
@@ -27,12 +28,14 @@
 - `session.channel` 表示当前整段会话默认收发通道；普通发送动作不用手写 `send_via`，平台会继承会话通道。
 - 普通消息回复使用 `ctx.messages.send(...)` 或返回 `{"type": "send_message", ...}`；标题、任务列表、折叠详情、表格等原生格式使用 `ctx.messages.send_rich(html=...)` 或 `send_rich_message` action；图片题面可用 `ctx.messages.send_photo(..., save_message_id_key="round")`，后续用 `ctx.messages.edit_caption(message_id_key="round", caption="...")` 原地更新 caption。
 - `send_rich` 的 `html` / `markdown` / `blocks` 必须三选一，继续声明 `send_message` 权限；默认走 Interaction Bot。显式 `userbot_reply` 使用 Layer 228，支持 HTML、Markdown 和纯文本 blocks，并要求 Premium 与 `rich_message_posting`；复杂/媒体 blocks 失败时不会静默退化。
-- 按钮必须经 `send_message.reply_markup` 发出；按钮回调用 `answer_callback`，不要在插件里直接拼 Bot API。
+- 当前 Interaction Bot 发按钮、用户点击：订阅 `source=["interaction_bot"]`、`events=["callback_query"]`、`scope="all_allowed_chats"`，用 `answer_callback` ACK；不依赖旧 Interaction Bot 规则或活跃会话。
+- 第三方 Bot 发按钮、TelePilot UserBot 主动点击：插件声明 `permissions=["click_bot_button"]`，在 UserBot 执行链路调用 `ctx.messages.click_callback_button(chat_id=..., message_id=..., row=..., column=..., expected_bot_id=..., expected_button_text=...)`；Interaction Bot 插件入口不支持。这不是 `callback_query`，也不能用 `answer_callback`。
+- 平台只允许 callback 类型，重新读取 Telegram 消息和 callback data，并统一执行 Bot/文字校验、限流、Trace、ActionEvent、dry-run 和账号级物理点击锁；明确成功后保护 20 秒，超时/未知结果保护 5 分钟，Redis 不可用时拒绝点击。`message.buttons[row][column].click()` 已被安全阻断。
 - userbot 会话没有原生按钮，平台会把按钮降级成文本编号，并把玩家回复合成为 callback；此时 `source.synthetic="text_button"`。
 - 免费参与、按钮加入、互动游戏可按自身玩法保存完整业务状态；如果只是为了后续发奖锚点，记录玩家 `tgid` 即可。发奖动作优先用 `payout`，也可走 `userbot_reply` 并携带 `reply_to_user_id`，平台会搜索该玩家近期发言作为回复锚点，插件不要自己遍历群消息。已有 `reply_to_message_id` 时优先用消息 id；找不到锚点时动作失败并写入日志，默认提示 `未找到对应用户（用户 ID）的近期消息。`，可用 `reply_anchor_missing_text` 自定义提示。
 - Inline 插件返回 `answer_inline_query`；选择结果进入 `chosen_inline_result`，用于记录选择、结算或后续状态。
 - 付款/发奖插件返回 `settlement` 或 userbot 受控动作；普通 Bot 只公告结果，不直接执行转账、催付或发奖。
-- 常见 action：`send_message`、`send_rich_message`、`send_photo`、`send_file`、`edit_message`、`edit_caption`、`delete_message`、`pin_message`、`answer_callback`、`answer_inline_query`、`payout`、`update_session`、`settlement`、`result`、`end_session`。
+- 常见 action：`send_message`、`send_rich_message`、`send_photo`、`send_file`、`edit_message`、`edit_caption`、`delete_message`、`pin_message`、`click_callback_button`、`answer_callback`、`answer_inline_query`、`payout`、`update_session`、`settlement`、`result`、`end_session`。
 - `send_via` 只在高级覆盖时使用 `interaction_bot`、`userbot_reply` 或 `auto`；旧 `notice` 值应返回迁移错误，不能静默执行。
 - 默认 `send_message` / `send_photo` / `send_file` 等动作按 `parse_mode="plain"` 发送；只有显式声明 `parse_mode="html"` 时才启用普通消息 HTML。`send_rich_message` 使用独立的 Rich HTML/Markdown/blocks 语法，动态 HTML 文案同样先转义再拼标签。
 - 强按钮玩法可通过 `interaction_trigger_modes=keyword_only` 关闭命令触发；manifest 可用 `default_trigger_modes` 提供默认值。
@@ -40,6 +43,8 @@
 - `ctx.http` 需要 `permissions=["external_http"]` 和 `allowed_hosts`。
 - `ctx.ai` 需要 `permissions=["ai_text"]`，复用平台 LLM Provider、fallback、预算和 usage 记录。
 - `ctx.client` 只保留给管理员命令和高级兼容场景；远程插件仍不能直接拿 token、session、Bot API client 或 live event。
+- `ctx.conversation()` 目前只适合获得真实 `TelegramClient` 的 builtin/内部兼容代码；普通安装插件拿到 `SandboxClient`，无法可靠注册会话 handler 或发送 raw MTProto，不应依赖它。
+- 安装插件的 `ctx.redis` 是带 `plugin_store:{account_id}:{plugin_key}:` 前缀的 `PluginRedisFacade`，不是原始 Redis client；`keys`、`scan`、`eval`、`pipeline`、`pubsub` 等操作不可用，普通状态仍优先用 `ctx.storage`。
 - `command` 只保存裸指令名，不保存前缀；schema/usage 模板用 `{prefix}`，运行时帮助与错误示例必须调用 `from app.worker.command import current_command_prefix`，使用 `current_command_prefix(fallback=",")`。不要从 `ctx.account_config` 读取系统前缀，也不要硬编码逗号。
 - `on_command(ctx, cmd, args, event) -> bool` 保留给账号主人/授权管理员命令；群友公开触发走 Event Bus 订阅。
 - `on_message` 是旧消息监听兼容 hook；新增 Telegram 交互优先写 `on_event` 标准事件入口，`on_interaction` 只作为迁移桥。

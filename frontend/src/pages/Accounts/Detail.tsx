@@ -73,6 +73,12 @@ import {
 } from "@/api/system";
 import { getFeatureMatrix } from "@/api/features";
 import { getErrMsg } from "@/lib/api";
+import {
+  isSupportedProxyType,
+  proxySelectionIssue,
+  proxySelectionNeedsLoadedList,
+  visibleProxyOptions,
+} from "@/lib/proxySupport";
 import { cn, formatDateTime } from "@/lib/utils";
 import { isExperimentalFeature, isPlatformFeature } from "@/lib/plugin-modes";
 import { Select } from "@/components/ui/select";
@@ -875,12 +881,41 @@ function ProxyTab({
   );
   const [testing, setTesting] = useState(false);
   const [result, setResult] = useState<ProxyTestResult | null>(null);
+  const proxies = proxiesQ.data || [];
+  const selectedProxy = proxies.find((proxy) => String(proxy.id) === selected);
+  const proxyListRequired = proxySelectionNeedsLoadedList(selected, proxiesQ.isSuccess);
+  const selectedProxyIssue = proxiesQ.isSuccess
+    ? proxySelectionIssue(proxies, selected)
+    : null;
+  const proxySelectionBlocked = proxyListRequired || selectedProxyIssue !== null;
+  const proxyOptions = visibleProxyOptions(proxies, selected);
+
+  useEffect(() => {
+    setSelected(currentProxyId !== null ? String(currentProxyId) : "");
+    setResult(null);
+  }, [currentProxyId]);
 
   const saveMut = useMutation({
-    mutationFn: () =>
-      patchAccount(aid, {
+    mutationFn: () => {
+      if (proxySelectionNeedsLoadedList(selected, proxiesQ.isSuccess)) {
+        throw new Error(
+          proxiesQ.isError
+            ? "代理列表加载失败，无法核对当前绑定，请重试或改选直连"
+            : "代理列表仍在加载，请稍后再保存",
+        );
+      }
+      const issue = proxySelectionIssue(proxies, selected);
+      if (issue) {
+        throw new Error(
+          issue === "missing"
+            ? "所选代理已不存在，请选择直连或受支持代理"
+            : "所选代理类型已停止支持，请选择直连或受支持代理",
+        );
+      }
+      return patchAccount(aid, {
         proxy_id: selected ? Number(selected) : null,
-      }),
+      });
+    },
     onSuccess: () => {
       toast.success("已保存。worker 重启后生效（账号详情 → 概览 → 暂停 → 恢复）");
       qc.invalidateQueries({ queryKey: ["account", aid] });
@@ -891,6 +926,10 @@ function ProxyTab({
   async function handleTest() {
     if (!selected) {
       toast.error("请先选一个代理");
+      return;
+    }
+    if (!selectedProxy || !isSupportedProxyType(selectedProxy.type)) {
+      toast.error("该代理类型已停止支持，请先更换代理");
       return;
     }
     setTesting(true);
@@ -910,7 +949,7 @@ function ProxyTab({
       <CardHeader>
         <CardTitle className="text-base">出口 / 代理</CardTitle>
         <CardDescription>
-          为该账号绑定一个代理（SOCKS5 / HTTP / MTProxy）；空 = 直连。修改后 worker 须重启
+          为该账号绑定一个代理（SOCKS5 / HTTP / HTTPS）；空 = 直连。修改后 worker 须重启
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4 text-sm">
@@ -926,10 +965,20 @@ function ProxyTab({
               }}
             >
               <option value="">直连（不走代理）</option>
-              {proxiesQ.data?.map((p) => (
-                <option key={p.id} value={String(p.id)}>
+              {selectedProxyIssue === "missing" ? (
+                <option value={selected} disabled>
+                  代理 #{selected} 已不存在，请重新选择
+                </option>
+              ) : null}
+              {proxyOptions.map((p) => (
+                <option
+                  key={p.id}
+                  value={String(p.id)}
+                  disabled={!isSupportedProxyType(p.type)}
+                >
                   [{p.type}] {p.host}:{p.port}
                   {p.username ? ` @${p.username}` : ""}
+                  {!isSupportedProxyType(p.type) ? " · 已停止支持，请更换" : ""}
                 </option>
               ))}
             </Select>
@@ -937,7 +986,12 @@ function ProxyTab({
               variant="outline"
               onClick={handleTest}
               loading={testing}
-              disabled={!selected}
+              disabled={
+                !selected ||
+                proxySelectionBlocked ||
+                !selectedProxy ||
+                !isSupportedProxyType(selectedProxy.type)
+              }
             >
               {!testing ? (
                 <Activity className="h-4 w-4" />
@@ -947,12 +1001,26 @@ function ProxyTab({
             <Button
               onClick={() => saveMut.mutate()}
               loading={saveMut.isPending}
-              disabled={(selected ? Number(selected) : null) === currentProxyId}
+              disabled={
+                proxySelectionBlocked ||
+                (selected ? Number(selected) : null) === currentProxyId
+              }
             >
               {!saveMut.isPending ? <Save className="mr-1 h-4 w-4" /> : null}
               保存
             </Button>
           </div>
+          {proxyListRequired ? (
+            <p className="text-xs text-destructive">
+              {proxiesQ.isError
+                ? "代理列表加载失败，无法核对当前绑定。请重试或改选直连。"
+                : "正在核对当前代理，请稍候。"}
+            </p>
+          ) : selectedProxyIssue ? (
+            <p className="text-xs text-destructive">
+              当前代理{selectedProxyIssue === "missing" ? "已不存在" : "已停止支持"}，请选择直连或受支持代理后保存。
+            </p>
+          ) : null}
         </div>
 
         {/* 测试结果 */}

@@ -45,6 +45,11 @@ import type {
   ProxyUsageResponse,
 } from "@/api/types";
 import { getErrMsg } from "@/lib/api";
+import {
+  isSupportedProxyType,
+  normalizeSupportedProxyType,
+  shouldClearCredentialsForMigration,
+} from "@/lib/proxySupport";
 
 const MASKED_SECRET_PLACEHOLDER = "••••••••••••••••";
 
@@ -52,11 +57,10 @@ const TYPE_OPTIONS: { value: ProxyType; label: string }[] = [
   { value: "socks5", label: "SOCKS5" },
   { value: "http", label: "HTTP" },
   { value: "https", label: "HTTPS" },
-  { value: "mtproxy", label: "MTProxy" },
 ];
 
 type ProxyEditDraft = {
-  type: ProxyType;
+  type: string;
   host: string;
   port: string;
   username: string;
@@ -143,6 +147,10 @@ export function ProxyManager() {
   const [expandedUsage, setExpandedUsage] = useState<number | null>(null);
 
   async function handleTest(p: ProxyOut) {
+    if (!isSupportedProxyType(p.type)) {
+      toast.error("该代理类型已停止支持，请先编辑为受支持类型");
+      return;
+    }
     setTestResults((m) => ({ ...m, [p.id]: "loading" }));
     try {
       const res = await testProxy(p.id);
@@ -192,14 +200,16 @@ export function ProxyManager() {
   }
 
   function startEdit(p: ProxyOut) {
+    const migratingLegacyType = shouldClearCredentialsForMigration(p.type, "socks5");
+    const normalizedType = normalizeSupportedProxyType(p.type);
     setEditingId(p.id);
     setEditDraft({
-      type: p.type,
+      type: normalizedType ?? p.type,
       host: p.host,
       port: String(p.port),
-      username: p.username || "",
+      username: migratingLegacyType ? "" : p.username || "",
       password: "",
-      clear_password: false,
+      clear_password: migratingLegacyType,
     });
   }
 
@@ -215,10 +225,15 @@ export function ProxyManager() {
       toast.error("请填写有效的主机和端口");
       return;
     }
+    const proxyType = normalizeSupportedProxyType(editDraft.type);
+    if (!proxyType) {
+      toast.error("请选择 SOCKS5、HTTP 或 HTTPS 代理类型");
+      return;
+    }
     updateMut.mutate({
       id: p.id,
       payload: {
-        type: editDraft.type,
+        type: proxyType,
         host: editDraft.host.trim(),
         port: nextPort,
         username: editDraft.username.trim() || null,
@@ -318,6 +333,7 @@ export function ProxyManager() {
               const isLoading = tr === "loading";
               const result = isLoading ? null : (tr as ProxyTestResult | undefined);
               const isEditing = editingId === p.id && editDraft !== null;
+              const isSupported = isSupportedProxyType(p.type);
               return (
                 <li key={p.id} className="space-y-1 px-3 py-2 text-sm">
                   {isEditing ? (
@@ -331,6 +347,11 @@ export function ProxyManager() {
                               setEditDraft((v) => v ? { ...v, type: e.target.value as ProxyType } : v)
                             }
                           >
+                            {!isSupportedProxyType(editDraft.type) ? (
+                              <option value={editDraft.type} disabled>
+                                历史类型：{editDraft.type}
+                              </option>
+                            ) : null}
                             {TYPE_OPTIONS.map((o) => (
                               <option key={o.value} value={o.value}>
                                 {o.label}
@@ -382,6 +403,11 @@ export function ProxyManager() {
                           />
                         </div>
                       </div>
+                      {!isSupportedProxyType(p.type) ? (
+                        <p className="text-xs leading-5 text-warning">
+                          迁移历史代理类型时会默认清空旧用户名和密码，避免把 MTProxy 凭据带入 HTTP/SOCKS5。需要认证时请重新填写。
+                        </p>
+                      ) : null}
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <div className="flex items-center gap-2 text-xs text-muted-foreground">
                           <Switch
@@ -418,6 +444,9 @@ export function ProxyManager() {
                         <span className="rounded bg-secondary px-1.5 py-0.5 text-xs font-mono uppercase">
                           {p.type}
                         </span>
+                        {!isSupported ? (
+                          <SignalPill tone="danger" label="状态" value="不支持" />
+                        ) : null}
                         <span className="font-mono">
                           {p.host}:{p.port}
                         </span>
@@ -450,6 +479,8 @@ export function ProxyManager() {
                           size="sm"
                           onClick={() => handleTest(p)}
                           loading={isLoading}
+                          disabled={!isSupported}
+                          title={isSupported ? "测试代理" : "该类型已停止支持，请先编辑转换"}
                         >
                           {!isLoading ? (
                             <Activity className="h-4 w-4" />

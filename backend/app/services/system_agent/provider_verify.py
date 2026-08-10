@@ -2,18 +2,22 @@
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...crypto import decrypt_str
 from ...db.models.command import LLMProvider
+from ...llm_probe_defaults import (
+    QUICK_VERIFY_MAX_TOKENS,
+    QUICK_VERIFY_MESSAGE,
+    QUICK_VERIFY_SYSTEM_PROMPT,
+    QUICK_VERIFY_TIMEOUT_SECONDS,
+)
 from ...services import llm_quick_verify
 from ...services.llm_request_headers import decrypt_request_headers
+from ...util.proxy import ProxyConfigError
 from .registry import ActionKeepPendingError
-
-_HTTP_STATUS_RE = re.compile(r"接口返回\s+(\d{3})\b")
 
 
 def _verification_failure(
@@ -21,10 +25,17 @@ def _verification_failure(
     *,
     using_saved_key: bool,
     retain_temporary_key: bool,
+    status_code: int | None = None,
+    upstream_status_code: int | None = None,
+    error_category: str | None = None,
 ) -> ActionKeepPendingError:
-    match = _HTTP_STATUS_RE.search(message)
-    status_code = int(match.group(1)) if match else None
-    if status_code in {401, 403}:
+    # 只使用 quick verify 明确传来的结构化事实。包装错误文案里的 401/403/5xx
+    # 可能属于其他链路，不能据此判断密钥无效或提示重试。
+    effective_status = upstream_status_code or status_code
+    if effective_status in {401, 403} or error_category in {
+        "auth_failed",
+        "permission_denied",
+    }:
         return ActionKeepPendingError(
             f"Provider 验证失败：{message}。鉴权失败；如需更换密钥，请重新输入后再确认。已保存的 Provider 配置未修改。",
             code="API_KEY_REJECTED",
@@ -53,7 +64,7 @@ async def run_quick_verify(
     client_identity_profile: str = "auto",
     request_headers: list[object] | None = None,
     proxy_url: str | None = None,
-    timeout_seconds: int = 45,
+    timeout_seconds: int = QUICK_VERIFY_TIMEOUT_SECONDS,
     using_saved_key: bool = False,
     retain_temporary_key: bool = False,
 ) -> dict[str, Any]:
@@ -95,9 +106,9 @@ async def run_quick_verify(
         proxy_url=proxy_url,
         model=model,
         reasoning_effort=None,
-        system_prompt="You are a connectivity probe. Reply with a short OK.",
-        message="ping",
-        max_tokens=32,
+        system_prompt=QUICK_VERIFY_SYSTEM_PROMPT,
+        message=QUICK_VERIFY_MESSAGE,
+        max_tokens=QUICK_VERIFY_MAX_TOKENS,
         timeout_seconds=timeout_seconds,
     ):
         if not isinstance(event, dict):
@@ -112,6 +123,13 @@ async def run_quick_verify(
                 last_error,
                 using_saved_key=using_saved_key,
                 retain_temporary_key=retain_temporary_key,
+                status_code=event.get("status_code")
+                if isinstance(event.get("status_code"), int)
+                else None,
+                upstream_status_code=event.get("upstream_status_code")
+                if isinstance(event.get("upstream_status_code"), int)
+                else None,
+                error_category=str(event.get("error_category") or "").strip() or None,
             )
         if et == "done" and event.get("ok"):
             final = {
@@ -142,6 +160,17 @@ async def resolve_provider_verify_args(
 ) -> dict[str, Any]:
     """合并已有 Provider 与参数，得到 verify 所需字段。"""
 
+    async def resolve_proxy(proxy_id: int | None) -> str | None:
+        from ...services.llm_proxy_service import resolve_proxy_url
+
+        try:
+            return await resolve_proxy_url(db, proxy_id)
+        except ProxyConfigError as exc:
+            raise ActionKeepPendingError(
+                str(exc),
+                code="PROXY_CONFIG_INVALID",
+            ) from None
+
     provider_id = args.get("id") or args.get("provider_id")
     base: dict[str, Any] = {
         "provider": args.get("provider"),
@@ -159,9 +188,7 @@ async def resolve_provider_verify_args(
         base["client_identity_profile"] = base.get("client_identity_profile") or "auto"
         if bool(args.get("clear_proxy")):
             base["proxy_id"] = None
-        from ...services.llm_proxy_service import resolve_proxy_url
-
-        base["proxy_url"] = await resolve_proxy_url(db, base.get("proxy_id"))
+        base["proxy_url"] = await resolve_proxy(base.get("proxy_id"))
         return base
     row = await db.get(LLMProvider, int(provider_id))
     if row is None:
@@ -201,9 +228,7 @@ async def resolve_provider_verify_args(
                 "已保存的 Provider 兼容请求头无法解密，请在 Web 配置中重新保存。",
                 code="REQUEST_HEADERS_DECRYPT_FAILED",
             ) from None
-    from ...services.llm_proxy_service import resolve_proxy_url
-
-    base["proxy_url"] = await resolve_proxy_url(db, base.get("proxy_id"))
+    base["proxy_url"] = await resolve_proxy(base.get("proxy_id"))
     return base
 
 

@@ -152,6 +152,16 @@ export type SystemAgentStreamEvent = {
   delta?: string;
   message?: string;
   code?: string;
+  status_code?: number | null;
+  error_category?: string | null;
+  suggestion?: string | null;
+  upstream_status_code?: number | null;
+  upstream_error_code?: string | null;
+  upstream_error_message?: string | null;
+  upstream_error_detail?: string | null;
+  upstream_request_id?: string | null;
+  client_request_id?: string | null;
+  gateway_request_id?: string | null;
   tool_name?: string;
   call_id?: string;
   is_error?: boolean;
@@ -176,10 +186,25 @@ export interface SystemAgentRun {
   run_id: string;
   session_id: string;
   web_user_id: number | null;
+  bot_tg_user_id?: number | null;
+  channel?: "web" | "bot" | string;
+  pending_turn_id?: string | null;
   user_message_id: number | null;
   client_request_id: string;
   kind: "message" | "retry" | string;
-  status: "queued" | "running" | "succeeded" | "failed" | "cancelled" | string;
+  status:
+    | "queued"
+    | "running"
+    | "waiting_input"
+    | "waiting_approval"
+    | "succeeded"
+    | "failed"
+    | "cancelled"
+    | string;
+  phase?: string;
+  paused_reason?: string | null;
+  usage?: Record<string, unknown> | null;
+  elapsed_ms?: number | null;
   last_seq: number;
   cancel_requested: boolean;
   error_code?: string | null;
@@ -188,6 +213,32 @@ export interface SystemAgentRun {
   finished_at?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
+}
+
+export interface SystemAgentQueueItem {
+  id: string;
+  session_id: string;
+  run_id?: string | null;
+  web_user_id?: number | null;
+  bot_tg_user_id?: number | null;
+  channel: "web" | "bot" | string;
+  kind: string;
+  position: number;
+  status: "pending" | "dispatching" | "paused" | string;
+  blocked_reason?: string | null;
+  content: string;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface SystemAgentRunInput {
+  id: number;
+  run_id: string;
+  kind: string;
+  status: string;
+  client_request_id: string;
+  created_at?: string | null;
+  applied_at?: string | null;
 }
 
 export async function getSystemAgentConfig(): Promise<SystemAgentConfig> {
@@ -230,9 +281,61 @@ export async function listSystemAgentRuns(params?: {
   since?: string;
   until?: string;
   limit?: number;
+  include_bot?: boolean;
 }): Promise<SystemAgentRun[]> {
   const { data } = await api.get<SystemAgentRun[]>("/api/system-agent/runs", { params });
   return data;
+}
+
+export async function listSystemAgentQueue(params?: {
+  session_id?: string;
+  include_bot?: boolean;
+}): Promise<SystemAgentQueueItem[]> {
+  const { data } = await api.get<SystemAgentQueueItem[]>("/api/system-agent/queue", {
+    params,
+  });
+  return data;
+}
+
+export async function updateSystemAgentQueueItem(
+  turnId: string,
+  payload: { content?: string; pinned?: boolean },
+): Promise<SystemAgentQueueItem> {
+  const { data } = await api.patch<SystemAgentQueueItem>(
+    `/api/system-agent/queue/${turnId}`,
+    payload,
+  );
+  return data;
+}
+
+export async function deleteSystemAgentQueueItem(turnId: string): Promise<SystemAgentRun> {
+  const { data } = await api.delete<SystemAgentRun>(`/api/system-agent/queue/${turnId}`);
+  return data;
+}
+
+export async function reorderSystemAgentQueue(
+  sessionId: string,
+  turnIds: string[],
+): Promise<SystemAgentQueueItem[]> {
+  const { data } = await api.post<SystemAgentQueueItem[]>(
+    `/api/system-agent/sessions/${sessionId}/queue/reorder`,
+    { turn_ids: turnIds },
+  );
+  return data;
+}
+
+export async function clearSystemAgentQueue(sessionId: string): Promise<number> {
+  const { data } = await api.delete<{ count: number }>(
+    `/api/system-agent/sessions/${sessionId}/queue`,
+  );
+  return Number(data.count || 0);
+}
+
+export async function resumeSystemAgentQueue(sessionId: string): Promise<number> {
+  const { data } = await api.post<{ count: number }>(
+    `/api/system-agent/sessions/${sessionId}/queue/resume`,
+  );
+  return Number(data.count || 0);
 }
 
 export interface SystemAgentUserMemory {
@@ -319,8 +422,18 @@ export async function listSystemAgentMessages(
 
 /** 本轮模型选择：auto 走全局配置；pinned 固定 provider+model（不改全局） */
 export type SystemAgentModelSelection =
-  | { mode: "auto" }
-  | { mode: "pinned"; provider_id: number; model: string };
+  | {
+      mode: "auto";
+      execution_backend?: "provider" | "direct" | "codex_gateway";
+      client_identity_profile?: string | null;
+    }
+  | {
+      mode: "pinned";
+      provider_id: number;
+      model: string;
+      execution_backend?: "provider" | "direct" | "codex_gateway";
+      client_identity_profile?: string | null;
+    };
 
 export async function startSystemAgentRun(
   sessionId: string,
@@ -383,6 +496,63 @@ export async function getSystemAgentRun(runId: string): Promise<SystemAgentRun> 
 
 export async function cancelSystemAgentRun(runId: string): Promise<SystemAgentRun> {
   const { data } = await api.post<SystemAgentRun>(`/api/system-agent/runs/${runId}/cancel`);
+  return data;
+}
+
+export async function steerSystemAgentRun(
+  runId: string,
+  payload: { content: string; client_request_id: string },
+): Promise<SystemAgentRunInput> {
+  const { data } = await api.post<SystemAgentRunInput>(
+    `/api/system-agent/runs/${runId}/steer`,
+    payload,
+  );
+  return data;
+}
+
+export async function submitSystemAgentRunInput(
+  runId: string,
+  payload: {
+    content?: string;
+    fallback_provider_id?: number | null;
+    client_request_id: string;
+  },
+): Promise<SystemAgentRunInput> {
+  const { data } = await api.post<SystemAgentRunInput>(
+    `/api/system-agent/runs/${runId}/input`,
+    payload,
+  );
+  return data;
+}
+
+export async function approveSystemAgentRun(
+  runId: string,
+  payload: {
+    approved: boolean;
+    approved_tools?: string[];
+    content?: string;
+    client_request_id: string;
+  },
+): Promise<SystemAgentRunInput> {
+  const { data } = await api.post<SystemAgentRunInput>(
+    `/api/system-agent/runs/${runId}/approval`,
+    payload,
+  );
+  return data;
+}
+
+export async function stopAndReplaceSystemAgentRun(
+  runId: string,
+  payload: {
+    content: string;
+    client_request_id: string;
+    model_selection?: SystemAgentModelSelection | null;
+  },
+): Promise<SystemAgentRun> {
+  const { data } = await api.post<SystemAgentRun>(
+    `/api/system-agent/runs/${runId}/stop-and-replace`,
+    payload,
+  );
   return data;
 }
 

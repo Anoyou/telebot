@@ -401,6 +401,10 @@ def test_usage_record_fields() -> None:
         provider_name="test-provider",
         model="gpt-4o",
         client_identity_profile="openai_sdk",
+        execution_backend="codex_gateway",
+        gateway_version="0.1.0-beta.1",
+        gateway_request_id="gw-db-1",
+        gateway_stage="upstream",
         input_tokens=100,
         output_tokens=50,
         latency_ms=1500,
@@ -465,6 +469,10 @@ async def test_llm_usage_persist_writes_triggered_by_account_id(monkeypatch) -> 
         provider_name="test-provider",
         model="gpt-4o",
         client_identity_profile="openai_sdk",
+        execution_backend="codex_gateway",
+        gateway_version="0.1.0-beta.1",
+        gateway_request_id="gw-db-1",
+        gateway_stage="upstream",
         input_tokens=10,
         output_tokens=5,
         success=True,
@@ -497,6 +505,10 @@ async def test_llm_usage_persist_writes_triggered_by_account_id(monkeypatch) -> 
     assert len(captured_rows) == 1
     assert captured_rows[0].triggered_by_account_id == 123
     assert captured_rows[0].client_identity_profile == "openai_sdk"
+    assert captured_rows[0].execution_backend == "codex_gateway"
+    assert captured_rows[0].gateway_version == "0.1.0-beta.1"
+    assert captured_rows[0].gateway_request_id == "gw-db-1"
+    assert captured_rows[0].gateway_stage == "upstream"
     assert captured_rows[0].request_preview == "system: hello"
     assert captured_rows[0].response_preview == "world"
 
@@ -1083,7 +1095,7 @@ async def test_call_with_fallback_all_fail_raises(monkeypatch) -> None:
             await _rt.call_with_fallback(chain, "sys", "user", max_tokens=100)
 
     # 最后失败的 provider 应该是 primary（因为第一个尝试）
-    assert exc_info.value.error_type in ("auth", "unknown")
+    assert exc_info.value.error_type == "auth_failed"
 
 
 # ════════════════════════════════════════════════════════════
@@ -1257,7 +1269,7 @@ async def test_openai_client_wraps_typed_error(
     assert exc_info.value.scope is expected_scope
 
 
-def test_upstream_failed_400_is_provider_local() -> None:
+def test_upstream_failed_400_is_request_invalid() -> None:
     from app.services import llm_client
 
     scope = llm_client._error_scope_for_http(
@@ -1265,14 +1277,30 @@ def test_upstream_failed_400_is_provider_local() -> None:
         '{"error":{"message":"Error from provider (Console): Upstream request failed"}}',
     )
 
-    assert scope is LLMErrorScope.PROVIDER_LOCAL
+    assert scope is LLMErrorScope.REQUEST_INVALID
 
 
 def test_error_classifier_prefers_http_status_code() -> None:
     from app.services import llm_runtime as _rt
 
-    assert _rt._classify_error(LLMError("upstream unavailable", status_code=503)) == "server_error"
-    assert _rt._classify_error(LLMError("busy", status_code=429)) == "rate_limit"
+    assert _rt._classify_error(LLMError("upstream unavailable", status_code=503)) == "upstream_error"
+    assert _rt._classify_error(LLMError("busy", status_code=429)) == "rate_limited"
+
+
+def test_llm_error_carries_unified_diagnostic_fields() -> None:
+    from app.services import llm_diagnostics as diag
+
+    error = LLMError(
+        '{"error":{"code":"client_rejected","message":"official client only"}}',
+        status_code=403,
+        request_id="req-safe",
+        gateway_stage="upstream",
+    )
+    assert error.category == diag.DIAG_CLIENT_REJECTED
+    assert error.status_code == 403
+    assert error.scope is LLMErrorScope.PROVIDER_LOCAL
+    assert error.request_id == "req-safe"
+    assert error.gateway_stage == "upstream"
 
 
 @pytest.mark.asyncio
@@ -1628,6 +1656,220 @@ async def test_call_with_fallback_records_latency(monkeypatch) -> None:
     assert captured[0].latency_ms >= 10
 
 
+@pytest.mark.asyncio
+async def test_gateway_success_records_transport_metadata(monkeypatch) -> None:
+    from app.services import llm_runtime as _rt
+
+    captured: list[UsageRecord] = []
+
+    async def _capture(record: UsageRecord) -> None:
+        captured.append(record)
+
+    async def _gateway_call(*_args, **_kwargs):
+        return LLMResult(
+            text="ok",
+            model="gpt-x",
+            input_tokens=2,
+            output_tokens=1,
+            execution_backend="codex_gateway",
+            gateway_version="0.1.0-beta.1",
+            gateway_request_id="gw-usage-1",
+        )
+
+    monkeypatch.setattr(_rt, "_emit_usage", _capture)
+    monkeypatch.setattr(_rt, "_call_with_retry", _gateway_call)
+    provider = LLMProviderDTO(
+        id=8,
+        name="gateway",
+        provider="openai",
+        execution_backend="codex_gateway",
+        api_format="responses",
+        protocol_profile="codex_responses",
+        default_model="gpt-x",
+    )
+
+    await _rt.call_with_fallback(FallbackChain(provider), "sys", "user", max_tokens=20)
+
+    assert len(captured) == 1
+    assert captured[0].execution_backend == "codex_gateway"
+    assert captured[0].gateway_version == "0.1.0-beta.1"
+    assert captured[0].gateway_request_id == "gw-usage-1"
+    assert captured[0].gateway_stage is None
+
+
+def test_direct_usage_does_not_mislabel_upstream_request_id_as_gateway() -> None:
+    from app.services import llm_runtime as _rt
+
+    provider = LLMProviderDTO(
+        id=9,
+        name="direct",
+        provider="openai",
+        execution_backend="direct",
+        default_model="gpt-x",
+    )
+    error = LLMError("failed", request_id="upstream-request-1")
+
+    facts = _rt.usage_transport_fields(provider, error)
+
+    assert facts == {
+        "execution_backend": "direct",
+        "gateway_version": None,
+        "gateway_request_id": None,
+        "gateway_stage": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_legacy_gateway_failure_usage_is_kept_before_direct_fallback(monkeypatch) -> None:
+    from app.services import llm_runtime as _rt
+
+    captured: list[UsageRecord] = []
+    attempts = 0
+
+    async def _capture(record: UsageRecord) -> None:
+        captured.append(record)
+
+    async def _call(provider, *_args, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        if provider.execution_backend == "codex_gateway":
+            raise LLMError(
+                "gateway unavailable",
+                retryable=True,
+                scope=LLMErrorScope.TRANSIENT,
+                category="gateway_unavailable",
+                request_id="gw-legacy-1",
+                gateway_stage="transport",
+                gateway_version="0.1.0-beta.1",
+                execution_backend="codex_gateway",
+            )
+        return LLMResult(text="ok", model="gpt-y", input_tokens=1, output_tokens=1)
+
+    monkeypatch.setattr(_rt, "_emit_usage", _capture)
+    monkeypatch.setattr(_rt, "_call_with_retry", _call)
+    gateway = LLMProviderDTO(
+        id=1,
+        name="gateway",
+        provider="openai",
+        execution_backend="codex_gateway",
+        api_format="responses",
+        default_model="gpt-x",
+    )
+    direct = LLMProviderDTO(
+        id=2,
+        name="direct",
+        provider="openai",
+        execution_backend="direct",
+        api_format="responses",
+        default_model="gpt-y",
+    )
+
+    result, used, used_fallback = await _rt.call_with_fallback(
+        FallbackChain(gateway, [direct]),
+        "sys",
+        "user",
+        max_tokens=20,
+    )
+
+    assert result.text == "ok"
+    assert used.id == 2
+    assert used_fallback is True
+    assert attempts == 2
+    assert [(item.provider_id, item.success) for item in captured] == [(1, False), (2, True)]
+    assert captured[0].gateway_request_id == "gw-legacy-1"
+    assert captured[1].gateway_request_id is None
+
+
+@pytest.mark.asyncio
+async def test_gateway_failure_falls_back_to_other_provider_without_same_provider_direct(
+    monkeypatch,
+) -> None:
+    from app.services import llm_runtime as _rt
+    from app.services.llm_protocol import (
+        MessageRole,
+        ModelMessage,
+        ModelRequest,
+        ModelResponse,
+        ModelUsage,
+        StopReason,
+        TextContent,
+    )
+
+    attempts: list[tuple[int, str, str]] = []
+
+    class _Client:
+        def __init__(self, provider: LLMProviderDTO, model: str) -> None:
+            self.provider = provider
+            self.model = model
+
+        async def invoke(self, _request: ModelRequest) -> ModelResponse:
+            attempts.append((self.provider.id, self.provider.execution_backend, self.model))
+            if self.provider.execution_backend == "codex_gateway":
+                raise LLMError(
+                    "gateway unavailable",
+                    retryable=True,
+                    scope=LLMErrorScope.TRANSIENT,
+                    category="gateway_unavailable",
+                    request_id="gw-fallback-1",
+                    gateway_stage="transport",
+                    gateway_version="0.1.0-beta.1",
+                )
+            return ModelResponse(
+                model=self.model,
+                content=(TextContent("fallback ok"),),
+                usage=ModelUsage(input_tokens=1, output_tokens=1),
+                    stop_reason=StopReason.COMPLETED,
+            )
+
+    def factory(provider: LLMProviderDTO, *, override_model: str, **_kwargs):
+        return _Client(provider, override_model)
+
+    async def _capture(_record: UsageRecord) -> None:
+        return None
+
+    monkeypatch.setattr(_rt, "_emit_usage", _capture)
+    monkeypatch.setattr(_rt.llm_account_budget, "settle", AsyncMock())
+    monkeypatch.setattr(
+        _rt,
+        "_check_budget",
+        AsyncMock(return_value=_rt.BudgetCheck()),
+    )
+    gateway = LLMProviderDTO(
+        id=1,
+        name="gateway",
+        provider="openai",
+        execution_backend="codex_gateway",
+        api_format="responses",
+        default_model="gpt-x",
+        models=[{"id": "gpt-x", "enabled": True}],
+    )
+    fallback = LLMProviderDTO(
+        id=2,
+        name="direct",
+        provider="openai",
+        execution_backend="direct",
+        api_format="responses",
+        default_model="gpt-y",
+        models=[{"id": "gpt-y", "enabled": True}],
+    )
+    request = ModelRequest(
+        model="gpt-x",
+        messages=(ModelMessage.text(MessageRole.USER, "hi"),),
+        metadata={"model_pinned": False, "max_retries_per_model": 0},
+    )
+
+    response, used, used_fallback = await _rt.invoke_model_with_fallback(
+        FallbackChain(gateway, [fallback]),
+        request,
+        client_factory=factory,
+    )
+
+    assert response.text == "fallback ok"
+    assert used.id == 2
+    assert used_fallback is True
+    assert attempts == [(1, "codex_gateway", "gpt-x"), (2, "direct", "gpt-y")]
+
+
 def test_usage_identity_resolves_auto_from_effective_protocol() -> None:
     """Usage 保存实际协议解析后的身份，不保存 Provider 的 auto 配置值。"""
     from app.services import llm_runtime as _rt
@@ -1648,13 +1890,32 @@ def test_usage_identity_resolves_auto_from_effective_protocol() -> None:
             provider,
             effective_api_format="responses",
         )
-        == "codex_tui"
+        == "openai_sdk"
     )
+    provider.api_format = "responses"
+    provider.protocol_profile = "codex_responses"
+    assert _rt.resolve_usage_client_identity_profile(provider) == "codex_tui"
+    provider.execution_backend = "codex_gateway"
+    assert _rt.resolve_usage_client_identity_profile(provider) == "gateway_managed"
+
+
+def test_gateway_web_search_ignores_dormant_direct_protocol_override() -> None:
+    provider = LLMProviderDTO(
+        id=2,
+        name="gateway",
+        provider="anthropic",
+        default_model="claude-proxy",
+        api_format="responses",
+        web_search_api_format="anthropic_messages",
+        execution_backend="codex_gateway",
+    )
+
+    assert _api_format_for_call(provider, web_search=True) == "responses"
 
 
 @pytest.mark.asyncio
 async def test_web_search_usage_records_identity_for_overridden_protocol(monkeypatch) -> None:
-    """联网调用切到 Responses 时，usage 应记录 Codex CLI 而非原 Chat 身份。"""
+    """联网调用切到标准 Responses 时，usage 应记录 OpenAI SDK 身份。"""
     from app.services import llm_invoke
     from app.services import llm_runtime as _rt
     from app.services.llm_client import LLMResult
@@ -1690,7 +1951,7 @@ async def test_web_search_usage_records_identity_for_overridden_protocol(monkeyp
     )
 
     assert len(captured) == 1
-    assert captured[0].client_identity_profile == "codex_tui"
+    assert captured[0].client_identity_profile == "openai_sdk"
 
 
 __all__ = []

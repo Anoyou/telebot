@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
 from sqlalchemy import select, text
@@ -96,47 +95,14 @@ async def get_health(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
 
 
 async def get_resources(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
-    """读取当前主机与 TelePilot 进程树的资源快照。"""
+    """复用资源面板 collector，避免维护第二套口径更弱的采样逻辑。"""
 
+    del ctx, args
     try:
-        import psutil
+        from ....api.system_health import get_resource_dashboard
 
-        process = psutil.Process(os.getpid())
-        children = process.children(recursive=True)
-
-        def process_view(item: Any) -> dict[str, Any]:
-            try:
-                memory = item.memory_info()
-                return {
-                    "pid": int(item.pid),
-                    "name": str(item.name()),
-                    "cpu_percent": float(item.cpu_percent(interval=None)),
-                    "rss_mb": round(float(memory.rss) / 1024 / 1024, 2),
-                    "status": str(item.status()),
-                }
-            except Exception as exc:  # noqa: BLE001
-                return {"pid": int(item.pid), "error": type(exc).__name__}
-
-        vm = psutil.virtual_memory()
-        disk = psutil.disk_usage("/")
-        rows = [process_view(process), *(process_view(item) for item in children)]
-        rows.sort(key=lambda item: float(item.get("rss_mb") or 0), reverse=True)
-        return {
-            "host": {
-                "cpu_percent": float(psutil.cpu_percent(interval=None)),
-                "memory_percent": float(vm.percent),
-                "memory_available_mb": round(float(vm.available) / 1024 / 1024, 2),
-                "disk_percent": float(disk.percent),
-                "disk_free_gb": round(float(disk.free) / 1024 / 1024 / 1024, 2),
-                "load_average": list(os.getloadavg()) if hasattr(os, "getloadavg") else [],
-            },
-            "process_count": len(rows),
-            "project_rss_mb": round(
-                sum(float(item.get("rss_mb") or 0) for item in rows), 2
-            ),
-            "processes": rows[:20],
-            "business_changed": False,
-        }
+        snapshot = await get_resource_dashboard(None)  # type: ignore[arg-type]
+        return {**snapshot.model_dump(mode="json"), "business_changed": False}
     except Exception as exc:  # noqa: BLE001
         return {
             "error": "resource_probe_failed",

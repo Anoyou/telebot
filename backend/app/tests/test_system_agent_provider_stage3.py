@@ -17,6 +17,12 @@ from app.db.models.system_agent import (
     SystemAgentMessage,
     SystemAgentSession,
 )
+from app.llm_probe_defaults import (
+    QUICK_VERIFY_MAX_TOKENS,
+    QUICK_VERIFY_MESSAGE,
+    QUICK_VERIFY_SYSTEM_PROMPT,
+    QUICK_VERIFY_TIMEOUT_SECONDS,
+)
 from app.services.system_agent.actions import decrypt_secret_payload, encrypt_secret_payload
 from app.services.system_agent.context import ToolContext
 from app.services.system_agent.executor import ActionExecutor
@@ -232,6 +238,138 @@ async def test_precheck_success_then_execute(action_db, monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_provider_action_syncs_gateway_candidate_before_commit(
+    action_db, monkeypatch
+) -> None:
+    import asyncio
+
+    from app.services import gateway_runtime
+    from app.services.gateway_runtime import GatewayRuntimeStatus
+
+    async def execute(ctx, _args):  # noqa: ANN001
+        ctx.gateway_candidate_sync = True
+        return {"saved": True, "business_changed": True}
+
+    reg = ToolRegistry()
+    reg.register(
+        ToolSpec(
+            name="providers.save",
+            description="save",
+            input_schema={"type": "object"},
+            read_only=False,
+            min_role="admin",
+            preview_handler=AsyncMock(return_value={"summary": "save"}),
+            execute_handler=execute,
+        )
+    )
+    sync = AsyncMock(
+        return_value=GatewayRuntimeStatus("ready", True, 1, 1, version="test")
+    )
+    monkeypatch.setattr("app.services.system_agent.executor.get_registry", lambda: reg)
+    monkeypatch.setattr("app.services.system_agent.executor.AsyncSessionLocal", action_db)
+    monkeypatch.setattr("app.services.system_agent.executor.audit.write", AsyncMock())
+    monkeypatch.setattr(gateway_runtime, "gateway_provider_transaction_lock", asyncio.Lock())
+    monkeypatch.setattr(gateway_runtime, "reconcile_gateway_runtime_from_session", sync)
+
+    async with action_db() as db:
+        db.add(
+            SystemAgentAction(
+                id="act-gateway-sync",
+                channel=CHANNEL_WEB,
+                tool_name="providers.save",
+                arguments={"name": "gateway"},
+                summary="save",
+                preview={},
+                status=ACTION_STATUS_PENDING,
+                actor_user_id=1,
+                expires_at=datetime.now(UTC) + timedelta(minutes=5),
+            )
+        )
+        await db.commit()
+
+    result = await ActionExecutor().confirm(
+        action_id="act-gateway-sync", role="admin", web_user_id=1
+    )
+
+    assert result["ok"] is True
+    sync.assert_awaited_once()
+    assert gateway_runtime.gateway_provider_transaction_lock.locked() is False
+
+
+@pytest.mark.asyncio
+async def test_provider_action_commit_failure_restores_gateway_snapshot(
+    action_db, monkeypatch
+) -> None:
+    import asyncio
+
+    from app.services import gateway_runtime
+    from app.services.gateway_runtime import GatewayRuntimeStatus
+
+    async def execute(ctx, _args):  # noqa: ANN001
+        ctx.gateway_candidate_sync = True
+
+        async def fail_commit() -> None:
+            raise RuntimeError("commit failed")
+
+        ctx.db.commit = fail_commit
+        return {"saved": True, "business_changed": True}
+
+    reg = ToolRegistry()
+    reg.register(
+        ToolSpec(
+            name="providers.save",
+            description="save",
+            input_schema={"type": "object"},
+            read_only=False,
+            min_role="admin",
+            preview_handler=AsyncMock(return_value={"summary": "save"}),
+            execute_handler=execute,
+        )
+    )
+    sync = AsyncMock(
+        return_value=GatewayRuntimeStatus("ready", True, 1, 1, version="test")
+    )
+
+    async def restore(db):  # noqa: ANN001
+        await db.rollback()
+        return True
+
+    restore_mock = AsyncMock(side_effect=restore)
+    monkeypatch.setattr("app.services.system_agent.executor.get_registry", lambda: reg)
+    monkeypatch.setattr("app.services.system_agent.executor.AsyncSessionLocal", action_db)
+    monkeypatch.setattr("app.services.system_agent.executor.audit.write", AsyncMock())
+    monkeypatch.setattr(gateway_runtime, "gateway_provider_transaction_lock", asyncio.Lock())
+    monkeypatch.setattr(gateway_runtime, "reconcile_gateway_runtime_from_session", sync)
+    monkeypatch.setattr(gateway_runtime, "rollback_and_restore_gateway", restore_mock)
+
+    async with action_db() as db:
+        db.add(
+            SystemAgentAction(
+                id="act-gateway-commit-fail",
+                channel=CHANNEL_WEB,
+                tool_name="providers.save",
+                arguments={"name": "gateway"},
+                summary="save",
+                preview={},
+                status=ACTION_STATUS_PENDING,
+                actor_user_id=1,
+                expires_at=datetime.now(UTC) + timedelta(minutes=5),
+            )
+        )
+        await db.commit()
+
+    result = await ActionExecutor().confirm(
+        action_id="act-gateway-commit-fail", role="admin", web_user_id=1
+    )
+
+    assert result["ok"] is False
+    assert result["error_code"] == "COMMIT_FAILED"
+    sync.assert_awaited_once()
+    restore_mock.assert_awaited_once()
+    assert gateway_runtime.gateway_provider_transaction_lock.locked() is False
+
+
+@pytest.mark.asyncio
 async def test_probe_action_pipeline_replaces_mask_and_encrypts_chat_secret(action_db) -> None:
     async def preview(_ctx, args):  # noqa: ANN001
         assert args["api_key"] == "sk-real-secret-value-from-chat"
@@ -357,6 +495,46 @@ async def test_existing_provider_verify_uses_encrypted_compatibility_headers(mon
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("args", [{"proxy_id": 7}, {"id": 7}])
+async def test_provider_verify_keeps_action_pending_for_invalid_proxy(
+    monkeypatch,
+    args,
+) -> None:
+    from app.services import llm_proxy_service
+    from app.services.system_agent import provider_verify
+    from app.services.system_agent.registry import ActionKeepPendingError
+    from app.util.proxy import ProxyConfigError
+
+    row = SimpleNamespace(
+        provider="openai",
+        base_url="https://api.example/v1",
+        default_model="model",
+        api_format="responses",
+        api_key_enc=None,
+        request_headers_enc=None,
+        protocol_profile="standard",
+        client_identity_profile="auto",
+        proxy_id=7,
+    )
+
+    class _Db:
+        async def get(self, _model, _provider_id):  # noqa: ANN001
+            return row
+
+    monkeypatch.setattr(
+        llm_proxy_service,
+        "resolve_proxy_url",
+        AsyncMock(side_effect=ProxyConfigError("代理 #7 不存在，拒绝回落直连")),
+    )
+
+    with pytest.raises(ActionKeepPendingError) as raised:
+        await provider_verify.resolve_provider_verify_args(_Db(), args)
+
+    assert raised.value.code == "PROXY_CONFIG_INVALID"
+    assert "拒绝回落直连" in raised.value.message
+
+
+@pytest.mark.asyncio
 async def test_run_quick_verify_forwards_compatibility_headers(monkeypatch) -> None:
     from app.services.system_agent import provider_verify
 
@@ -385,3 +563,76 @@ async def test_run_quick_verify_forwards_compatibility_headers(monkeypatch) -> N
 
     assert result["ok"] is True
     assert captured["request_headers"] == headers
+    assert captured["system_prompt"] == QUICK_VERIFY_SYSTEM_PROMPT
+    assert captured["message"] == QUICK_VERIFY_MESSAGE
+    assert captured["max_tokens"] == QUICK_VERIFY_MAX_TOKENS
+    assert captured["timeout_seconds"] == QUICK_VERIFY_TIMEOUT_SECONDS
+
+
+def test_agent_client_selection_can_temporarily_force_direct_identity() -> None:
+    from app.services.llm_dto import LLMProviderDTO
+    from app.services.system_agent.config import ResolvedAgentProviders
+    from app.services.system_agent.runtime import _apply_client_selection
+
+    provider = LLMProviderDTO(
+        id=7,
+        name="Gateway provider",
+        provider="openai",
+        execution_backend="codex_gateway",
+        api_format="responses",
+        protocol_profile="codex_responses",
+        client_identity_profile="auto",
+        base_url="https://api.example.test/v1",
+        api_key_enc="encrypted",
+        default_model="gpt-5",
+        models=[{"id": "gpt-5", "enabled": True, "supports_tools": True}],
+    )
+    resolved = ResolvedAgentProviders(
+        primary=provider,
+        model="gpt-5",
+        providers={provider.id: provider},
+    )
+
+    selected = _apply_client_selection(
+        resolved,
+        {
+            "mode": "pinned",
+            "execution_backend": "direct",
+            "client_identity_profile": "grok_cli",
+        },
+    )
+
+    assert not isinstance(selected, str)
+    assert selected.primary.execution_backend == "direct"
+    assert selected.primary.client_identity_profile == "grok_cli"
+    assert provider.execution_backend == "codex_gateway"
+
+
+def test_agent_gateway_client_rejects_direct_pinned_provider() -> None:
+    from app.services.llm_dto import LLMProviderDTO
+    from app.services.system_agent.config import ResolvedAgentProviders
+    from app.services.system_agent.runtime import _apply_client_selection
+
+    provider = LLMProviderDTO(
+        id=8,
+        name="Direct provider",
+        provider="openai",
+        execution_backend="direct",
+        api_format="responses",
+        base_url="https://api.example.test/v1",
+        api_key_enc="encrypted",
+        default_model="gpt-5",
+        models=[{"id": "gpt-5", "enabled": True, "supports_tools": True}],
+    )
+    resolved = ResolvedAgentProviders(
+        primary=provider,
+        model="gpt-5",
+        providers={provider.id: provider},
+    )
+
+    selected = _apply_client_selection(
+        resolved,
+        {"mode": "pinned", "execution_backend": "codex_gateway"},
+    )
+
+    assert selected == "该 Provider 未配置为 Codex 客户端兼容模式（Gateway），不能在 Agent 中临时切换"

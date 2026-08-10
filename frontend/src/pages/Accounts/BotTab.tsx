@@ -1284,7 +1284,6 @@ function InteractionRuleEditor({
     : rule.moduleAction || "待选择";
   const moduleActionValue = rule.moduleAction.trim() || selectedModule?.entry.key || "";
   const ruleChatCount = countDelimitedTextItems(rule.chatIds);
-  const keywordCount = countDelimitedTextItems(rule.moduleStartKeywords);
   const triggerTextCount = countDelimitedTextItems(rule.triggerTexts);
   const visibleEntries = filterInteractionEntries(interactionEntries, entryProfileTab);
   const availableProfileGroups = INTERACTION_PROFILE_ORDER.map((profile) => {
@@ -2134,16 +2133,6 @@ export function BotTab({
       label: `${feature.display_name} / ${entry.title || entry.label || entry.key}`,
     })),
   );
-  const interactionProfileGroups = INTERACTION_PROFILE_ORDER.map((profile) => {
-    const items = interactionEntries.filter((item) => item.entry.interaction_profile === profile);
-    return {
-      profile,
-      label: interactionProfileLabel(profile) || profile,
-      items,
-    };
-  }).filter((group) => group.items.length > 0);
-  const ungroupedInteractionEntries = interactionEntries.filter((item) => !item.entry.interaction_profile);
-
   useEffect(() => {
     if (botQ.data) {
       setEnabled(botQ.data.enabled);

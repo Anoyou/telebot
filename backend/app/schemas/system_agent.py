@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -116,6 +116,17 @@ class SystemAgentModelSelection(BaseModel):
     mode: str = Field(default="auto", pattern="^(auto|pinned)$")
     provider_id: int | None = Field(default=None, ge=1)
     model: str | None = Field(default=None, max_length=128)
+    execution_backend: Literal["provider", "direct", "codex_gateway"] = "provider"
+    client_identity_profile: Literal[
+        "auto",
+        "minimal",
+        "openai_sdk",
+        "codex_tui",
+        "codex_desktop",
+        "claude_code",
+        "claude_desktop",
+        "grok_cli",
+    ] | None = None
 
     @model_validator(mode="after")
     def _pinned_requires_target(self) -> SystemAgentModelSelection:
@@ -152,17 +163,79 @@ class SystemAgentRegenerateRunCreate(SystemAgentMessageRetry):
     content: str | None = Field(default=None, min_length=1, max_length=32_000)
 
 
+class SystemAgentQueueItemPatch(BaseModel):
+    content: str | None = Field(default=None, min_length=1, max_length=32_000)
+    pinned: bool | None = None
+
+
+class SystemAgentQueueReorder(BaseModel):
+    turn_ids: list[str] = Field(default_factory=list, max_length=100)
+
+
+class SystemAgentQueueItemOut(BaseModel):
+    id: str
+    session_id: str
+    run_id: str | None = None
+    web_user_id: int | None = None
+    bot_tg_user_id: int | None = None
+    channel: str
+    kind: str
+    position: int
+    status: str
+    blocked_reason: str | None = None
+    content: str
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class SystemAgentQueueMutationOut(BaseModel):
+    count: int = 0
+
+
+class SystemAgentRunInputCreate(BaseModel):
+    client_request_id: str = Field(min_length=8, max_length=64)
+    content: str | None = Field(default=None, min_length=1, max_length=32_000)
+    fallback_provider_id: int | None = Field(default=None, ge=1)
+    approved_tools: list[str] = Field(default_factory=list, max_length=64)
+    approved: bool | None = None
+
+
+class SystemAgentRunInputOut(BaseModel):
+    id: int
+    run_id: str
+    kind: str
+    status: str
+    client_request_id: str
+    created_at: datetime | None = None
+    applied_at: datetime | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class SystemAgentStopReplaceCreate(BaseModel):
+    client_request_id: str = Field(min_length=8, max_length=64)
+    content: str = Field(min_length=1, max_length=32_000)
+    model_selection: SystemAgentModelSelection | None = None
+
+
 class SystemAgentRunOut(BaseModel):
     id: str
     run_id: str = Field(validation_alias="id")
     session_id: str
     web_user_id: int | None = None
+    bot_tg_user_id: int | None = None
+    channel: str = "web"
+    pending_turn_id: str | None = None
     user_message_id: int | None = None
     client_request_id: str
     kind: str
     status: str
     last_seq: int = 0
     cancel_requested: bool = False
+    phase: str = "queued"
+    paused_reason: str | None = None
+    usage: dict[str, Any] | None = None
+    elapsed_ms: int | None = None
     error_code: str | None = None
     error_message: str | None = None
     started_at: datetime | None = None

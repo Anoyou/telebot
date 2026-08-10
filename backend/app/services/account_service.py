@@ -190,6 +190,17 @@ async def update_account(db: AsyncSession, aid: int, data: AccountUpdateRequest)
         raise _not_found()
     # 仅赋值用户显式给出的字段（exclude_unset 区分 None 与 未传）
     payload = data.model_dump(exclude_unset=True)
+    proxy_id = payload.get("proxy_id")
+    if proxy_id is not None:
+        proxy = await db.get(Proxy, int(proxy_id))
+        if proxy is None:
+            raise _err("PROXY_NOT_FOUND", f"代理 #{proxy_id} 不存在", 404)
+        if str(proxy.type or "").lower() not in {"socks5", "http", "https"}:
+            raise _err(
+                "PROXY_TYPE_UNSUPPORTED",
+                f"代理类型 {proxy.type!r} 当前不受支持，请先在代理库中改为 SOCKS5、HTTP 或 HTTPS",
+                422,
+            )
     need_restart_worker = False
     for k, v in payload.items():
         # proxy/template 发生实际变化后，重启 worker 让 Telethon client 重新按新配置建连。
@@ -285,6 +296,13 @@ async def delete_account(db: AsyncSession, aid: int) -> None:
         pass
 
     # 3. DELETE FROM account（cascade 会带走 humanize_config / account_feature / rule / 日志）
+    # SystemSetting 没有账号外键；显式清理交互 Bot 配置，避免删除后启动扫描反复
+    # 对不存在的账号调用 restart_interaction_bot 并触发 ACCOUNT_NOT_FOUND。
+    await db.execute(
+        delete(SystemSetting).where(
+            SystemSetting.key == f"account_bot_transfer_notice:{int(aid)}"
+        )
+    )
     await db.delete(acc)
     await db.commit()
 
@@ -295,33 +313,16 @@ async def _logout_best_effort(db: AsyncSession, acc: Account) -> None:
     api_hash = decrypt_str(acc.api_hash_enc)
     session_str = decrypt_bytes(acc.session_enc).decode()
 
-    proxy_tuple = None
-    if acc.proxy_id:
-        proxy = await db.get(Proxy, acc.proxy_id)
-        if proxy:
-            password = decrypt_str(proxy.password_enc) if proxy.password_enc else None
-            if "://" in proxy.host:
-                from ..util.proxy import parse_proxy_url
-                proxy_tuple = parse_proxy_url(proxy.host)
-                if proxy_tuple is not None:
-                    ptype, host, port, rdns, parsed_user, parsed_password = proxy_tuple
-                    proxy_tuple = (
-                        ptype,
-                        host,
-                        port,
-                        rdns,
-                        proxy.username or parsed_user,
-                        password or parsed_password,
-                    )
-            if proxy_tuple is None:
-                proxy_tuple = (
-                    proxy.type,
-                    proxy.host,
-                    proxy.port,
-                    True,
-                    proxy.username,
-                    password,
-                )
+    proxy = await db.get(Proxy, acc.proxy_id) if acc.proxy_id else None
+    if acc.proxy_id is not None and proxy is None:
+        from ..util.proxy import ProxyConfigError
+
+        raise ProxyConfigError(f"账号绑定的代理 #{acc.proxy_id} 不存在，拒绝回落直连")
+    from ..worker.tg_client import build_proxy_tuple
+
+    # 与登录/worker 共用严格解析：未绑定时尊重全局代理，显式坏配置则在构造
+    # TelegramClient 前抛错，由 delete_account 的 best-effort 边界吞掉。
+    proxy_tuple = build_proxy_tuple(proxy)
 
     client = TelegramClient(StringSession(session_str), api_id, api_hash, proxy=proxy_tuple)
     try:

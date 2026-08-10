@@ -199,6 +199,10 @@ export type ChatTestStreamEvent =
       streaming: true;
       effective_api_format?: string | null;
       client_identity_profile?: string | null;
+      execution_backend?: string | null;
+      gateway_version?: string | null;
+      gateway_request_id?: string | null;
+      gateway_stage?: string | null;
     }
   | {
       type: "delta";

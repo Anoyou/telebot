@@ -830,6 +830,7 @@ class PluginContext:
     identities: Any = None  # PluginIdentityFacade
     generation: int = 0
     account_proxy_url: str | None = None
+    account_proxy_error: str | None = None
     event: Any | None = None
     args: list[str] = field(default_factory=list)
     command: str = ""
@@ -888,8 +889,10 @@ class Plugin:
     ``message_channels`` 控制 loader 向该插件派发哪些方向的消息：
       - ``"incoming"``（默认）：群/私聊中别人发的消息
       - ``"outgoing"``：自己发送的消息
-      插件可设 ``{"incoming", "outgoing"}`` 同时监听两个方向，
-      在 ``on_message`` 内通过 ``event.outgoing`` 判断消息来源。
+      插件可设 ``{"incoming", "outgoing"}`` 同时监听两个方向。
+      loader 已按订阅方向分发；若确需在 hook 内判断原生消息方向，
+      请读取 ``event.message.out``（或裸 ``Message`` 的 ``out``），不要使用
+      Telethon 1.44 已移除的 ``event.outgoing`` 别名。
 
     插件如要追加 TG 内命令，可在类属性 ``commands`` 里登记
     （key 是命令名，value 是 ``async fn(client, event, args, account_id, ctx)``），
@@ -918,8 +921,9 @@ class Plugin:
     async def on_message(self, ctx: PluginContext, event: events.NewMessage.Event) -> None:
         """消息事件回调；默认 no-op。
 
-        接收的方向由 ``message_channels`` 类属性控制，
-        可通过 ``event.outgoing`` 区分消息来源。
+        接收的方向由 ``message_channels`` 类属性控制。
+        原生 Telethon 事件的方向字段是 ``event.message.out``；
+        ``event.outgoing`` 在 Telethon 1.44 中不存在。
         """
 
     async def on_message_edited(self, ctx: PluginContext, event: events.MessageEdited.Event) -> None:

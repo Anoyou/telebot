@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 # 前端镜像：多阶段构建
-#   - builder：node22 alpine，corepack 启用 pnpm，执行 pnpm build
+#   - builder：node22 alpine，corepack 启用 pnpm，依次执行类型检查与 Vite 构建
 #   - runtime：nginx alpine，托管 dist 静态资源 + 反代后端
 # 暴露 80 端口；通过 docker-compose 中 ${WEB_PORT_PUBLISH:-80} 对外发布
 
@@ -18,12 +18,13 @@ COPY frontend/package.json ./
 RUN --mount=type=cache,id=telepilot-pnpm,target=/pnpm/store \
     pnpm config set store-dir /pnpm/store && pnpm install --offline --frozen-lockfile
 
-# 拷贝其余源码、docs 与根更新日志（更新日志菜单会通过 ?url 读取独立静态资源）
+# 拷贝前端源码。docs 与根更新日志由生产运行时目录提供，不参与 bundle。
 COPY frontend/ .
-COPY docs/ /docs/
-COPY CHANGELOG.md /CHANGELOG.md
 RUN --mount=type=cache,id=telepilot-tsbuild,target=/app/node_modules/.cache/tsbuild \
-    pnpm build
+    pnpm typecheck
+# 生产 bundle 的稳定 live set 已超过 600 MiB，完整进程峰值会超过 1 GiB；
+# 显式给标准 CI/Buildx builder 留足 V8 余量，避免自动探测给出过小堆上限。
+RUN NODE_OPTIONS=--max-old-space-size=1536 pnpm exec vite build
 
 
 FROM nginx:1.27-alpine AS runtime

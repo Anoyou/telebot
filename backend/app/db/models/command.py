@@ -73,27 +73,58 @@ ALL_LLM_API_FORMATS = {
     LLM_API_FORMAT_ANTHROPIC_MESSAGES,
 }
 
+LLM_EXECUTION_BACKEND_DIRECT = "direct"
+LLM_EXECUTION_BACKEND_CODEX_GATEWAY = "codex_gateway"
+ALL_LLM_EXECUTION_BACKENDS = {
+    LLM_EXECUTION_BACKEND_DIRECT,
+    LLM_EXECUTION_BACKEND_CODEX_GATEWAY,
+}
+
 ALL_LLM_WEB_SEARCH_API_FORMATS = {
     LLM_WEB_SEARCH_API_FORMAT_AUTO,
     *ALL_LLM_API_FORMATS,
 }
 
-# Anthropic Messages 请求兼容档案。标准模式只发送官方协议要求的请求字段；
-# claude_code_proxy 仅用于明确要求 Claude Code 兼容头的反代服务。
+# Provider 协议兼容档案。它描述端点语义与请求/响应方言，不等同于客户端身份：
+# - standard：按 api_format 的标准协议；
+# - openai_responses / deepseek_responses / codex_responses：Responses 方言；
+# - claude_code_proxy：明确要求 Claude Code beta 语义的 Anthropic 反代。
 LLM_PROTOCOL_PROFILE_STANDARD = "standard"
+LLM_PROTOCOL_PROFILE_OPENAI_RESPONSES = "openai_responses"
+LLM_PROTOCOL_PROFILE_DEEPSEEK_RESPONSES = "deepseek_responses"
+LLM_PROTOCOL_PROFILE_CODEX_RESPONSES = "codex_responses"
 LLM_PROTOCOL_PROFILE_CLAUDE_CODE_PROXY = "claude_code_proxy"
 
 ALL_LLM_PROTOCOL_PROFILES = {
     LLM_PROTOCOL_PROFILE_STANDARD,
+    LLM_PROTOCOL_PROFILE_OPENAI_RESPONSES,
+    LLM_PROTOCOL_PROFILE_DEEPSEEK_RESPONSES,
+    LLM_PROTOCOL_PROFILE_CODEX_RESPONSES,
     LLM_PROTOCOL_PROFILE_CLAUDE_CODE_PROXY,
+}
+
+_PROTOCOL_PROFILES_BY_API_FORMAT = {
+    LLM_API_FORMAT_CHAT_COMPLETIONS: {LLM_PROTOCOL_PROFILE_STANDARD},
+    LLM_API_FORMAT_RESPONSES: {
+        LLM_PROTOCOL_PROFILE_STANDARD,
+        LLM_PROTOCOL_PROFILE_OPENAI_RESPONSES,
+        LLM_PROTOCOL_PROFILE_DEEPSEEK_RESPONSES,
+        LLM_PROTOCOL_PROFILE_CODEX_RESPONSES,
+    },
+    LLM_API_FORMAT_ANTHROPIC_MESSAGES: {
+        LLM_PROTOCOL_PROFILE_STANDARD,
+        LLM_PROTOCOL_PROFILE_CLAUDE_CODE_PROXY,
+    },
 }
 
 
 def normalize_protocol_profile(api_format: str | None, protocol_profile: str | None) -> str:
     """Return the only valid protocol profile for the effective API format."""
-    if api_format != LLM_API_FORMAT_ANTHROPIC_MESSAGES:
-        return LLM_PROTOCOL_PROFILE_STANDARD
-    if protocol_profile in ALL_LLM_PROTOCOL_PROFILES:
+    allowed = _PROTOCOL_PROFILES_BY_API_FORMAT.get(
+        str(api_format or ""),
+        {LLM_PROTOCOL_PROFILE_STANDARD},
+    )
+    if protocol_profile in allowed:
         return str(protocol_profile)
     return LLM_PROTOCOL_PROFILE_STANDARD
 
@@ -280,6 +311,12 @@ class LLMProvider(Base):
         nullable=False,
         server_default=LLM_CLIENT_IDENTITY_AUTO,
     )
+    # 模型传输后端；旧 Provider 与默认路径始终保持 direct。
+    execution_backend: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        server_default=LLM_EXECUTION_BACKEND_DIRECT,
+    )
     # 联网搜索调用时的协议覆盖：
     # - auto：OpenAI/chat_completions 日常走 chat，web_search 时临时走 responses
     # - responses：显式用 Responses
@@ -316,7 +353,7 @@ class LLMProvider(Base):
     # 运维备注（仅给自己看；路由不读）
     notes: Mapped[str | None] = mapped_column(String(500), nullable=True)
     # 出口代理（指向 proxy 表）；NULL = 直连（DIRECT），即不走任何代理。
-    # mtproxy 类型仅给 Telegram 用，HTTP 客户端不支持——schema 层会拒绝。
+    # 历史 mtproxy 行不受当前运行链路支持；HTTP 客户端也会拒绝。
     proxy_id: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("proxy.id", ondelete="SET NULL"), nullable=True
     )

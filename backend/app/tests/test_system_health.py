@@ -21,6 +21,7 @@ import pytest
 from app.api import system_health as sh
 from app.api.system_health import (
     AlembicStatus,
+    CodexGatewayStatus,
     DbStatus,
     ProvidersStatus,
     ProxiesStatus,
@@ -32,6 +33,7 @@ from app.api.system_health import (
     _probe_proxies,
     _probe_redis,
     _probe_workers,
+    _snapshot_codex_gateway,
 )
 
 # ════════════════════════════════════════════════════════════
@@ -44,6 +46,56 @@ def test_auto_migrate_default_false() -> None:
     from app.settings import settings
 
     assert settings.auto_migrate_on_startup is False
+
+
+def test_snapshot_codex_gateway_exposes_only_public_runtime_facts() -> None:
+    status = SimpleNamespace(
+        state="ready",
+        required=True,
+        revision=4,
+        provider_count=2,
+        version="0.1.0-beta.1",
+        protocol_version="2",
+        upstream_commit="abc123",
+        build_commit="def456",
+        codex_client_version="0.146.0",
+        codex_version_source="manual_override",
+        contract_review_date="2026-08-04",
+        error=None,
+    )
+    with patch("app.services.gateway_runtime.gateway_runtime_manager.status", return_value=status):
+        out = _snapshot_codex_gateway()
+
+    assert out == CodexGatewayStatus(
+        state="ready",
+        required=True,
+        revision=4,
+        provider_count=2,
+        version="0.1.0-beta.1",
+        protocol_version="2",
+        upstream_commit="abc123",
+        build_commit="def456",
+        codex_client_version="0.146.0",
+        codex_version_source="manual_override",
+        contract_review_date="2026-08-04",
+    )
+
+
+def test_runtime_revision_prefers_explicit_environment(monkeypatch) -> None:
+    monkeypatch.setenv("TELEPILOT_GIT_REVISION", "A" * 40)
+
+    assert sh._runtime_revision() == "a" * 40
+
+
+@pytest.mark.asyncio
+async def test_version_endpoint_exposes_revision_and_channel(monkeypatch) -> None:
+    monkeypatch.setattr(sh, "_runtime_revision", lambda: "b" * 40)
+
+    out = await sh.get_version()
+
+    assert out.revision == "b" * 40
+    assert out.channel == "stable"
+    assert out.version
 
 
 @pytest.mark.parametrize(
@@ -380,14 +432,14 @@ def test_classify_changed_files_docs_only() -> None:
     assert requires_backup is False
 
 
-def test_classify_changed_files_frontend_bundled_docs() -> None:
-    """前端打包读取的文档应触发 frontend 更新，而不是 docs_only。"""
+def test_classify_changed_files_runtime_docs() -> None:
+    """运行时读取的文档不应触发服务更新。"""
 
     components, requires_full_update, requires_backup = sh._classify_changed_files(
         ["docs/PLUGIN-DEV-GUIDE.md", "CHANGELOG.md"]
     )
 
-    assert components == ["backend", "frontend"]
+    assert components == ["docs_only"]
     assert requires_full_update is False
     assert requires_backup is False
 
@@ -458,6 +510,7 @@ async def test_check_update_uses_internal_updater(monkeypatch) -> None:
             "services": ["web"],
             "file_sync_services": ["web"],
             "rebuild_services": [],
+            "reasons": ["后端运行文件发生变化"],
             "requires_full_update": False,
             "requires_backup": False,
         },
@@ -476,7 +529,15 @@ async def test_check_update_uses_internal_updater(monkeypatch) -> None:
     assert out.commit_titles == ["修复更新检查"]
     assert out.file_sync_services == ["web"]
     assert out.rebuild_services == []
+    assert out.reasons == ["后端运行文件发生变化"]
+    assert "分类依据：后端运行文件发生变化" in out.plan_detail
     assert "直接同步目标 commit 文件并重启：web" in out.plan_detail
+
+
+def test_pull_update_response_exposes_classification_reasons() -> None:
+    response = sh.PullUpdateResponse(reasons=["未知运行文件触发安全兜底"])
+
+    assert response.model_dump()["reasons"] == ["未知运行文件触发安全兜底"]
 
 
 @pytest.mark.asyncio
@@ -666,6 +727,67 @@ def test_sum_project_resource_includes_main_workers_and_children() -> None:
     assert out.cpu_percent == 6.5
     assert out.rss_mb == 206.5
     assert out.uss_mb == 160.0
+
+
+def test_worker_memory_summary_prefers_uss_and_marks_mixed_fallback() -> None:
+    workers = [
+        sh.WorkerRuntimeResource(
+            account_id=1,
+            alive=True,
+            desired="running",
+            fail_count=0,
+            uss_mb=40.0,
+            rss_mb=60.0,
+        ),
+        sh.WorkerRuntimeResource(
+            account_id=2,
+            alive=True,
+            desired="running",
+            fail_count=0,
+            uss_mb=None,
+            rss_mb=80.0,
+        ),
+        sh.WorkerRuntimeResource(
+            account_id=3,
+            alive=False,
+            desired="stopped",
+            fail_count=0,
+            uss_mb=100.0,
+        ),
+    ]
+
+    summary = sh._worker_memory_summary(workers)
+
+    assert summary.sample_count == 2
+    assert summary.basis == "mixed"
+    assert summary.total_mb == 120.0
+    assert summary.average_mb == 60.0
+    assert summary.median_mb == 60.0
+    assert summary.max_mb == 80.0
+
+
+def test_capacity_alerts_use_memory_and_disk_thresholds() -> None:
+    host = sh.HostResource(
+        sampled_at=1,
+        memory_used_percent=96.0,
+        disk_used_percent=85.0,
+    )
+    containers = [
+        sh.ContainerResource(
+            name="telepilot-web-1",
+            service="web",
+            memory_mb=420.0,
+            memory_limit_mb=512.0,
+        )
+    ]
+
+    alerts = sh._capacity_alerts(host, containers)
+
+    assert [(item.key, item.level) for item in alerts] == [
+        ("host-memory", "critical"),
+        ("host-disk", "warning"),
+        ("container-web", "warning"),
+    ]
 
 
 def test_merge_project_resource_includes_infra_containers() -> None:
@@ -892,3 +1014,4 @@ async def test_get_health_overview_resilient_to_one_probe_hanging() -> None:
     assert out.redis.ok is True
     assert out.providers.total == 0
     assert out.alembic.ok is True
+    assert out.codex_gateway.state in {"not_required", "ready", "degraded"}

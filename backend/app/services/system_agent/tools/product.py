@@ -16,8 +16,12 @@ _CHANGELOG_HEADING = re.compile(r"^##\s+\[(.+?)\].*$")
 
 
 def _changelog_candidates() -> tuple[Path, ...]:
-    # 本地开发时 PROJECT_ROOT 是 backend；容器构建时 CHANGELOG 会被复制到 /app。
-    return (PROJECT_ROOT / "CHANGELOG.md", PROJECT_ROOT.parent / "CHANGELOG.md")
+    # 生产优先读取无需重启即可刷新的运行时副本；后两项兼容本地开发与旧镜像。
+    return (
+        PROJECT_ROOT / "runtime-content" / "CHANGELOG.md",
+        PROJECT_ROOT / "CHANGELOG.md",
+        PROJECT_ROOT.parent / "CHANGELOG.md",
+    )
 
 
 def _read_changelog_sections(raw: str, limit: int) -> list[dict[str, str]]:

@@ -37,6 +37,9 @@ TRACE_WRITE_QUEUE_MAX_SIZE = 5000
 TRACE_WRITE_BATCH_SIZE = 200
 TRACE_WRITE_BATCH_INTERVAL_SECONDS = 0.2
 TRACE_WRITE_DRAIN_TIMEOUT_SECONDS = 5.0
+TRACE_PARENT_VISIBILITY_TIMEOUT_SECONDS = 1.0
+TRACE_PARENT_VISIBILITY_POLL_SECONDS = 0.05
+TRACE_PARENT_VISIBILITY_MAX_POLL_SECONDS = 0.2
 TRACE_CLEANUP_BATCH_SIZE = 200
 TRACE_CLEANUP_ID_BATCH_SIZE = 500
 
@@ -459,13 +462,6 @@ async def cleanup_event_traces(
     }
 
 
-def _payload_has_clearable_native_raw(snapshot: Any) -> bool:
-    if not isinstance(snapshot, dict) or "native_raw" not in snapshot:
-        return False
-    value = snapshot.get("native_raw")
-    return value is not None and value not in ("[omitted]", "[expired]")
-
-
 async def _cleanup_native_raw_snapshots_batched(*, cutoff: datetime, batch_size: int) -> int:
     """Expire stored native_raw blobs in small ORM batches.
 
@@ -697,24 +693,57 @@ async def _trace_writer_loop() -> None:
 async def _flush_trace_batch(batch: list[_TraceWrite], *, split_on_error: bool = True) -> None:
     if not batch:
         return
+    missing_parent_ids: set[str] = set()
     try:
-        async with AsyncSessionLocal() as db:
-            existing_trace_ids = await _existing_trace_ids(db, batch)
-            new_trace_ids: set[str] = set()
-            for item in batch:
-                if item.kind == "trace":
+        missing_parent_ids = await _wait_for_external_trace_parents(batch)
+        ready_batch = [
+            item
+            for item in batch
+            if not (
+                item.kind != "trace"
+                and (trace_id := _trace_write_trace_id(item))
+                and trace_id in missing_parent_ids
+            )
+        ]
+        if ready_batch:
+            async with AsyncSessionLocal() as db:
+                existing_trace_ids = await _existing_trace_ids(db, ready_batch)
+                new_trace_ids: set[str] = set()
+                new_trace_items: list[_TraceWrite] = []
+                for item in ready_batch:
+                    if item.kind != "trace":
+                        continue
                     trace_id = _trace_write_trace_id(item)
                     if not trace_id or trace_id in existing_trace_ids or trace_id in new_trace_ids:
                         continue
-                    db.add(item.payload)
                     new_trace_ids.add(trace_id)
-                    continue
-                if item.kind in {"span", "action", "runtime_error"}:
+                    new_trace_items.append(item)
+
+                locked_trace_ids = await _lock_existing_trace_parents(
+                    db,
+                    ready_batch,
+                    new_trace_ids=new_trace_ids,
+                )
+                allowed_trace_ids = new_trace_ids | locked_trace_ids
+                for item in new_trace_items:
                     db.add(item.payload)
-                    continue
-                if item.kind == "finish":
-                    await _apply_finish_trace_write(db, item.payload)
-            await db.commit()
+                if new_trace_items:
+                    # 模型只声明了数据库外键，没有 ORM relationship；显式 flush
+                    # 确保同批 pending 的父 Trace 在任何 Span/Action 之前写入。
+                    await db.flush()
+                for item in ready_batch:
+                    if item.kind == "trace":
+                        continue
+                    trace_id = _trace_write_trace_id(item)
+                    if trace_id and trace_id not in allowed_trace_ids:
+                        missing_parent_ids.add(trace_id)
+                        continue
+                    if item.kind in {"span", "action", "runtime_error"}:
+                        db.add(item.payload)
+                        continue
+                    if item.kind == "finish":
+                        await _apply_finish_trace_write(db, item.payload)
+                await db.commit()
     except Exception:  # noqa: BLE001
         log.debug("event trace batch write failed size=%s", len(batch), exc_info=True)
         if split_on_error and len(batch) > 1:
@@ -729,6 +758,83 @@ async def _flush_trace_batch(batch: list[_TraceWrite], *, split_on_error: bool =
             account_id=_trace_write_account_id(item),
             phase=item.kind,
             action_type=_trace_write_action_type(item),
+        )
+        return
+
+    for item in batch:
+        trace_id = _trace_write_trace_id(item)
+        if item.kind == "trace" or not trace_id or trace_id not in missing_parent_ids:
+            continue
+        await _write_trace_runtime_error(
+            "event trace parent missing after wait",
+            trace_id=trace_id,
+            account_id=_trace_write_account_id(item),
+            phase=item.kind,
+            action_type=_trace_write_action_type(item),
+        )
+
+
+async def _lock_existing_trace_parents(
+    db: Any,
+    batch: list[_TraceWrite],
+    *,
+    new_trace_ids: set[str],
+) -> set[str]:
+    """在子记录写事务内锁定已存在的父 Trace，关闭检查与插入之间的竞态窗口。"""
+
+    required_trace_ids = {
+        trace_id
+        for item in batch
+        if item.kind != "trace"
+        and (trace_id := _trace_write_trace_id(item))
+        and trace_id not in new_trace_ids
+    }
+    if not required_trace_ids:
+        return set()
+    result = await db.execute(
+        select(EventTrace.trace_id)
+        .where(EventTrace.trace_id.in_(required_trace_ids))
+        .with_for_update(read=True, key_share=True)
+    )
+    return {str(value) for value in result.scalars().all() if value}
+
+
+async def _wait_for_external_trace_parents(batch: list[_TraceWrite]) -> set[str]:
+    """等待其它进程提交父 Trace，避免子 Span/Action 先到触发外键错误。"""
+
+    local_trace_ids = {
+        trace_id
+        for item in batch
+        if item.kind == "trace" and (trace_id := _trace_write_trace_id(item))
+    }
+    required_trace_ids = {
+        trace_id
+        for item in batch
+        if item.kind != "trace"
+        and (trace_id := _trace_write_trace_id(item))
+        and trace_id not in local_trace_ids
+    }
+    if not required_trace_ids:
+        return set()
+
+    deadline = time.monotonic() + TRACE_PARENT_VISIBILITY_TIMEOUT_SECONDS
+    poll_seconds = TRACE_PARENT_VISIBILITY_POLL_SECONDS
+    while True:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(EventTrace.trace_id).where(EventTrace.trace_id.in_(required_trace_ids))
+            )
+            existing_trace_ids = {str(value) for value in result.scalars().all() if value}
+        missing_trace_ids = required_trace_ids - existing_trace_ids
+        if not missing_trace_ids:
+            return set()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return missing_trace_ids
+        await asyncio.sleep(min(poll_seconds, remaining))
+        poll_seconds = min(
+            max(poll_seconds * 2, TRACE_PARENT_VISIBILITY_POLL_SECONDS),
+            TRACE_PARENT_VISIBILITY_MAX_POLL_SECONDS,
         )
 
 

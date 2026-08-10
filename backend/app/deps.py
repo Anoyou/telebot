@@ -48,6 +48,9 @@ async def get_current_user(
     user_pwd_v = int(getattr(user, "pwd_version", 0) or 0)
     if token_pwd_v != user_pwd_v:
         raise _auth_err("AUTH_INVALIDATED", "登录状态已失效，请重新登录")
+    # 鉴权查询不需要跨越整个请求持有事务。System Agent 等服务会使用独立
+    # session；小连接池下若多个请求同时保留这里的连接，会造成嵌套取连接饥饿。
+    await db.commit()
     return user
 
 

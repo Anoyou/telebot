@@ -17,6 +17,7 @@ import type {
   LLMProviderOut,
 } from "@/api/types";
 import { ModelRunMeta } from "@/components/ai/ModelRunMeta";
+import { UpstreamErrorFacts } from "@/components/ai/UpstreamErrorFacts";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -41,6 +42,7 @@ import {
   livenessStatusTone as sharedStatusTone,
 } from "@/lib/livenessStatus";
 import { cn } from "@/lib/utils";
+import { executionBackendLabel, isGatewayBackend } from "@/lib/providerExecutionBackend";
 
 const DEFAULT_CHAT_TEST_SYSTEM_PROMPT =
   "你是一个自然、简洁的中文聊天助手。请像真实聊天一样直接回复用户，不要只返回 ping/pong。";
@@ -49,9 +51,9 @@ const CLIENT_IDENTITY_LABELS: Record<string, string> = {
   auto: "自动选择",
   minimal: "最小身份",
   openai_sdk: "OpenAI SDK（标准 API）",
-  codex_tui: "Codex TUI",
-  codex_cli: "Codex TUI（旧配置）",
-  codex_exec: "Codex TUI（旧配置）",
+  codex_tui: "Codex 兼容请求头（非官方运行时）",
+  codex_cli: "Codex 兼容请求头（旧配置）",
+  codex_exec: "Codex 兼容请求头（旧配置）",
   codex_desktop: "Codex Desktop",
   claude_code: "Claude Code CLI",
   claude_desktop: "Claude Code CLI（旧 Desktop 配置）",
@@ -172,7 +174,10 @@ function enabledModelIds(provider: LLMProviderOut): string[] {
 }
 
 function resultStatusText(item: FullLivenessRunResponse["results"][number]): string {
-  const statusCode = extractHttpStatusCode(item.status_code, item.error);
+  const statusCode = extractHttpStatusCode(
+    item.upstream_status_code ?? item.status_code,
+    item.error,
+  );
   return [
     livenessStatusLabel(item.status),
     statusCode,
@@ -907,7 +912,10 @@ export function FullLivenessPanel({
                         const healthyCount = allProviderResults.filter((item) => item.status === "healthy").length;
                         const statusCodes = Array.from(new Set(
                           allProviderResults
-                            .map((item) => extractHttpStatusCode(item.status_code, item.error))
+                            .map((item) => extractHttpStatusCode(
+                              item.upstream_status_code ?? item.status_code,
+                              item.error,
+                            ))
                             .filter((code): code is number => code !== null),
                         ));
                         return (
@@ -956,6 +964,17 @@ export function FullLivenessPanel({
                                           {item.client_identity_profile ? (
                                             <MetaBadge tone="info">客户端 {livenessIdentityLabel(item.client_identity_profile)}</MetaBadge>
                                           ) : null}
+                                          {item.execution_backend ? (
+                                            <MetaBadge
+                                              mono
+                                              tone={isGatewayBackend(item.execution_backend) ? "info" : "neutral"}
+                                              title={isGatewayBackend(item.execution_backend)
+                                                ? [item.gateway_version, item.gateway_stage, item.gateway_request_id].filter(Boolean).join(" · ") || "实际通过内置 Gateway 调用"
+                                                : "实际通过标准 API 直连调用"}
+                                            >
+                                              实际后端 {executionBackendLabel(item.execution_backend)}
+                                            </MetaBadge>
+                                          ) : null}
                                           {item.skipped && !item.effective_api_format && !item.client_identity_profile ? (
                                             <MetaBadge>未发起请求</MetaBadge>
                                           ) : null}
@@ -982,6 +1001,7 @@ export function FullLivenessPanel({
                                     </div>
                                     {item.preview ? <div className="mt-2 whitespace-pre-wrap break-words text-muted-foreground">{item.preview}</div> : null}
                                     {item.error ? <div className="mt-2 break-words text-amber-600 dark:text-amber-400">{item.error}</div> : null}
+                                    <UpstreamErrorFacts value={item} className="mt-2" />
                                     {item.suggestion && item.suggestion !== item.error ? (
                                       <div className="mt-1 break-words text-muted-foreground">建议：{item.suggestion}</div>
                                     ) : null}

@@ -17,7 +17,7 @@
   - 同阶段补丁版本从新的补丁基础版本开始，例如 `0.81.1-beta.1`。
   - beta 期间若加入新的 minor 或 major 级变化，必须提升基础版本并从 `-beta.1` 重新开始，不能只递增 beta 序号。
   - beta 稳定并合入 `main` 后去掉 prerelease 后缀，发布相同基础版本的正式版。
-- beta 检查点与稳定发布都必须同步更新：`backend/app/__init__.py`、`backend/pyproject.toml`、`frontend/package.json`、`frontend/src/lib/version.ts`，并用中文写入 `CHANGELOG.md`。
+- beta 检查点与稳定发布都必须同步更新：`backend/app/__init__.py`、`backend/pyproject.toml`、`frontend/package.json`、`frontend/src/lib/version.ts`，随后运行 `make codegen` 让 `openapi/telepilot.openapi.json` 的 `info.version` 跟随，并用中文写入 `CHANGELOG.md`；CI 会校验这五处版本一致。
 - commit / PR / release 文案使用中文。
 
 ## 工作区安全
@@ -39,6 +39,7 @@
 ## 项目地图与验证
 
 - `backend/app/api/`：FastAPI 路由与请求 schema 边界；接口事实以运行中的 OpenAPI 和 Pydantic schema 为准。
+- 新增或修改内部 API、鉴权依赖、错误响应或 Pydantic schema 后，必须从仓库根运行 `make codegen`，同时提交 `openapi/telepilot.openapi.json` 与 `frontend/src/api/schema.ts`；新改前端 API 类型优先引用生成类型。
 - `backend/app/services/`：控制面业务服务。`account_bot_runtime.py` 是 Bot runtime 热点，改动后至少运行 `pytest app/tests/test_account_bot.py`。
 - `backend/app/worker/plugins/`：插件加载、Event Bus、MessageOps、权限和兼容桥。`loader.py` 是插件运行时热点，改动后至少运行 `pytest app/tests/test_plugin_loader.py` 与插件示例校验。
 - `backend/app/services/system_agent/`：System Agent 路由、工具、Skill、Action 与 Durable Run；改动后运行对应 `test_system_agent_*.py`，不要只做单文件语法检查。

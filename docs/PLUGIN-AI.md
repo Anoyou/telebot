@@ -52,6 +52,8 @@ async def on_event(self, ctx, payload):
 
 `complete()` / `run_agent()` 返回值带 `routing` 脱敏摘要（`mode` / `provider_id` / `provider_name` / `matched_tag` / `model` / `api_format` / `client_identity_profile` / `used_fallback`）。插件**不能**指定 UA、客户端身份、API Key、Base URL、代理、内部分类器或全局 fallback 策略——这些由平台统一决定，路由摘要也绝不含密钥 / Base URL / 代理。`run_agent()` 会预先排除没有已启用模型的 provider（无法支撑 tools 调用）。
 
+Provider 的 `execution_backend` 同样由平台配置决定，插件不能要求某次调用强制标准 API 直连或 Gateway。选择 `codex_gateway` 的 Responses Provider 时，`complete()`、`stream_complete()` 和 `run_agent()` 仍复用同一 Client Builder：Gateway 只替换传输层，工具 handler、插件 quota、账号预算、fallback 和 usage 继续由 TelePilot 管理。同一 Provider 的 Gateway 失败不会偷跑 direct；可在尚未输出文本时按平台策略 fallback 到其它 Provider。实际 backend、Gateway 版本、request ID 和失败阶段写入「AI → 近期调用」，不加入插件可见的 routing 摘要。详见 [Codex 客户端兼容模式（Gateway）](./CODEX-GATEWAY.md)。
+
 ## 原生文本流
 
 需要边生成边处理时使用 `ctx.ai.stream_complete()`；每次迭代只会返回 Provider 原生流中真实抵达的文本 delta，不会把完整结果拆字模拟：

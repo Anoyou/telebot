@@ -7,6 +7,10 @@ export interface LLMUsageRecord {
   provider_name?: string | null;
   model: string | null;
   client_identity_profile?: string | null;
+  execution_backend?: string | null;
+  gateway_version?: string | null;
+  gateway_request_id?: string | null;
+  gateway_stage?: string | null;
   source?: string | null;
   input_tokens: number;
   output_tokens: number;

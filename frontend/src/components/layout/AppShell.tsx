@@ -22,7 +22,7 @@ import {
 } from "@/components/assistant/AssistantDock";
 import { AssistantPet, AssistantPetSprite } from "@/components/assistant/AssistantPet";
 import { fetchMe } from "@/lib/auth";
-import { getPlatformCapabilities, getSystemSettings } from "@/api/system";
+import { getBackendVersion, getPlatformCapabilities, getSystemSettings } from "@/api/system";
 import { capabilityEnabledMap } from "@/lib/navigation";
 import { Skeleton } from "@/components/ui/misc";
 import {
@@ -33,7 +33,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
-import { APP_VERSION_LABEL } from "@/lib/version";
+import { formatRuntimeVersionLabel } from "@/lib/runtime-version";
 
 const AssistantIndex = lazy(() => import("@/pages/Assistant/Index").then((module) => ({ default: module.AssistantIndex })));
 const ChangelogMenu = lazy(() => import("./ChangelogMenu"));
@@ -84,6 +84,17 @@ export function AppShell() {
     queryFn: getPlatformCapabilities,
     staleTime: 15_000,
   });
+  const versionQ = useQuery({
+    queryKey: ["system", "version"],
+    queryFn: getBackendVersion,
+    staleTime: 30_000,
+    refetchInterval: 60_000,
+    refetchIntervalInBackground: false,
+  });
+  const runtimeVersionLabel = formatRuntimeVersionLabel(
+    versionQ.data,
+    versionQ.isError ? "版本读取失败" : "正在读取…",
+  );
 
   useEffect(() => {
     const main = mainRef.current;
@@ -209,7 +220,7 @@ export function AppShell() {
                 md:pl-8 md:pr-8 xl:pl-10 xl:pr-10
               "
             >
-              <MobileScrollEdgeLabel edge="top" visible={mobileScrollEdge === "top"} />
+              <MobileScrollEdgeLabel edge="top" visible={mobileScrollEdge === "top"} versionLabel={runtimeVersionLabel} />
               <div
                 key={pageTransitionKey}
                 data-page-transition-shell
@@ -218,7 +229,7 @@ export function AppShell() {
               >
                 <Outlet />
               </div>
-              <MobileScrollEdgeLabel edge="bottom" visible={mobileScrollEdge === "bottom"} />
+              <MobileScrollEdgeLabel edge="bottom" visible={mobileScrollEdge === "bottom"} versionLabel={runtimeVersionLabel} />
             </main>
             <AssistantSurface />
           </div>
@@ -318,7 +329,7 @@ export function AppShell() {
                 >
                   <History className="h-4 w-4 shrink-0" />
                   <span className="min-w-0 flex-1 truncate">更新日志</span>
-                  <span className="text-xs text-muted-foreground">{APP_VERSION_LABEL}</span>
+                  <span className="text-xs text-muted-foreground">{runtimeVersionLabel}</span>
                 </DropdownMenuItem>
               </DropdownMenuContent>
               </DropdownMenu>
@@ -493,9 +504,11 @@ function AssistantSurfaceSkeleton() {
 function MobileScrollEdgeLabel({
   edge,
   visible,
+  versionLabel,
 }: {
   edge: Exclude<MobileScrollEdge, null>;
   visible: boolean;
+  versionLabel: string;
 }) {
   return (
     <div
@@ -507,7 +520,7 @@ function MobileScrollEdgeLabel({
       <span className="mobile-scroll-edge-label">
         <span className="font-semibold text-foreground">TelePilot</span>
         <span className="mobile-scroll-edge-separator" />
-        <span className="tabular-nums">{APP_VERSION_LABEL}</span>
+        <span className="tabular-nums">{versionLabel}</span>
       </span>
     </div>
   );

@@ -1,5 +1,6 @@
 // 与后端 schema 对齐的关键类型（手写版）。OpenAPI 生成的 schema.ts 后续替换。
 
+import type { components as ApiComponents } from "@/api/schema";
 import type { PluginCapabilities, PluginEventSubscription } from "@/types/pluginContract";
 
 // ===================== 鉴权 =====================
@@ -37,7 +38,7 @@ export type AccountStatus =
 
 export interface ProxySummary {
   id: number;
-  /** socks5 / http / mtproxy */
+  /** socks5 / http / https；历史未知值按原字符串展示。 */
   type: string;
   host: string;
   port: number;
@@ -637,11 +638,12 @@ export interface TemplateOut {
 }
 
 // ===================== 代理 =====================
-export type ProxyType = "socks5" | "http" | "https" | "mtproxy";
+export type ProxyType = "socks5" | "http" | "https";
 
 export interface ProxyOut {
   id: number;
-  type: ProxyType;
+  /** 服务端可能返回已停用的历史类型，读取时保留原值。 */
+  type: string;
   host: string;
   port: number;
   username: string | null;
@@ -1134,7 +1136,7 @@ export interface ProvidersHealthStatus {
 
 export interface ProxiesHealthStatus {
   total: number;
-  /** {type: count}，如 {"socks5":2,"http":1,"mtproxy":1} */
+  /** {type: count}，如 {"socks5":2,"http":1} */
   by_type: Record<string, number>;
   /** 被任意 LLMProvider.proxy_id 引用的代理数量（去重） */
   used_by_llm: number;
@@ -1151,6 +1153,21 @@ export interface WorkersHealthStatus {
   runtime_failing: number;
 }
 
+export interface CodexGatewayHealthStatus {
+  state: "not_required" | "ready" | "degraded";
+  required: boolean;
+  provider_count: number;
+  revision: number;
+  version?: string | null;
+  protocol_version?: string | null;
+  upstream_commit?: string | null;
+  build_commit?: string | null;
+  codex_client_version?: string | null;
+  codex_version_source?: "builtin_default" | "manual_override";
+  contract_review_date?: string | null;
+  error?: string | null;
+}
+
 export interface HealthOverview {
   db: DbStatus;
   alembic: AlembicStatus;
@@ -1158,67 +1175,15 @@ export interface HealthOverview {
   providers: ProvidersHealthStatus;
   proxies: ProxiesHealthStatus;
   workers: WorkersHealthStatus;
+  codex_gateway?: CodexGatewayHealthStatus;
 }
 
-export interface HostResourceStatus {
-  cpu_percent?: number | null;
-  memory_used_percent?: number | null;
-  memory_total_mb?: number | null;
-  disk_used_percent?: number | null;
-  disk_free_gb?: number | null;
-  sampled_at: number;
-  uptime_seconds?: number | null;
-}
-
-export interface ProcessResourceStatus {
-  pid?: number | null;
-  name?: string | null;
-  role?: string | null;
-  cpu_percent?: number | null;
-  rss_mb?: number | null;
-  uss_mb?: number | null;
-}
-
-export interface WorkerRuntimeResourceStatus extends ProcessResourceStatus {
-  account_id: number;
-  alive: boolean;
-  desired: string;
-  fail_count: number;
-}
-
-export interface ContainerResourceStatus {
-  id?: string | null;
-  name: string;
-  service?: string | null;
-  cpu_percent?: number | null;
-  memory_mb?: number | null;
-  memory_limit_mb?: number | null;
-  memory_percent?: number | null;
-  pids?: number | null;
-}
-
-export interface RuntimeLogStatsStatus {
-  last_5m_total: number;
-  last_5m_warn: number;
-  last_5m_error: number;
-}
-
-export interface ResourceDashboard {
-  host: HostResourceStatus;
-  main_process: ProcessResourceStatus;
-  project_total: ProcessResourceStatus;
-  app_uptime_seconds?: number | null;
-  other_processes: ProcessResourceStatus[];
-  containers: ContainerResourceStatus[];
-  container_total: ProcessResourceStatus;
-  container_probe_error?: string | null;
-  container_source?: "updater" | "local_docker" | null;
-  project_total_basis?: "processes" | "processes_plus_containers" | "compose_containers";
-  workers: WorkerRuntimeResourceStatus[];
-  worker_alive: number;
-  worker_desired_running: number;
-  logs: RuntimeLogStatsStatus;
-}
+export type HostResourceStatus = ApiComponents["schemas"]["HostResource"];
+export type ProcessResourceStatus = ApiComponents["schemas"]["ProcessResource"];
+export type WorkerRuntimeResourceStatus = ApiComponents["schemas"]["WorkerRuntimeResource"];
+export type ContainerResourceStatus = ApiComponents["schemas"]["ContainerResource"];
+export type RuntimeLogStatsStatus = ApiComponents["schemas"]["RuntimeLogStats"];
+export type ResourceDashboard = ApiComponents["schemas"]["ResourceDashboard"];
 
 // 通用 list 包装（部分接口直接返数组，但为了后续兼容预留）
 export interface ListResponse<T> {
@@ -1426,6 +1391,7 @@ export type Sprint4Wave1TypesMarker = "command-aliases";
 
 // ── LLM Provider ──
 export type LLMProviderKind = "openai" | "anthropic" | "ollama";
+export type LLMExecutionBackend = "direct" | "codex_gateway";
 
 /**
  * API 协议（与 provider 厂商解耦；同一个反代 base_url 可能只支持其中某种）：
@@ -1439,7 +1405,12 @@ export type LLMProviderKind = "openai" | "anthropic" | "ollama";
 export type LLMApiFormat = "chat_completions" | "responses" | "anthropic_messages";
 export type LLMReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 export type LLMWebSearchApiFormat = "auto" | LLMApiFormat;
-export type LLMProtocolProfile = "standard" | "claude_code_proxy";
+export type LLMProtocolProfile =
+  | "standard"
+  | "openai_responses"
+  | "deepseek_responses"
+  | "codex_responses"
+  | "claude_code_proxy";
 /**
  * 客户端身份档案（0.57.0 阶段 A）：控制 UA 与身份相关的安全请求头，
  * 与 protocol_profile（协议语义 / beta 头）相互独立。auto 按本次实际协议解析。
@@ -1484,6 +1455,20 @@ export interface ProviderModel {
   supports_tools?: boolean | null;
   supports_images?: boolean | null;
   supports_temperature?: boolean | null;
+  supports_parallel_tool_calls?: boolean | null;
+  supports_web_search?: boolean | null;
+  context_window?: number | null;
+  max_output_tokens?: number | null;
+  input_modalities?: Array<"text" | "image" | "audio" | "video"> | null;
+  output_modalities?: Array<"text" | "image" | "audio"> | null;
+  supported_api_formats?: LLMApiFormat[] | null;
+  reasoning_transport?:
+    | "none"
+    | "reasoning_content"
+    | "responses_item"
+    | "encrypted_reasoning_item"
+    | "anthropic_thinking"
+    | null;
   reasoning_efforts?: LLMReasoningEffort[] | null;
 }
 
@@ -1533,6 +1518,8 @@ export interface LLMProviderOut {
   web_search_api_format?: LLMWebSearchApiFormat | string;
   /** 客户端身份档案；auto 按本次实际协议解析。与 protocol_profile 相互独立 */
   client_identity_profile?: LLMClientIdentityProfile | string;
+  /** 实际传输后端；direct 直连上游，codex_gateway 走内置 Unix Socket Gateway。 */
+  execution_backend?: LLMExecutionBackend | string;
   /** 模态；老数据可能缺，前端按 "text" 兜底 */
   modality?: LLMModality | string;
   /** 路由标签；老数据可能为空数组 */
@@ -1567,13 +1554,14 @@ export interface LLMProviderCreate {
   web_search_api_format?: LLMWebSearchApiFormat;
   /** 客户端身份档案；auto 按本次实际协议解析。与 protocol_profile 相互独立 */
   client_identity_profile?: LLMClientIdentityProfile;
+  execution_backend?: LLMExecutionBackend;
   modality?: LLMModality;
   tags?: string[];
   cost_tier?: number;
   notes?: string | null;
   /** 出口代理；不传 / null = 直连 */
   proxy_id?: number | null;
-  /** 候选模型清单；通常新建时留空，建完用"Fetch 模型列表"按钮自动填 */
+  /** 候选模型清单；通常新建时留空，建完用“获取模型列表”按钮自动填 */
   models?: ProviderModel[];
   request_headers?: LLMRequestHeaderInput[];
 }
@@ -1603,6 +1591,7 @@ export interface LLMProviderUpdate {
   web_search_api_format?: LLMWebSearchApiFormat;
   /** 客户端身份档案；auto 按本次实际协议解析。与 protocol_profile 相互独立 */
   client_identity_profile?: LLMClientIdentityProfile;
+  execution_backend?: LLMExecutionBackend;
   modality?: LLMModality;
   tags?: string[];
   cost_tier?: number;
@@ -1627,6 +1616,8 @@ export interface FetchModelsResponse {
 export interface FetchModelsPreviewRequest {
   provider: LLMProviderKind;
   api_format?: LLMApiFormat;
+  protocol_profile?: LLMProtocolProfile;
+  execution_backend?: LLMExecutionBackend;
   base_url?: string | null;
   /** 可空——若 pid 给了且 api_key 留空，后端会回落到 DB 里已存的 */
   api_key?: string | null;
@@ -1644,6 +1635,7 @@ export interface FetchModelsPreviewResponse {
 
 export interface QuickVerifyProviderRequest {
   base_url: string;
+  execution_backend?: LLMExecutionBackend;
   api_key?: string | null;
   api_format: LLMApiFormat;
   protocol_profile?: LLMProtocolProfile;
@@ -1724,6 +1716,12 @@ export interface ProtocolProbeResult {
   error_category?: string | null;
   /** 脱敏修复建议 */
   suggestion?: string | null;
+  upstream_status_code?: number | null;
+  upstream_error_code?: string | null;
+  upstream_error_message?: string | null;
+  upstream_error_detail?: string | null;
+  upstream_request_id?: string | null;
+  client_request_id?: string | null;
 }
 
 /** 某协议下按身份顺序的单次身份尝试结果 */
@@ -1736,6 +1734,12 @@ export interface ProtocolIdentityAttempt {
   error_category?: string | null;
   error?: string | null;
   suggestion?: string | null;
+  upstream_status_code?: number | null;
+  upstream_error_code?: string | null;
+  upstream_error_message?: string | null;
+  upstream_error_detail?: string | null;
+  upstream_request_id?: string | null;
+  client_request_id?: string | null;
 }
 
 export interface DetectProviderProtocolsResponse {
@@ -1744,6 +1748,7 @@ export interface DetectProviderProtocolsResponse {
   anthropic_messages: ProtocolProbeResult;
   models: ProtocolProbeResult;
   recommended_api_format?: LLMApiFormat | string | null;
+  recommended_protocol_profile?: LLMProtocolProfile | string | null;
   /** 阶段 B：推荐客户端身份 */
   recommended_client_identity_profile?: LLMClientIdentityProfile | string | null;
   /** 阶段 B：每协议身份尝试列表 */
@@ -1768,6 +1773,15 @@ export interface TestModelResponse {
   preview?: string | null;
   /** 失败时的错误消息（已脱敏） */
   error?: string | null;
+  status_code?: number | null;
+  error_category?: string | null;
+  suggestion?: string | null;
+  upstream_status_code?: number | null;
+  upstream_error_code?: string | null;
+  upstream_error_message?: string | null;
+  upstream_error_detail?: string | null;
+  upstream_request_id?: string | null;
+  client_request_id?: string | null;
 }
 
 export interface ChatTestTurn {
@@ -1783,6 +1797,7 @@ export interface ChatTestModelsRequest {
   system_prompt?: string;
   max_tokens?: number;
   timeout_seconds?: number;
+  execution_backend_override?: LLMExecutionBackend | null;
   api_format_override?: LLMApiFormat | null;
   client_identity_profile_override?: LLMClientIdentityProfile | null;
 }
@@ -1799,8 +1814,20 @@ export interface ChatTestModelResult {
   empty_response: boolean;
   error?: string | null;
   status_code?: number | null;
+  error_category?: string | null;
+  suggestion?: string | null;
+  upstream_status_code?: number | null;
+  upstream_error_code?: string | null;
+  upstream_error_message?: string | null;
+  upstream_error_detail?: string | null;
+  upstream_request_id?: string | null;
+  client_request_id?: string | null;
   client_identity_profile?: string | null;
   effective_api_format?: string | null;
+  execution_backend?: string | null;
+  gateway_version?: string | null;
+  gateway_request_id?: string | null;
+  gateway_stage?: string | null;
   streaming?: boolean;
   stream_fallback?: boolean;
 }
@@ -1865,8 +1892,18 @@ export interface LivenessResultItem {
   status_code?: number | null;
   error_category?: string | null;
   suggestion?: string | null;
+  upstream_status_code?: number | null;
+  upstream_error_code?: string | null;
+  upstream_error_message?: string | null;
+  upstream_error_detail?: string | null;
+  upstream_request_id?: string | null;
+  client_request_id?: string | null;
   client_identity_profile?: string | null;
   effective_api_format?: string | null;
+  execution_backend?: string | null;
+  gateway_version?: string | null;
+  gateway_request_id?: string | null;
+  gateway_stage?: string | null;
   skipped: boolean;
 }
 
@@ -1977,12 +2014,9 @@ export interface BuiltinCommandItem {
 
 // ==================== Patch 0.4.2 ====================
 // GET /api/system/version 响应（public 端点，无鉴权）。
-// 前端启动 + 每 60s 拉一次，对比 lib/version.ts 的 APP_VERSION；
-// 不一致就在 GlobalAlertBar 弹红条提示「前后端版本不一致，请 make restart」。
-export interface BackendVersionInfo {
-  version: string;
-  stage: string | null;
-}
+// 前端从运行中的后端读取发布版本与实际部署 commit，避免频繁提交时为显示
+// 版本号而重新编译整个前端。
+export type BackendVersionInfo = ApiComponents["schemas"]["VersionInfo"];
 
 // ===================== 检查更新 =====================
 export interface CheckUpdateResult {
@@ -2019,6 +2053,7 @@ export interface CheckUpdateResult {
   services?: string[] | null;
   file_sync_services?: string[] | null;
   rebuild_services?: string[] | null;
+  reasons?: string[] | null;
   requires_full_update?: boolean | null;
   requires_backup?: boolean | null;
   requires_migration?: boolean | null;
@@ -2054,6 +2089,7 @@ export interface PullUpdateResult {
   services?: string[] | null;
   file_sync_services?: string[] | null;
   rebuild_services?: string[] | null;
+  reasons?: string[] | null;
   requires_full_update?: boolean | null;
   requires_backup?: boolean | null;
   requires_migration?: boolean | null;

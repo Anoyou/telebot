@@ -142,6 +142,17 @@ function jsonResponse(pathname: string): unknown | undefined {
   if (pathname === "/api/accounts") return [accountFixture];
   if (pathname === "/api/commands/llm-providers") return [];
   if (pathname === "/api/commands/llm-providers/runtime-health") return [];
+  if (pathname === "/api/commands/llm-providers/identity-versions") return {
+    items: [{
+      key: "codex_tui",
+      label: "Codex CLI",
+      current: "0.145.0",
+      default: "0.145.0",
+      registry: "npm",
+      detectable: true,
+    }],
+    profiles: [],
+  };
   if (pathname === "/api/system/resource-dashboard") return emptyResourceDashboard;
   if (pathname === "/api/system/settings") return { timezone: "Asia/Shanghai", login_security: {} };
   if (pathname === "/api/system-agent/config") return {
@@ -156,6 +167,7 @@ function jsonResponse(pathname: string): unknown | undefined {
   };
   if (pathname === "/api/system-agent/sessions") return [];
   if (pathname === "/api/system-agent/runs") return [];
+  if (pathname === "/api/system-agent/queue") return [];
   if (pathname === "/api/system-agent/actions") return [];
   if (pathname === "/api/system-agent/memory") return [];
   if (pathname === "/api/system/capabilities") return platformCapabilitiesFixture;
@@ -191,6 +203,7 @@ function jsonResponse(pathname: string): unknown | undefined {
     db: { ok: true }, redis: { ok: true }, alembic: { ok: true, pending: [] },
     providers: { total: 0, with_api_key: 0 }, proxies: { total: 0 },
     workers: { total: 0, by_status: {}, runtime_failing: 0, runtime_desired_running: 0, runtime_desired_running_alive: 0 },
+    codex_gateway: { state: "not_required", required: false, provider_count: 0, revision: 0 },
   };
   if (pathname === "/api/accounts/1") return { ...accountFixture, notes: null, template_id: null, proxy_id: null, device_profile_id: null };
   if (pathname === "/api/accounts/1/features") return [];

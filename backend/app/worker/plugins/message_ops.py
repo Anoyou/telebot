@@ -337,6 +337,36 @@ class BufferedMessageOps:
         self.actions.append(action)
         return action
 
+    async def click_callback_button(
+        self,
+        *,
+        chat_id: int,
+        message_id: int,
+        row: int,
+        column: int,
+        expected_bot_id: int | None = None,
+        expected_button_text: str | None = None,
+    ) -> dict[str, Any]:
+        """请求账号 UserBot 受控点击第三方 Bot 的 callback 按钮。
+
+        平台会重新读取目标消息和 callback data；插件不能直接提供 data。
+        该动作仅在 UserBot 执行链路中受支持；Interaction Bot 插件入口不支持。
+        """
+
+        action: dict[str, Any] = {
+            "type": "click_callback_button",
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "row": row,
+            "column": column,
+        }
+        if expected_bot_id is not None:
+            action["expected_bot_id"] = expected_bot_id
+        if expected_button_text is not None:
+            action["expected_button_text"] = expected_button_text
+        self.actions.append(action)
+        return action
+
     async def answer_inline_query(
         self,
         *,

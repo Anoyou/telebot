@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -117,6 +121,15 @@ def test_apply_job_env_uses_host_compose_project_name(monkeypatch) -> None:
     assert env["COMPOSE_DOCKER_CLI_BUILD"] == "1"
 
 
+def test_apply_job_env_passes_job_id_to_updater_handoff(monkeypatch) -> None:
+    updater = _load_updater_module()
+    monkeypatch.setattr(updater, "HOST_PROJECT_DIR", Path("/opt/TelePilot"))
+
+    env = updater._apply_job_env("origin", "main", "0123456789ab")
+
+    assert env["TELEPILOT_UPDATE_JOB_ID"] == "0123456789ab"
+
+
 def test_apply_job_env_recovers_absolute_host_dir_from_container_label(monkeypatch) -> None:
     updater = _load_updater_module()
     monkeypatch.setattr(updater, "HOST_PROJECT_DIR", Path("."))
@@ -165,26 +178,97 @@ def test_update_job_survives_updater_restart(monkeypatch, tmp_path) -> None:
     }
 
 
+def test_handoff_marker_blocks_until_explicitly_removed(monkeypatch, tmp_path) -> None:
+    updater = _load_updater_module()
+    workspace = tmp_path / "repo"
+    git_dir = workspace / ".git"
+    git_dir.mkdir(parents=True)
+    marker = git_dir / "telepilot-updater-handoff-active"
+    marker.write_text("job 1\n", encoding="utf-8")
+    monkeypatch.setattr(updater, "WORKSPACE", workspace)
+
+    assert updater._handoff_active() is True
+
+    marker.unlink()
+    assert updater._handoff_active() is False
+
+
 def test_incremental_script_never_recreates_web_with_updater() -> None:
     repo_root = Path(__file__).resolve().parents[3]
     script = (repo_root / "scripts" / "prod-update.sh").read_text(encoding="utf-8")
 
-    assert "--force-recreate updater web" not in script
-    assert "docker compose up -d --build --no-deps" in script
+    assert "docker compose up -d --build --no-deps --force-recreate updater web" not in script
+    assert "docker compose up -d --build --no-deps" not in script
+    assert "pull_verified_image" in script
+    assert "switch_prebuilt_service" in script
+    assert "org.opencontainers.image.revision" in script
     assert '-e COMPOSE_PROJECT_NAME="$project"' in script
     assert '-e TELEPILOT_HOST_PROJECT_DIR="$TELEPILOT_HOST_PROJECT_DIR"' in script
     assert "telepilot-updater-handoff.log" in script
     assert "com.docker.compose.project" in script
+    assert script.index('mv "$pending_tmp" "$PENDING_FILE"') < script.index(
+        'git pull --ff-only "$REMOTE" "$BRANCH"'
+    )
+    assert "persist_switched_services" in script
+    assert "rollback_switched_services" in script
+    assert "迁移边界内禁止自动恢复旧代码" in script
+    assert 'pending_target:-}" == "$CHECKED_OUT_COMMIT"' in script
+    assert 'git merge-base --is-ancestor "$pending_target" "$TARGET_COMMIT"' in script
+    assert 'warn "分类依据：$reason"' in script
+    assert "镜像不存在或构建未成功" in script
 
 
-def test_incremental_script_uses_compose_health_without_localhost_frontend_probe() -> None:
+def test_runtime_content_bind_mount_uses_the_host_project_path() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    compose = (repo_root / "docker-compose.yml").read_text(encoding="utf-8")
+    prod_up = (repo_root / "scripts" / "prod-up.sh").read_text(encoding="utf-8")
+    prod_update = (repo_root / "scripts" / "prod-update.sh").read_text(encoding="utf-8")
+
+    mount = "${TELEPILOT_HOST_PROJECT_DIR:-.}/.run/runtime-content:"
+    assert compose.count(mount) == 2
+    assert "${TELEPILOT_RUNTIME_CONTENT_DIR:-./.run/runtime-content}:" not in compose
+    expected_export = (
+        'export TELEPILOT_HOST_PROJECT_DIR="${TELEPILOT_HOST_PROJECT_DIR:-$ROOT_DIR}"'
+    )
+    assert expected_export in prod_up
+    assert expected_export in prod_update
+
+
+def test_incremental_script_waits_for_frontend_image_healthcheck() -> None:
     repo_root = Path(__file__).resolve().parents[3]
     script = (repo_root / "scripts" / "prod-update.sh").read_text(encoding="utf-8")
+    dockerfile = (repo_root / "frontend" / "Dockerfile").read_text(encoding="utf-8")
 
     assert "frontend_url" not in script
     assert 'wait_http "$(frontend_url)"' not in script
     assert "wait_compose_healthy docker-compose.yml frontend" in script
+    assert (
+        "HEALTHCHECK --interval=10s --timeout=3s "
+        "CMD wget -qO- http://127.0.0.1/ >/dev/null 2>&1 || exit 1"
+    ) in dockerfile
     assert "@@TELEPILOT_PROGRESS@@" in script
+
+
+def test_incremental_script_reloads_target_logic_before_image_verification() -> None:
+    """旧 updater 必须先让目标脚本接管，不能继续执行启动时加载的旧验签函数。"""
+    repo_root = Path(__file__).resolve().parents[3]
+    script = (repo_root / "scripts" / "prod-update.sh").read_text(encoding="utf-8")
+
+    fast_forward = script.index('git pull --ff-only "$REMOTE" "$BRANCH"')
+    reload_target = script.index('exec bash scripts/prod-update.sh "${ORIGINAL_ARGS[@]}"')
+    prefetch_images = script.index(
+        "# 目标版本更新逻辑接管后再确认所有必需镜像。"
+    )
+    reload_guard = script.rfind(
+        "if (( HEAD_ALREADY_UPDATED == 0 )); then",
+        fast_forward,
+        reload_target,
+    )
+
+    assert 'ORIGINAL_ARGS=("$@")' in script
+    assert script.count('exec bash scripts/prod-update.sh "${ORIGINAL_ARGS[@]}"') == 1
+    assert fast_forward < reload_guard < reload_target < prefetch_images
+    assert script.index("pull_verified_image web", prefetch_images) > reload_target
 
 
 def test_incremental_script_syncs_backend_files_with_image_rollback() -> None:
@@ -198,8 +282,550 @@ def test_incremental_script_syncs_backend_files_with_image_rollback() -> None:
     assert '--change "CMD $image_cmd"' in script
     assert "自定义 ENTRYPOINT" in script
     assert "rollback_web_runtime_image" in script
-    assert 'docker image tag "$WEB_SYNC_OLD_IMAGE_ID" "$WEB_SYNC_IMAGE_REF"' in script
+    assert 'runtime_ref="telepilot-web-runtime:${NEW_COMMIT}"' in script
+    assert 'TELEPILOT_WEB_IMAGE="$WEB_SYNC_OLD_IMAGE_REF"' in script
     assert "文件级同步服务：web（无需执行 docker build）" in script
+    assert 'if [[ -n "$WEB_SYNC_IMAGE_REF" ]]; then' in script
+    assert 'if (( WEB_SYNC_IMAGE_REF != "" )); then' not in script
+
+
+def test_production_defaults_to_prebuilt_images_with_explicit_source_fallback() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    compose = (repo_root / "docker-compose.yml").read_text(encoding="utf-8")
+    prod_up = (repo_root / "scripts" / "prod-up.sh").read_text(encoding="utf-8")
+    workflow = (repo_root / ".github" / "workflows" / "publish-images.yml").read_text(
+        encoding="utf-8"
+    )
+    ci_workflow = (repo_root / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "TELEPILOT_WEB_IMAGE" in compose
+    assert "TELEPILOT_FRONTEND_IMAGE" in compose
+    assert "TELEPILOT_UPDATER_IMAGE" in compose
+    assert 'docker pull "$image_ref"' in prod_up
+    assert "docker compose up -d --no-build" in prod_up
+    assert "--source-build" in prod_up
+    assert "org.opencontainers.image.revision" in prod_up
+    assert "org.opencontainers.image.source" in prod_up
+    assert "RepoDigests" in prod_up
+    assert "verify_image_attestation" in prod_up
+    assert "linux/amd64,linux/arm64" in workflow
+    assert "packages: write" in workflow
+    assert "sha-${REVISION}" in workflow
+    assert "workflow_call:" in workflow
+    assert "actions/attest@" in workflow
+    assert "attestations: write" in workflow
+    assert "org.opencontainers.image.revision=${{ needs.scope.outputs.revision }}" in workflow
+    assert "uses: ./.github/workflows/publish-images.yml" in ci_workflow
+    assert "github.event_name == 'push'" in ci_workflow
+    assert 'tags: ["v*"]' in ci_workflow
+    assert "ref_type: ${{ github.ref_type }}" in ci_workflow
+
+
+def test_legacy_alpine_updater_bootstraps_github_cli(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    marker = tmp_path / "apk-called"
+    fake_id = fake_bin / "id"
+    fake_apk = fake_bin / "apk"
+    fake_gh = fake_bin / "gh"
+    fake_id.write_text("#!/bin/sh\nprintf '0\\n'\n", encoding="utf-8")
+    fake_gh.write_text(
+        """#!/bin/sh
+exit 1
+""",
+        encoding="utf-8",
+    )
+    fake_apk.write_text(
+        """#!/bin/sh
+set -eu
+touch "$FAKE_APK_MARKER"
+cat > "$FAKE_BIN/gh" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+chmod +x "$FAKE_BIN/gh"
+""",
+        encoding="utf-8",
+    )
+    fake_id.chmod(0o755)
+    fake_gh.chmod(0o755)
+    fake_apk.chmod(0o755)
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source scripts/_lib.sh; ensure_github_cli; command -v gh',
+        ],
+        cwd=repo_root,
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}:/usr/bin:/bin",
+            "FAKE_BIN": str(fake_bin),
+            "FAKE_APK_MARKER": str(marker),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert marker.is_file()
+    assert str(fake_bin / "gh") in result.stdout
+
+
+def test_image_attestation_verification_is_noninteractive_without_github_login(
+    tmp_path: Path,
+) -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    capture = tmp_path / "gh-call"
+    fake_gh = fake_bin / "gh"
+    fake_gh.write_text(
+        """#!/bin/sh
+set -eu
+if [ "${1:-}" = "attestation" ] && [ "${2:-}" = "verify" ] && [ "${3:-}" = "--help" ]; then
+  exit 0
+fi
+{
+  printf 'GH_TOKEN=%s\\n' "${GH_TOKEN:-}"
+  printf 'GH_PROMPT_DISABLED=%s\\n' "${GH_PROMPT_DISABLED:-}"
+  printf 'args='
+  printf '%s ' "$@"
+  printf '\\n'
+} > "$FAKE_GH_CAPTURE"
+""",
+        encoding="utf-8",
+    )
+    fake_gh.chmod(0o755)
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in {"GH_TOKEN", "GITHUB_TOKEN"}
+    }
+    env.update(
+        {
+            "PATH": f"{fake_bin}:/usr/bin:/bin",
+            "FAKE_GH_CAPTURE": str(capture),
+        }
+    )
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            (
+                "source scripts/_lib.sh; "
+                "verify_image_attestation "
+                "'ghcr.io/anoyou/telepilot-web@sha256:deadbeef' "
+                "'0123456789abcdef0123456789abcdef01234567'"
+            ),
+        ],
+        cwd=repo_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    invocation = capture.read_text(encoding="utf-8")
+    assert "GH_TOKEN=telepilot-oci-attestation-verification" in invocation
+    assert "GH_PROMPT_DISABLED=1" in invocation
+    assert "--repo Anoyou/Telebot" in invocation
+    assert "--bundle-from-oci" in invocation
+    assert "--source-digest 0123456789abcdef0123456789abcdef01234567" in invocation
+
+
+def test_image_attestation_verification_preserves_configured_github_token(
+    tmp_path: Path,
+) -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    capture = tmp_path / "gh-token"
+    fake_gh = fake_bin / "gh"
+    fake_gh.write_text(
+        """#!/bin/sh
+set -eu
+if [ "${1:-}" = "attestation" ] && [ "${2:-}" = "verify" ] && [ "${3:-}" = "--help" ]; then
+  exit 0
+fi
+printf '%s\\n' "${GH_TOKEN:-}" > "$FAKE_GH_CAPTURE"
+""",
+        encoding="utf-8",
+    )
+    fake_gh.chmod(0o755)
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            (
+                "source scripts/_lib.sh; "
+                "verify_image_attestation "
+                "'ghcr.io/anoyou/telepilot-web@sha256:deadbeef' "
+                "'0123456789abcdef0123456789abcdef01234567'"
+            ),
+        ],
+        cwd=repo_root,
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}:/usr/bin:/bin",
+            "FAKE_GH_CAPTURE": str(capture),
+            "GH_TOKEN": "configured-github-token",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert capture.read_text(encoding="utf-8").strip() == "configured-github-token"
+
+
+def _install_legacy_updater_repair(
+    tmp_path: Path,
+    *,
+    existing_wrapper: str | None = None,
+) -> tuple[subprocess.CompletedProcess[str], dict[str, str], Path, Path, Path]:
+    repo_root = Path(__file__).resolve().parents[3]
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    real_gh = tmp_path / "usr" / "bin" / "gh"
+    real_gh.parent.mkdir(parents=True)
+    wrapper_gh = fake_bin / "gh"
+    apk_marker = tmp_path / "apk-calls"
+    gh_capture = tmp_path / "gh-call"
+    if existing_wrapper is not None:
+        wrapper_gh.write_text(existing_wrapper, encoding="utf-8")
+        wrapper_gh.chmod(0o755)
+
+    (fake_bin / "id").write_text("#!/bin/sh\nprintf '0\\n'\n", encoding="utf-8")
+    (fake_bin / "sha256sum").write_text(
+        "#!/bin/sh\nprintf 'fake-wrapper-sha256  %s\\n' \"$1\"\n",
+        encoding="utf-8",
+    )
+    (fake_bin / "apk").write_text(
+        """#!/bin/sh
+set -eu
+printf '%s\\n' "$*" >> "$FAKE_APK_MARKER"
+cat > "$TELEPILOT_GH_REAL_PATH" <<'EOF'
+#!/bin/sh
+set -eu
+if [ "${1:-}" = "--version" ]; then
+  printf 'gh version test\\n'
+  exit 0
+fi
+{
+  printf 'GH_TOKEN=%s\\n' "${GH_TOKEN:-}"
+  printf 'GH_PROMPT_DISABLED=%s\\n' "${GH_PROMPT_DISABLED:-}"
+  printf 'args='
+  printf '|%s' "$@"
+  printf '\\n'
+} > "$FAKE_GH_CAPTURE"
+EOF
+chmod 0755 "$TELEPILOT_GH_REAL_PATH"
+""",
+        encoding="utf-8",
+    )
+    for executable in ("id", "sha256sum", "apk"):
+        (fake_bin / executable).chmod(0o755)
+
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in {"GH_TOKEN", "GITHUB_TOKEN", "GH_PROMPT_DISABLED"}
+    }
+    env.update(
+        {
+            "PATH": f"{fake_bin}:/usr/bin:/bin",
+            "FAKE_APK_MARKER": str(apk_marker),
+            "FAKE_GH_CAPTURE": str(gh_capture),
+            "TELEPILOT_APK_BIN": str(fake_bin / "apk"),
+            "TELEPILOT_GH_REAL_PATH": str(real_gh),
+            "TELEPILOT_GH_WRAPPER_PATH": str(wrapper_gh),
+        }
+    )
+    result = subprocess.run(
+        ["sh", str(repo_root / "scripts" / "repair-legacy-updater.sh")],
+        cwd=repo_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result, env, wrapper_gh, apk_marker, gh_capture
+
+
+def test_legacy_updater_repair_script_installs_auditable_wrapper(
+    tmp_path: Path,
+) -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    script = repo_root / "scripts" / "repair-legacy-updater.sh"
+    result, _env, wrapper_gh, apk_marker, _gh_capture = (
+        _install_legacy_updater_repair(tmp_path)
+    )
+
+    assert script.stat().st_mode & 0o111
+    assert result.returncode == 0, result.stderr
+    assert apk_marker.read_text(encoding="utf-8").strip() == (
+        "add --no-cache github-cli"
+    )
+    wrapper = wrapper_gh.read_text(encoding="utf-8")
+    assert "TelePilot legacy updater OCI attestation compatibility wrapper" in wrapper
+    assert "无需执行 gh auth login" in result.stdout
+    assert "包装器 SHA256：fake-wrapper-sha256" in result.stdout
+
+
+def test_legacy_updater_repair_is_idempotent(tmp_path: Path) -> None:
+    first, env, wrapper_gh, apk_marker, _gh_capture = (
+        _install_legacy_updater_repair(tmp_path)
+    )
+    assert first.returncode == 0, first.stderr
+    first_wrapper = wrapper_gh.read_text(encoding="utf-8")
+
+    repo_root = Path(__file__).resolve().parents[3]
+    second = subprocess.run(
+        ["sh", str(repo_root / "scripts" / "repair-legacy-updater.sh")],
+        cwd=repo_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert second.returncode == 0, second.stderr
+    assert wrapper_gh.read_text(encoding="utf-8") == first_wrapper
+    assert apk_marker.read_text(encoding="utf-8").splitlines() == [
+        "add --no-cache github-cli"
+    ]
+
+
+def test_legacy_updater_repair_refuses_to_replace_foreign_wrapper(
+    tmp_path: Path,
+) -> None:
+    result, _env, wrapper_gh, apk_marker, _gh_capture = (
+        _install_legacy_updater_repair(
+            tmp_path,
+            existing_wrapper="#!/bin/sh\nexec /custom/gh \"$@\"\n",
+        )
+    )
+
+    assert result.returncode == 1
+    assert "不是 TelePilot 兼容包装器，拒绝覆盖" in result.stderr
+    assert wrapper_gh.read_text(encoding="utf-8") == (
+        "#!/bin/sh\nexec /custom/gh \"$@\"\n"
+    )
+    assert not apk_marker.exists()
+
+
+def test_legacy_updater_repair_rejects_unsafe_paths(tmp_path: Path) -> None:
+    _first, env, _wrapper_gh, _apk_marker, _gh_capture = (
+        _install_legacy_updater_repair(tmp_path)
+    )
+    env["TELEPILOT_GH_REAL_PATH"] = "/usr/bin/gh;touch"
+    repo_root = Path(__file__).resolve().parents[3]
+    result = subprocess.run(
+        ["sh", str(repo_root / "scripts" / "repair-legacy-updater.sh")],
+        cwd=repo_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert "路径包含不安全字符" in result.stderr
+
+
+def test_legacy_updater_repair_forces_noninteractive_oci_attestation(
+    tmp_path: Path,
+) -> None:
+    result, env, wrapper_gh, _apk_marker, gh_capture = (
+        _install_legacy_updater_repair(tmp_path)
+    )
+    assert result.returncode == 0, result.stderr
+
+    invocation = subprocess.run(
+        [
+            str(wrapper_gh),
+            "attestation",
+            "verify",
+            "oci://ghcr.io/anoyou/telepilot-web@sha256:deadbeef",
+            "--repo",
+            "Anoyou/Telebot",
+            "--signer-workflow",
+            "github.com/Anoyou/Telebot/.github/workflows/publish-images.yml",
+            "--source-digest",
+            "0123456789abcdef0123456789abcdef01234567",
+            "--deny-self-hosted-runners",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert invocation.returncode == 0, invocation.stderr
+    capture = gh_capture.read_text(encoding="utf-8")
+    assert "GH_TOKEN=telepilot-oci-attestation-verification" in capture
+    assert "GH_PROMPT_DISABLED=1" in capture
+    assert "|--repo|Anoyou/Telebot" in capture
+    assert "|--deny-self-hosted-runners" in capture
+    assert capture.count("|--bundle-from-oci") == 1
+
+
+def test_legacy_updater_repair_does_not_duplicate_oci_bundle_flag(
+    tmp_path: Path,
+) -> None:
+    result, env, wrapper_gh, _apk_marker, gh_capture = (
+        _install_legacy_updater_repair(tmp_path)
+    )
+    assert result.returncode == 0, result.stderr
+
+    invocation = subprocess.run(
+        [
+            str(wrapper_gh),
+            "attestation",
+            "verify",
+            "oci://ghcr.io/anoyou/telepilot-web@sha256:deadbeef",
+            "--bundle-from-oci",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert invocation.returncode == 0, invocation.stderr
+    assert (
+        gh_capture.read_text(encoding="utf-8").count("|--bundle-from-oci") == 1
+    )
+
+
+def test_legacy_updater_repair_preserves_real_token(
+    tmp_path: Path,
+) -> None:
+    result, env, wrapper_gh, _apk_marker, gh_capture = (
+        _install_legacy_updater_repair(tmp_path)
+    )
+    assert result.returncode == 0, result.stderr
+    env["GH_TOKEN"] = "configured-github-token"
+
+    invocation = subprocess.run(
+        [str(wrapper_gh), "attestation", "verify", "oci://example.invalid/image"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert invocation.returncode == 0, invocation.stderr
+    assert "GH_TOKEN=configured-github-token" in gh_capture.read_text(
+        encoding="utf-8"
+    )
+
+
+def test_legacy_updater_repair_maps_github_token_to_gh_token(
+    tmp_path: Path,
+) -> None:
+    result, env, wrapper_gh, _apk_marker, gh_capture = (
+        _install_legacy_updater_repair(tmp_path)
+    )
+    assert result.returncode == 0, result.stderr
+    env["GITHUB_TOKEN"] = "configured-github-token"
+
+    invocation = subprocess.run(
+        [str(wrapper_gh), "attestation", "verify", "oci://example.invalid/image"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert invocation.returncode == 0, invocation.stderr
+    capture = gh_capture.read_text(encoding="utf-8")
+    assert "GH_TOKEN=configured-github-token" in capture
+
+
+def test_legacy_updater_repair_passes_other_gh_commands_through(
+    tmp_path: Path,
+) -> None:
+    result, env, wrapper_gh, _apk_marker, gh_capture = (
+        _install_legacy_updater_repair(tmp_path)
+    )
+    assert result.returncode == 0, result.stderr
+
+    invocation = subprocess.run(
+        [str(wrapper_gh), "api", "user"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert invocation.returncode == 0, invocation.stderr
+    capture = gh_capture.read_text(encoding="utf-8")
+    assert "GH_TOKEN=\n" in capture
+    assert "GH_PROMPT_DISABLED=\n" in capture
+    assert "args=|api|user" in capture
+    assert "--bundle-from-oci" not in capture
+
+
+def test_updater_handoff_waits_for_health_and_rolls_back_image() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    script = (repo_root / "scripts" / "prod-update.sh").read_text(encoding="utf-8")
+
+    assert "TELEPILOT_TARGET_UPDATER_IMAGE" in script
+    assert "TELEPILOT_OLD_UPDATER_IMAGE" in script
+    assert "handoff rollback" in script
+    assert "wait_compose_healthy docker-compose.yml updater 60" in script
+    assert "finalize-update-job.py" in script
+    assert 'emit_progress 98 "等待交接"' in script
+    assert "while :; do" in script
+    assert script.index('finalize succeeded "所有计划步骤与 updater handoff 已完成"') < script.index(
+        '     rm -f "$pending_file"'
+    )
+
+
+def test_handoff_finalizer_atomically_marks_persisted_job(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    jobs = tmp_path / ".git" / "telepilot-update-jobs"
+    jobs.mkdir(parents=True)
+    job_path = jobs / "0123456789ab.json"
+    job_path.write_text(
+        json.dumps({"job_id": "0123456789ab", "status": "running", "progress": 96}),
+        encoding="utf-8",
+    )
+
+    subprocess.run(
+        [
+            sys.executable,
+            str(repo_root / "scripts" / "finalize-update-job.py"),
+            "--root",
+            str(tmp_path),
+            "--job-id",
+            "0123456789ab",
+            "--status",
+            "succeeded",
+            "--detail",
+            "handoff 完成",
+            "--commit",
+            "a" * 40,
+        ],
+        check=True,
+    )
+
+    payload = json.loads(job_path.read_text(encoding="utf-8"))
+    assert payload["status"] == "succeeded"
+    assert payload["progress"] == 100
+    assert payload["new_commit"] == "a" * 12
+    assert payload["error"] is None
 
 
 def test_runtime_dockerfiles_preserve_incremental_build_caches() -> None:
@@ -467,6 +1093,10 @@ def test_update_plan_retries_commit_with_pending_deployment(monkeypatch, tmp_pat
             return "targetcommit", "", 0
         if args == ["git", "rev-parse", "--git-path", "telepilot-deploy-pending"]:
             return ".git/telepilot-deploy-pending", "", 0
+        if args[:3] == ["git", "cat-file", "-e"]:
+            return "", "", 0
+        if args[:3] == ["git", "merge-base", "--is-ancestor"]:
+            return "", "", 0
         if args == ["git", "show", "targetcommit:backend/app/__init__.py"]:
             return '__version__ = "0.72.0-beta.2"', "", 0
         if args[:3] == ["git", "rev-list", "--count"]:
@@ -496,3 +1126,73 @@ def test_update_plan_retries_commit_with_pending_deployment(monkeypatch, tmp_pat
     assert result["current_version"] == "0.72.0-beta.2"
     assert result["target_version"] == "0.72.0-beta.2"
     assert result["commit_titles"] == ["改进在线更新弹窗", "修复控制台噪声"]
+
+
+def test_update_plan_carries_pending_deployment_into_newer_target(
+    monkeypatch, tmp_path
+) -> None:
+    updater = _load_updater_module()
+    workspace = tmp_path / "repo"
+    git_dir = workspace / ".git"
+    git_dir.mkdir(parents=True)
+    (git_dir / "telepilot-deploy-pending").write_text(
+        "beta8commit beta9commit\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(updater, "WORKSPACE", workspace)
+
+    def fake_run(args, **_kwargs):  # noqa: ANN001
+        if args[:2] == ["git", "fetch"]:
+            return "", "", 0
+        if args == ["git", "rev-parse", "HEAD"]:
+            return "beta9commit", "", 0
+        if args == ["git", "rev-parse", "refs/remotes/origin/Beta"]:
+            return "beta10commit", "", 0
+        if args == ["git", "rev-parse", "--git-path", "telepilot-deploy-pending"]:
+            return ".git/telepilot-deploy-pending", "", 0
+        if args[:3] == ["git", "cat-file", "-e"]:
+            return "", "", 0
+        if args == [
+            "git",
+            "merge-base",
+            "--is-ancestor",
+            "beta9commit",
+            "beta10commit",
+        ]:
+            return "", "", 0
+        if args == ["git", "show", "beta9commit:backend/app/__init__.py"]:
+            return '__version__ = "0.88.0-beta.9"', "", 0
+        if args == ["git", "show", "beta10commit:backend/app/__init__.py"]:
+            return '__version__ = "0.88.0-beta.10"', "", 0
+        if args[:3] == ["git", "rev-list", "--count"]:
+            return "1", "", 0
+        if args[:2] == ["git", "log"]:
+            assert args[-1] == "beta8commit..beta10commit"
+            return "修复累计在线更新\n", "", 0
+        if args[:2] == ["python", "backend/app/util/update_plan.py"]:
+            assert args[-4:] == [
+                "--old",
+                "beta8commit",
+                "--new",
+                "beta10commit",
+            ]
+            return (
+                '{"changed_files":["docker-compose.yml","frontend/src/App.tsx"],'
+                '"components":["frontend"],"services":["frontend"],'
+                '"requires_full_update":false,"requires_backup":false,'
+                '"requires_migration":false}',
+                "",
+                0,
+            )
+        raise AssertionError(args)
+
+    monkeypatch.setattr(updater, "_run", fake_run)
+
+    result = updater._check_plan("origin", "Beta")
+
+    assert result["has_update"] is True
+    assert result["deployment_pending"] is True
+    assert result["deploy_from_commit"] == "beta8commit"
+    assert result["changed_files"] == [
+        "docker-compose.yml",
+        "frontend/src/App.tsx",
+    ]

@@ -395,12 +395,17 @@ class TestSandboxClientSecurity:
             _ = sandbox.session
         assert "禁止访问" in str(ex.value) or "session" in str(ex.value)
 
-    def test_sandbox_recognizes_payout_as_non_client_permission(self, caplog):
-        """payout 由 MessageOps 处理，不能被 SandboxClient 误报为未知权限。"""
+    @pytest.mark.parametrize("permission", ["payout", "click_bot_button"])
+    def test_sandbox_recognizes_message_ops_permissions_as_non_client(
+        self,
+        caplog,
+        permission,
+    ):
+        """MessageOps 权限不能被 SandboxClient 误报为未知客户端权限。"""
         from app.worker.plugins.sandbox import resolve_permissions
 
         with caplog.at_level("WARNING"):
-            assert resolve_permissions(["payout"]) == frozenset()
+            assert resolve_permissions([permission]) == frozenset()
 
         assert "未知权限名" not in caplog.text
 
@@ -1655,11 +1660,15 @@ class TestPluginRepoInstallFlow:
         assert not (tmp_path / "installed" / "local_demo.installing").exists()
 
     @pytest.mark.asyncio
-    async def test_install_official_plugin_ignores_local_bundled_source(self, monkeypatch, tmp_path):
+    async def test_install_official_plugin_requires_remote_repo_entry(self, monkeypatch, tmp_path):
         monkeypatch.setattr(repo_svc.settings, "plugins_installed_dir", str(tmp_path / "installed"))
-        official_root = tmp_path / "official"
-        _write_runtime_plugin(official_root / "official_demo", key="official_demo", version="4.0.0")
-        monkeypatch.setattr(repo_svc, "_official_plugin_root", lambda: official_root)
+        remote_root = tmp_path / "remote-official"
+        remote_root.mkdir()
+
+        async def _remote_root(*, force_refresh: bool = False):  # noqa: ARG001
+            return remote_root
+
+        monkeypatch.setattr(repo_svc, "_official_remote_plugin_root", _remote_root)
         db = _FakePluginRepoDB()
 
         with pytest.raises(repo_svc.PluginNotInRepo):
@@ -1670,7 +1679,6 @@ class TestPluginRepoInstallFlow:
 
     @pytest.mark.asyncio
     async def test_remote_official_repo_lists_only_official_tagged_plugins(self, monkeypatch, tmp_path):
-        monkeypatch.setattr(repo_svc, "_official_plugin_root", lambda: tmp_path / "empty-official")
         remote_root = tmp_path / "remote-official"
         _write_runtime_plugin(remote_root / "official_remote", key="official_remote", version="4.1.0")
         _write_runtime_plugin(remote_root / "community_remote", key="community_remote", version="1.0.0")
@@ -1692,7 +1700,6 @@ class TestPluginRepoInstallFlow:
     async def test_install_remote_official_plugin_writes_repo_record(self, monkeypatch, tmp_path):
         monkeypatch.setattr(repo_svc.settings, "plugins_installed_dir", str(tmp_path / "installed"))
         monkeypatch.setattr(repo_svc.settings, "official_plugin_repo_url", "https://github.com/Anoyou/telebot-plugins")
-        monkeypatch.setattr(repo_svc, "_official_plugin_root", lambda: tmp_path / "empty-official")
         remote_root = tmp_path / "remote-official"
         _write_runtime_plugin(remote_root / "official_remote", key="official_remote", version="4.1.0")
         (remote_root / "official_remote" / "plugin.json").write_text(
@@ -1722,7 +1729,6 @@ class TestPluginRepoInstallFlow:
     async def test_install_remote_official_plugin_updates_existing_version(self, monkeypatch, tmp_path):
         monkeypatch.setattr(repo_svc.settings, "plugins_installed_dir", str(tmp_path / "installed"))
         monkeypatch.setattr(repo_svc.settings, "official_plugin_repo_url", "https://github.com/Anoyou/telebot-plugins")
-        monkeypatch.setattr(repo_svc, "_official_plugin_root", lambda: tmp_path / "empty-official")
         remote_root = tmp_path / "remote-official"
         _write_runtime_plugin(remote_root / "official_remote", key="official_remote", version="4.1.0")
         (remote_root / "official_remote" / "plugin.json").write_text(
@@ -1758,7 +1764,6 @@ class TestPluginRepoInstallFlow:
     @pytest.mark.asyncio
     async def test_official_update_link_failure_restores_previous_directory(self, monkeypatch, tmp_path):
         monkeypatch.setattr(repo_svc.settings, "plugins_installed_dir", str(tmp_path / "installed"))
-        monkeypatch.setattr(repo_svc, "_official_plugin_root", lambda: tmp_path / "empty-official")
         remote_root = tmp_path / "remote-official"
         _write_runtime_plugin(remote_root / "official_retry", key="official_retry", version="2.0.0")
         (remote_root / "official_retry" / "plugin.json").write_text(
@@ -2079,3 +2084,71 @@ def test_lint_plugin_metadata_files_accepts_standard_channel_aliases(tmp_path) -
 
     warnings = svc.lint_plugin_metadata_files(plugin_dir)
     assert not any("result_contract.send_via" in item for item in warnings)
+
+
+@pytest.mark.asyncio
+async def test_sandbox_message_buttons_do_not_leak_raw_button_or_client() -> None:
+    from telethon.tl.custom.messagebutton import MessageButton
+    from telethon.tl.types import KeyboardButtonCallback, KeyboardButtonRow, ReplyInlineMarkup
+
+    from app.worker.plugins.sandbox import (
+        SandboxButton,
+        SandboxClient,
+        SandboxEvent,
+        SandboxReplyMarkup,
+    )
+
+    real_client = SimpleNamespace()
+    raw_button = MessageButton(
+        real_client,
+        KeyboardButtonCallback(text="确认", data=b"secret"),
+        chat=123,
+        bot=456,
+        msg_id=7,
+    )
+    raw_markup = ReplyInlineMarkup(
+        rows=[
+            KeyboardButtonRow(
+                buttons=[KeyboardButtonCallback(text="确认", data=b"nested-secret")]
+            )
+        ]
+    )
+    raw_message = SimpleNamespace(buttons=[[raw_button]], reply_markup=raw_markup)
+    event = SandboxEvent(
+        SimpleNamespace(message=raw_message),
+        SandboxClient(real_client, [], plugin_key="demo"),
+        plugin_key="demo",
+    )
+
+    buttons = event.message.buttons
+    assert buttons is not raw_message.buttons
+    assert isinstance(buttons[0][0], SandboxButton)
+    assert buttons[0][0] is not raw_button
+    assert buttons[0][0].text == "确认"
+    assert buttons[0][0].kind == "callback"
+    with pytest.raises(AttributeError):
+        _ = buttons[0][0].data
+    with pytest.raises(AttributeError):
+        _ = buttons[0][0].button
+    with pytest.raises(AttributeError):
+        _ = buttons[0][0].client
+    with pytest.raises(PermissionError, match="只读"):
+        buttons[0][0].text = "篡改"
+    with pytest.raises(PermissionError, match="click_callback_button"):
+        await buttons[0][0].click()
+
+    markup = event.message.reply_markup
+    assert isinstance(markup, SandboxReplyMarkup)
+    assert markup is not raw_markup
+    nested_button = markup.rows[0].buttons[0]
+    assert isinstance(nested_button, SandboxButton)
+    assert nested_button.text == "确认"
+    assert nested_button.kind == "callback"
+    with pytest.raises(AttributeError):
+        _ = nested_button.data
+    with pytest.raises(AttributeError):
+        _ = nested_button.button
+    with pytest.raises(AttributeError):
+        _ = nested_button.client
+    with pytest.raises(PermissionError, match="只读"):
+        markup.rows = ()

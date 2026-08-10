@@ -26,7 +26,11 @@ from ..base import Base
 
 
 class Proxy(Base):
-    """出口代理（SOCKS5 / HTTPS / MTProxy）。"""
+    """出口代理。
+
+    管理面仅允许 SOCKS5/HTTP/HTTPS；旧库可能仍含 MTProxy 或 SOCKS4。
+    SOCKS4 只保留 Telegram 既有绑定兼容，不能供 HTTP/LLM/Gateway 使用。
+    """
 
     __tablename__ = "proxy"
 

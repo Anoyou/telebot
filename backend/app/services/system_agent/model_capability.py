@@ -111,13 +111,6 @@ def _is_fresh(result: CapabilityProbeResult, *, now: datetime) -> bool:
     return result.checked_at + ttl > now
 
 
-def _cached_result(entry: Any, *, now: datetime) -> CapabilityProbeResult | None:
-    result = _entry_result(entry)
-    if result is None or not _is_fresh(result, now=now):
-        return None
-    return result
-
-
 def _probe_tool_call_matched(response: Any) -> bool:
     """判断探测是否成功。
 

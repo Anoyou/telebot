@@ -1,16 +1,16 @@
 # TelePilot 远程插件
 
-远程插件的第一抽象是三种运行模式，而不是把 Event Bus 当成一种独立模式：
+远程插件的第一抽象是三条消息链路，而不是把 Event Bus 当成一条独立链路：
 
-| 模式 | 触发与输入 | 默认收发通道 | 适用边界 |
+| 链路 | 触发与输入 | 默认收发通道 | 适用边界 |
 | --- | --- | --- | --- |
-| 裸直通 | 只接收 userbot 原始 Telethon event | 插件自行处理 userbot 能力 | 低延时、愿意跳过标准事件信封和平台动作审计的少数场景；不覆盖 interaction bot |
-| userbot 命令会话 | UserBot 前缀命令触发，进入标准事件信封 | 后续收发默认都走 userbot | 管理员命令、账号身份动作、需要沿用当前账号上下文的流程 |
-| interaction bot 规则会话 | 关键词、付款确认、按钮回调触发，进入标准事件信封 | 后续收发默认都走 interaction bot | 高频群内互动、按钮、题面、普通会话提示 |
+| 裸直通 | userbot Telethon 实时事件；安装插件收到 `SandboxEvent` 权限包装 | 插件自行处理 userbot 能力 | 低延时、愿意跳过标准事件信封与会话编排的少数场景；不覆盖 interaction bot |
+| UserBot 标准消息链路 | Event Bus、前缀命令会话、legacy `on_message`；可含 incoming/outgoing | 建立会话后由 `session.channel=userbot` 路由普通收发 | 管理员命令、账号身份动作、第三方 Bot 消息监听 |
+| Interaction Bot 标准消息链路 | Event Bus 自主订阅或旧规则会话 | 建立会话后由 `session.channel=interaction_bot` 路由普通收发 | 高频群内互动、按钮、题面、普通会话提示 |
 
 能力固定路由有两个例外：`payout`、收付款、发奖永远由 userbot 执行；`send_rich_message` 默认由 interaction bot 执行，只有插件显式指定 `userbot_reply` 才使用 Layer 228 Userbot 能力。两者都不会为了迁就当前会话通道而静默降级。
 
-Event Bus、Trace、MessageOps 是标准链路的内部契约：Event Bus 负责把标准事件投递给插件，Trace 负责记录匹配、执行和失败原因，MessageOps/action 负责把插件输出交给平台路由和审计。它们服务于 userbot 命令会话和 interaction bot 规则会话，不是第四种运行模式。新插件不再以 `interaction_entries`、旧交互规则、旧平铺 payload 或 `notice` 通道作为主路径；这些内容只用于迁移旧插件。
+Event Bus、Trace、MessageOps 是标准链路的内部契约：Event Bus 负责把标准事件投递给插件，Trace 负责记录匹配、执行和失败原因，MessageOps/action 负责把插件输出交给平台路由和审计。它们服务于两条标准消息链路，不是第四种运行模式。新插件不再以 `interaction_entries`、旧交互规则、旧平铺 payload 或 `notice` 通道作为主路径；这些内容只用于迁移旧插件。
 
 ## 适用场景
 
@@ -19,9 +19,9 @@ Event Bus、Trace、MessageOps 是标准链路的内部契约：Event Bus 负责
 - 插件需要通过 TelePilot 代发消息、ACK 按钮、回答 Inline Query 或记录结算动作。
 - 插件需要通过 Interaction Bot 发送标题、任务列表、折叠详情、表格等 Telegram 原生 Rich Message。
 - 插件需要声明 HTTP、AI、原生 Telegram raw 等风险能力，供安装前提示和 Trace 排障。
-- 插件确有低延时 userbot 直通需求，并愿意承担无标准 action/Trace 的审计缺口。
+- 插件确有低延时 userbot 直通需求，并理解直接调用 live client 不具备标准 MessageOps 审计等价物。
 
-远程插件仍按个人可信插件模式运行：安装者自行信任插件业务逻辑。标准会话里，平台负责能力声明、事件信封、MessageOps 执行、Trace、审计、限流和客观失败提示；裸直通里，平台只保留账号启用、插件授权、二次开关和急停边界，不承诺标准事件信封或 action 审计。
+远程插件仍按个人可信插件模式运行：安装者自行信任插件业务逻辑。标准会话里，平台负责能力声明、事件信封、MessageOps 执行、Trace、审计、限流和客观失败提示；裸直通里，平台仍记录路由与插件调用 Trace，安装插件继续使用 `SandboxEvent` / `SandboxClient`，显式 `ctx.messages` 和受支持的 `ctx.client` 操作仍进入统一执行或动作审计，但不提供标准事件信封或会话编排。
 
 ## 目录结构
 
@@ -72,7 +72,7 @@ my_plugin/
     {
       "events": ["callback_query"],
       "source": ["interaction_bot"],
-      "scope": "rule_bound"
+      "scope": "all_allowed_chats"
     },
     {
       "events": ["inline_query", "chosen_inline_result"],
@@ -135,7 +135,7 @@ my_plugin/
 | 字段 | 常用值 | 说明 |
 | --- | --- | --- |
 | `events` | `message`、`command`、`callback_query`、`inline_query`、`chosen_inline_result`、`payment_confirmed`、`session_close`、`message_edited`、`session_expired`、`all_events` | 订阅事件类型 |
-| `source` | `userbot`、`interaction_bot`、`external_payment_notice` | 事件来源 |
+| `source` | `userbot`、`interaction_bot`、`external_payment_notice`、`webhook` | 事件来源 |
 | `scope` | `all_allowed_chats`、`owner_only`、`known_users`、`rule_bound`、`inline_all` | 投递范围 |
 
 `all_messages` 目前仍只表示 `message` / `command`；需要覆盖平台已登记的常见事件时，用 `all_events`。Inline 插件必须声明 `inline_all`；付款插件必须能处理 `payment_confirmed`，不要把外部转账通知文本当业务主路径。
@@ -148,7 +148,7 @@ my_plugin/
 
 ## capabilities.telegram_native_raw
 
-默认情况下，插件只拿标准事件信封，不拿 live Telegram 对象。需要原生字段时声明：
+Event Bus 标准入口默认只拿标准事件信封，不拿 live Telegram 对象。裸直通读取 userbot Telethon 实时事件，但安装插件仍通过 `SandboxEvent` 权限包装；legacy `on_message` 同样使用安全包装对象。两者的嵌套按钮都只暴露只读 `text` / `kind`，不会携带真实客户端或 callback data。需要标准信封中的原生字段时声明：
 
 ```json
 {
@@ -176,9 +176,9 @@ if not native_raw_meta.get("enabled"):
 
 ## 模式 1：裸直通（userbot only）
 
-`telegram_direct_passthrough` 对应裸直通模式，是更高风险的低延时能力。它只给 userbot 使用，插件收到的是 live Telethon event，不是标准事件信封；它不覆盖 interaction bot、Bot API callback、Inline、付款确认或规则会话。
+`telegram_direct_passthrough` 对应裸直通模式，是更高风险的低延时能力。它只给 userbot 使用，安装插件收到的是保留实时字段读取能力的 `SandboxEvent`，不是标准事件信封；builtin 内部插件才保留真实 Telethon event。它不覆盖 interaction bot、Bot API callback、Inline、付款确认或规则会话。
 
-裸直通只适合抢红包、秒杀、抢答首响等对毫秒级延迟敏感，且愿意跳过 TelePilot 标准 Event Bus / Trace / MessageOps 链路的插件。普通互动、付款确认、按钮、Inline 和需要审计回放的业务不要使用它。
+裸直通只适合抢红包、秒杀、抢答首响等对毫秒级延迟敏感，且愿意跳过 TelePilot 标准 Event Bus 信封与会话编排的插件。普通互动、付款确认、Interaction Bot 按钮、Inline 和需要完整事件回放的业务不要使用它。
 
 插件必须同时满足两层开关才会收到直通消息：
 
@@ -210,7 +210,7 @@ async def on_direct_message(self, ctx, event) -> dict[str, str]:
     return {"status": "consumed"}  # 已处理，停止后续链路
 ```
 
-`event` 是 live Telethon event，不是标准事件信封。
+`event` 不是标准事件信封；安装插件中它是权限感知的 `SandboxEvent`，不允许通过嵌套按钮对象穿透真实客户端。
 
 **二次开关只启用直通，三态结果决定后续链路**：
 
@@ -223,7 +223,7 @@ async def on_direct_message(self, ctx, event) -> dict[str, str]:
 
 平台不提供“独占消费”或“失败仍截断”开关。插件只有在确认已经承担并完成本条消息处理后才能返回 `consumed`；失败永远回退，避免消息丢失。
 
-直通 hook 的发送、编辑、点击等行为不会自动生成标准 MessageOps 审计等价物；插件作者必须自行承担幂等、异常、限流和审计缺失的风险。
+直通 hook 不解释 handler 返回的标准 action；需要平台统一复核、限流和审计时，应显式调用 `ctx.messages`。受权限允许的 `ctx.client` 常用操作会记录动作审计，但不能替代 MessageOps 的业务复核；第三方 Bot callback 必须使用 `ctx.messages.click_callback_button(...)`，嵌套 `button.click()` 会被阻断。
 
 ## 标准事件信封
 
@@ -259,7 +259,7 @@ return [
 ]
 ```
 
-按钮回调：
+确认当前 Interaction Bot 收到的按钮回调：
 
 ```python
 return [
@@ -323,6 +323,25 @@ return [
 
 userbot 会话里的 `reply_markup` 会被平台降级成文本编号面板，而不是静默丢弃。玩家回复序号或按钮文案后，平台会合成 `callback_query` 回投插件；合成事件会在 `source.synthetic="text_button"` 标记，并跳过真正的 `answer_callback` Bot API 调用。
 
+第三方 Bot 发来的 Inline callback 按钮不属于上面的按钮回调。普通安装插件应声明
+`permissions=["click_bot_button"]`，在 UserBot 执行链路调用
+`ctx.messages.click_callback_button(chat_id=..., message_id=..., row=..., column=...,
+expected_bot_id=..., expected_button_text=...)`。平台会重新读取消息和 callback data，再发送
+`GetBotCallbackAnswerRequest`；它不会生成插件可处理的 `callback_query`，也不能用
+`answer_callback` 替代。要在 legacy `on_message` 接收第三方 Bot 消息，至少设置
+`message_channels={"incoming"}`、`owner_only=False`，并确保插件已在目标账号启用。
+账号级“允许会话”留空表示全部会话。
+
+这里的 UserBot 执行链路包括 UserBot Event Bus、legacy `on_message`、插件命令、裸直通
+和后台/调度任务的 `ctx.messages`；Interaction Bot 插件入口不支持该动作。推荐在收到目标
+Bot 消息后立即点击，并同时传 `expected_bot_id` / `expected_button_text`。
+
+平台只接受 callback 类型，并统一执行 manifest 权限、Bot/按钮文字复核、限流、Trace、
+ActionEvent、dry-run、15 秒超时，以及账号级物理点击锁；明确成功后保护 20 秒，超时或结果未知时保护 5 分钟。Redis 不可用时拒绝点击。插件不能
+传入或读取 callback data，也不能自动打开 URL、分享手机号或地理位置。
+`message.buttons` 与 `message.reply_markup.rows[].buttons[]` 都只暴露只读的 `text/kind`；
+旧 `message.buttons[row][column].click()` 已被安全阻断。
+
 ## manifest.py
 
 ```python
@@ -330,7 +349,7 @@ from app.worker.plugins.manifest import Manifest
 
 EVENT_SUBSCRIPTIONS = [
     {"events": ["message", "command"], "source": ["userbot", "interaction_bot"], "scope": "all_allowed_chats"},
-    {"events": ["callback_query"], "source": ["interaction_bot"], "scope": "rule_bound"},
+    {"events": ["callback_query"], "source": ["interaction_bot"], "scope": "all_allowed_chats"},
     {"events": ["inline_query", "chosen_inline_result"], "source": ["interaction_bot"], "scope": "inline_all"},
     {"events": ["payment_confirmed"], "source": ["external_payment_notice", "userbot"], "scope": "rule_bound"},
 ]

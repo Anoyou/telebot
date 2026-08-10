@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from app.util.proxy import ProxyConfigError
 from app.worker import runtime
 from app.worker.plugins.base import (
     PluginContext,
@@ -16,7 +17,12 @@ from app.worker.plugins.base import (
     sanitize_public_display_name,
 )
 from app.worker.plugins.sandbox import SandboxClient
-from app.worker.runtime import _build_proxy_url
+from app.worker.runtime import (
+    _build_proxy_url,
+    _httpx_proxy_url_from_proxy,
+    _llm_provider_proxy_url,
+    _resolve_httpx_account_proxy,
+)
 
 
 def test_public_entity_display_name_keeps_non_contact_public_name() -> None:
@@ -856,12 +862,61 @@ def test_build_proxy_url_username_only() -> None:
 
 
 def test_build_proxy_url_mtproxy_not_supported() -> None:
-    """mtproxy 类型 httpx 不支持 → 返 None。"""
-    assert _build_proxy_url("mtproxy", "x", 443, None, "") is None
+    """mtproxy 类型 httpx 不支持，必须拒绝而不是让调用方回落直连。"""
+    with pytest.raises(ProxyConfigError, match="拒绝回落直连"):
+        _build_proxy_url("mtproxy", "x", 443, None, "")
 
 
-def test_build_proxy_url_unknown_type_returns_none() -> None:
-    assert _build_proxy_url("ftp", "x", 21, None, "") is None
+def test_build_proxy_url_unknown_type_fails_closed() -> None:
+    with pytest.raises(ProxyConfigError, match="拒绝回落直连"):
+        _build_proxy_url("ftp", "x", 21, None, "")
+
+
+def test_llm_provider_proxy_bad_credentials_exclude_provider(monkeypatch) -> None:
+    proxy = SimpleNamespace(
+        type="socks5",
+        host="proxy.example",
+        port=1080,
+        username="alice",
+        password_enc="broken-token",
+    )
+
+    def fail_decrypt(_value: str) -> str:
+        raise ValueError("bad token")
+
+    monkeypatch.setattr(runtime, "decrypt_str", fail_decrypt)
+
+    with pytest.raises(ProxyConfigError, match="凭据无法解密"):
+        _llm_provider_proxy_url(proxy)
+
+
+def test_account_http_proxy_rejects_legacy_mtproxy_instead_of_direct() -> None:
+    proxy = SimpleNamespace(
+        type="mtproxy",
+        host="proxy.example",
+        port=443,
+        username=None,
+        password_enc=None,
+    )
+
+    with pytest.raises(ValueError, match="拒绝回落直连"):
+        _httpx_proxy_url_from_proxy(proxy)
+
+
+def test_socks4_telegram_proxy_does_not_pause_worker_but_marks_plugin_http_unavailable() -> None:
+    proxy = SimpleNamespace(
+        type="socks4",
+        host="proxy.example",
+        port=1080,
+        username=None,
+        password_enc=None,
+    )
+
+    proxy_url, error = _resolve_httpx_account_proxy(proxy)
+
+    assert proxy_url is None
+    assert error is not None
+    assert "SOCKS4" in error
 
 
 def test_worker_main_installs_sensitive_log_filter_after_logging_setup(monkeypatch) -> None:

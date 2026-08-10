@@ -29,6 +29,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/_lib.sh"
 cd "$ROOT_DIR"
 ensure_dirs
+export TELEPILOT_GATEWAY_BIN="${TELEPILOT_GATEWAY_BIN:-$ROOT_DIR/.run/telepilot-gateway}"
+export TELEPILOT_GATEWAY_SOCKET="${TELEPILOT_GATEWAY_SOCKET:-$ROOT_DIR/.run/gateway.sock}"
 
 # ── 1. 幂等 bootstrap（首次会装依赖；后续秒过） ──────────────
 "$SCRIPT_DIR/bootstrap.sh"

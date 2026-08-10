@@ -137,6 +137,13 @@ test("旧事件缺少重试计划时按模型重试尝试回退计数", () => {
   assert.equal(summary.retryCount, 2);
 });
 
+test("缺少结构化错误时不擅自提示可重试", () => {
+  const summary = summarizeTraceEvents([
+    { type: "done", ok: false },
+  ]);
+  assert.equal(summary.headline, "执行失败 · 请查看错误详情");
+});
+
 test("错误 hint 同时兼容文本与导航对象", () => {
   assert.equal(traceEventHint("检查 Provider 配置"), "检查 Provider 配置");
   assert.equal(

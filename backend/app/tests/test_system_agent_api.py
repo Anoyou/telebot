@@ -162,6 +162,8 @@ class _FakeSvc:
 class _FakeRunManager:
     def __init__(self) -> None:
         self.last_start_kwargs: dict[str, Any] = {}
+        self.last_input_kwargs: dict[str, Any] = {}
+        self.last_stop_replace_kwargs: dict[str, Any] = {}
         self.broken_stream = False
 
     async def start_run(self, **kwargs):
@@ -210,6 +212,26 @@ class _FakeRunManager:
                 client_request_id="request-listed-1",
             )
         ]
+
+    async def add_run_input(self, run_id, **kwargs):
+        self.last_input_kwargs = {"run_id": run_id, **kwargs}
+        return SimpleNamespace(
+            id=41,
+            run_id=run_id,
+            kind=kwargs["kind"],
+            status="pending",
+            client_request_id=kwargs["client_request_id"],
+            created_at=None,
+            applied_at=None,
+        )
+
+    async def stop_and_replace(self, run_id, **kwargs):
+        self.last_stop_replace_kwargs = {"run_id": run_id, **kwargs}
+        return await self.start_run(
+            session_id="s1",
+            web_user_id=kwargs["web_user_id"],
+            client_request_id=kwargs["client_request_id"],
+        )
 
 
 @pytest.fixture
@@ -406,6 +428,146 @@ async def test_start_durable_run_returns_run_and_message_identity(
 
 
 @pytest.mark.asyncio
+async def test_message_entrypoints_reject_blank_content(fake_svc, fake_run_manager) -> None:
+    db = AsyncMock()
+    user = SimpleNamespace(id=7)
+    await api.create_session(api.SystemAgentSessionCreate(), db, user)
+
+    calls = (
+        api.stream_message(
+            "s1",
+            api.SystemAgentMessageCreate(content="   "),
+            db,
+            user,
+        ),
+        api.start_system_agent_run(
+            "s1",
+            api.SystemAgentRunCreate(
+                content=" \n ",
+                client_request_id="request-blank-api",
+            ),
+            db,
+            user,
+        ),
+    )
+    for call in calls:
+        with pytest.raises(HTTPException) as exc_info:
+            await call
+        assert exc_info.value.status_code == 422
+        assert exc_info.value.detail["code"] == "EMPTY_MESSAGE"
+
+    assert fake_run_manager.last_start_kwargs == {}
+
+
+@pytest.mark.asyncio
+async def test_stop_replace_rejects_blank_content_before_manager(
+    monkeypatch,
+    fake_run_manager,
+) -> None:
+    monkeypatch.setattr(api, "_owned_run", AsyncMock(return_value=SimpleNamespace(id="run-1")))
+    fake_run_manager.stop_and_replace = AsyncMock()
+
+    with pytest.raises(HTTPException) as exc_info:
+        await api.stop_and_replace_system_agent_run(
+            "run-1",
+            api.SystemAgentStopReplaceCreate(
+                client_request_id="request-stop-blank",
+                content="   ",
+            ),
+            AsyncMock(),
+            SimpleNamespace(id=7),
+        )
+
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.detail["code"] == "EMPTY_REPLACEMENT"
+    fake_run_manager.stop_and_replace.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_run_input_routes_normalize_and_forward_payloads(
+    monkeypatch,
+    fake_run_manager,
+) -> None:
+    owned = AsyncMock(return_value=SimpleNamespace(id="run-1"))
+    monkeypatch.setattr(api, "_owned_run", owned)
+    db = AsyncMock()
+    user = SimpleNamespace(id=7)
+
+    steer = await api.steer_system_agent_run(
+        "run-1",
+        api.SystemAgentRunInputCreate(
+            client_request_id="request-steer-api",
+            content="  改用另一个方案  ",
+        ),
+        db,
+        user,
+    )
+    assert steer.kind == "steer"
+    assert fake_run_manager.last_input_kwargs["payload"] == {
+        "content": "改用另一个方案"
+    }
+
+    resumed = await api.resume_system_agent_run_with_input(
+        "run-1",
+        api.SystemAgentRunInputCreate(
+            client_request_id="request-input-api",
+            fallback_provider_id=9,
+        ),
+        db,
+        user,
+    )
+    assert resumed.kind == "user_input"
+    assert fake_run_manager.last_input_kwargs["payload"] == {
+        "content": "",
+        "fallback_provider_id": 9,
+    }
+
+    approval = await api.approve_system_agent_run(
+        "run-1",
+        api.SystemAgentRunInputCreate(
+            client_request_id="request-approval-api",
+            approved=True,
+            approved_tools=[" scheduler.list ", ""],
+        ),
+        db,
+        user,
+    )
+    assert approval.kind == "approval"
+    assert fake_run_manager.last_input_kwargs["payload"] == {
+        "approved": True,
+        "approved_tools": ["scheduler.list"],
+        "content": "",
+    }
+    assert owned.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_stop_replace_normalizes_and_forwards_payload(
+    monkeypatch,
+    fake_run_manager,
+) -> None:
+    monkeypatch.setattr(api, "_owned_run", AsyncMock(return_value=SimpleNamespace(id="run-1")))
+
+    await api.stop_and_replace_system_agent_run(
+        "run-1",
+        api.SystemAgentStopReplaceCreate(
+            client_request_id="request-stop-replace-api",
+            content="  新任务  ",
+        ),
+        AsyncMock(),
+        SimpleNamespace(id=7),
+    )
+
+    assert fake_run_manager.last_stop_replace_kwargs == {
+        "run_id": "run-1",
+        "web_user_id": 7,
+        "client_request_id": "request-stop-replace-api",
+        "text": "新任务",
+        "model_selection": None,
+    }
+
+
+@pytest.mark.asyncio
 async def test_list_durable_runs_is_scoped_to_current_user(fake_run_manager) -> None:
     user = SimpleNamespace(id=7)
 
@@ -415,6 +577,7 @@ async def test_list_durable_runs_is_scoped_to_current_user(fake_run_manager) -> 
         since=None,
         until=None,
         limit=25,
+        include_bot=False,
     )
 
     assert [row.run_id for row in rows] == ["durable-r1"]
@@ -424,7 +587,21 @@ async def test_list_durable_runs_is_scoped_to_current_user(fake_run_manager) -> 
         "since": None,
         "until": None,
         "limit": 25,
+        "include_bot": False,
     }
+
+
+@pytest.mark.asyncio
+async def test_owned_run_releases_read_transaction_before_manager_call() -> None:
+    row = SimpleNamespace(id="run-owned", web_user_id=7, channel="web")
+    result = SimpleNamespace(scalar_one_or_none=lambda: row)
+    db = AsyncMock()
+    db.execute.return_value = result
+
+    owned = await api._owned_run(db, row.id, row.web_user_id)
+
+    assert owned is row
+    db.commit.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio

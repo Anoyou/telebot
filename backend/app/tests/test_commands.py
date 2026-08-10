@@ -13,6 +13,7 @@ import asyncio
 import base64
 import json
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -111,7 +112,8 @@ def test_liveness_transport_metadata_resolves_effective_identity() -> None:
 
     assert commands_api._liveness_transport_metadata(row) == {
         "effective_api_format": "responses",
-        "client_identity_profile": "codex_tui",
+        "client_identity_profile": "openai_sdk",
+        "execution_backend": "direct",
     }
     assert commands_api._liveness_transport_metadata(
         row,
@@ -120,6 +122,17 @@ def test_liveness_transport_metadata_resolves_effective_identity() -> None:
     ) == {
         "effective_api_format": "anthropic_messages",
         "client_identity_profile": "claude_code",
+        "execution_backend": "direct",
+    }
+    row.execution_backend = "codex_gateway"
+    assert commands_api._liveness_transport_metadata(
+        row,
+        api_format_override="anthropic_messages",
+        identity_override="claude_code",
+    ) == {
+        "effective_api_format": "responses",
+        "client_identity_profile": "gateway_managed",
+        "execution_backend": "codex_gateway",
     }
 
 
@@ -313,7 +326,7 @@ async def test_full_liveness_cancel_records_single_diagnostic_usage(monkeypatch)
     assert job.status == "cancelled"
     assert len(emitted) == 1
     assert emitted[0].success is False
-    assert emitted[0].error_type == "llmerror"
+    assert emitted[0].error_type == "cancelled"
 
 
 # ════════════════════════════════════════════════════════════
@@ -2162,7 +2175,7 @@ async def test_test_model_endpoint_llm_error(monkeypatch) -> None:
     assert len(emitted) == 1
     assert emitted[0].source == "diagnostic:test-model"
     assert emitted[0].success is False
-    assert emitted[0].error_type == "llmerror"
+    assert emitted[0].error_type == "model_missing"
 
 
 @pytest.mark.asyncio
@@ -2262,6 +2275,83 @@ async def test_chat_test_models_endpoint_success(monkeypatch) -> None:
     assert emitted[0].success is True
     assert emitted[0].input_tokens == 11
     assert emitted[0].output_tokens == 7
+
+
+@pytest.mark.asyncio
+async def test_chat_test_models_can_temporarily_use_gateway(monkeypatch) -> None:
+    """已保存的 direct Provider 可在单次测活中临时改走 Gateway。"""
+    from contextlib import asynccontextmanager
+    from dataclasses import replace
+
+    from app.api import commands as cmds_api
+    from app.services import gateway_runtime, llm_client
+    from app.services.gateway_runtime import TEMPORARY_GATEWAY_PROVIDER_ID
+    from app.services.llm_client import LLMResult
+
+    row = LLMProvider(
+        id=1,
+        name="Direct provider",
+        provider="openai",
+        api_key_enc=encrypt_str("sk-test"),
+        base_url="https://api.example.com/v1",
+        default_model="gpt-5",
+        api_format="chat_completions",
+        execution_backend="direct",
+        created_at=datetime.now(UTC),
+    )
+    captured = {}
+
+    @asynccontextmanager
+    async def fake_temporary_gateway_provider(_db, provider):  # noqa: ANN001
+        temporary = replace(provider, id=TEMPORARY_GATEWAY_PROVIDER_ID)
+        captured["temporary"] = temporary
+        yield temporary
+
+    class _FakeClient:
+        async def complete(self, *_args, **_kwargs):
+            return LLMResult(
+                text="Gateway 正常",
+                model="gpt-5",
+                input_tokens=3,
+                output_tokens=2,
+                execution_backend="codex_gateway",
+                gateway_version="test",
+            )
+
+    def fake_build_client(provider, **kwargs):  # noqa: ANN001
+        captured["provider"] = provider
+        captured["kwargs"] = kwargs
+        return _FakeClient()
+
+    monkeypatch.setattr(cmds_api.command_service, "get_provider_row", AsyncMock(return_value=row))
+    monkeypatch.setattr(cmds_api, "_resolve_proxy_url", AsyncMock(return_value=None))
+    monkeypatch.setattr(gateway_runtime, "temporary_gateway_provider", fake_temporary_gateway_provider)
+    monkeypatch.setattr(llm_client, "build_client", fake_build_client)
+    emitted = _capture_llm_usage(monkeypatch)
+
+    out = await cmds_api.chat_test_models(
+        pid=1,
+        payload=ChatTestModelsRequest(
+            models=["gpt-5"],
+            message="测一下",
+            execution_backend_override="codex_gateway",
+            api_format_override="chat_completions",
+            client_identity_profile_override="grok_cli",
+        ),
+        db=AsyncMock(),
+        _user=AsyncMock(),
+    )
+
+    result = out.results[0]
+    assert result.ok is True
+    assert result.execution_backend == "codex_gateway"
+    assert result.effective_api_format == "responses"
+    assert result.client_identity_profile == "gateway_managed"
+    assert captured["temporary"].id != 1
+    assert captured["temporary"].execution_backend == "codex_gateway"
+    assert captured["kwargs"]["api_format_override"] == "responses"
+    assert captured["kwargs"]["identity_override"] is None
+    assert emitted[0].provider_id == 1
 
 
 @pytest.mark.asyncio
@@ -2784,8 +2874,52 @@ async def test_stream_chat_disconnect_records_single_cancelled_usage(monkeypatch
 
     assert len(emitted) == 1
     assert emitted[0].success is False
-    assert emitted[0].error_type == "llmerror"
+    assert emitted[0].error_type == "cancelled"
     assert emitted[0].response_preview == "partial"
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_gateway_setup_failure_returns_one_error_per_model(monkeypatch) -> None:
+    from contextlib import asynccontextmanager
+
+    from app.api import commands as cmds_api
+
+    row = LLMProvider(
+        id=1,
+        name="Gateway failure",
+        provider="openai",
+        api_key_enc=encrypt_str("sk-test"),
+        base_url="https://api.example.com/v1",
+        default_model="gpt-5",
+        api_format="responses",
+        execution_backend="codex_gateway",
+        created_at=datetime.now(UTC),
+    )
+
+    @asynccontextmanager
+    async def failing_context(_db, _row, _payload):
+        raise RuntimeError("gateway unavailable")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(cmds_api.command_service, "get_provider_row", AsyncMock(return_value=row))
+    monkeypatch.setattr(cmds_api, "_liveness_provider_context", failing_context)
+
+    response = await cmds_api.stream_chat_test_models(
+        pid=1,
+        payload=ChatTestModelsRequest(models=["gpt-5", "gpt-5-mini"], message="测一下"),
+        db=AsyncMock(),
+        _user=AsyncMock(),
+    )
+    chunks = [
+        chunk.decode() if isinstance(chunk, bytes) else chunk
+        async for chunk in response.body_iterator
+    ]
+    body = "".join(chunks)
+    events = [json.loads(line) for line in body.splitlines() if line]
+
+    assert [event["requested_model"] for event in events] == ["gpt-5", "gpt-5-mini"]
+    assert all(event["type"] == "error" for event in events)
+    assert all("临时调用方式准备失败" in event["result"]["error"] for event in events)
 
 
 # ════════════════════════════════════════════════════════════
@@ -3414,6 +3548,296 @@ async def test_create_provider_allows_verified_compatible_identity() -> None:
         ),
     )
     assert out.client_identity_profile == "openai_sdk"
+
+
+@pytest.mark.asyncio
+async def test_create_gateway_materializes_defaults_and_preserves_dormant_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services.gateway_runtime import GatewayRuntimeStatus, gateway_runtime_manager
+
+    monkeypatch.setattr(
+        gateway_runtime_manager,
+        "validate_provider_configuration",
+        lambda _provider: None,
+    )
+    monkeypatch.setattr(
+        gateway_runtime_manager,
+        "preflight",
+        AsyncMock(return_value=GatewayRuntimeStatus("ready", False, 0, 0, version="test")),
+    )
+    db = _IdentityValidationDB()
+    out = await command_service.create_provider(
+        db,
+        LLMProviderCreate(
+            name="gateway-anthropic",
+            provider="anthropic",
+            api_key="sk-gateway",
+            default_model="claude-proxy",
+            api_format="responses",
+            client_identity_profile="claude_code",
+            execution_backend="codex_gateway",
+            web_search_api_format="anthropic_messages",
+        ),
+    )
+
+    assert out.base_url == "https://api.anthropic.com/v1"
+    assert out.client_identity_profile == "claude_code"
+    assert out.protocol_profile == "codex_responses"
+    assert out.web_search_api_format == "responses"
+
+
+@pytest.mark.asyncio
+async def test_create_gateway_rejects_missing_api_key() -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        await command_service.create_provider(
+            _IdentityValidationDB(),
+            LLMProviderCreate(
+                name="gateway-no-key",
+                provider="openai",
+                default_model="gpt-x",
+                api_format="responses",
+                execution_backend="codex_gateway",
+            ),
+        )
+
+    assert exc_info.value.detail["code"] == "LLM_GATEWAY_CONFIG_INVALID"
+
+
+@pytest.mark.asyncio
+async def test_update_gateway_rejects_clearing_stored_api_key() -> None:
+    row = LLMProvider(
+        id=90,
+        name="gateway-key",
+        provider="openai",
+        api_key_enc=encrypt_str("sk-stored"),
+        base_url="https://api.example/v1",
+        default_model="gpt-x",
+        api_format="responses",
+        execution_backend="codex_gateway",
+    )
+
+    class _DB:
+        async def get(self, _model, _pk):
+            return row
+
+    with pytest.raises(HTTPException) as exc_info:
+        await command_service.update_provider(_DB(), 90, LLMProviderUpdate(api_key=""))
+
+    assert exc_info.value.detail["code"] == "LLM_GATEWAY_CONFIG_INVALID"
+
+
+@pytest.mark.asyncio
+async def test_gateway_create_sync_failure_rolls_back_and_restores_committed_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import gateway_runtime
+    from app.services.gateway_runtime import GatewayRuntimeStatus
+
+    db = SimpleNamespace(commit=AsyncMock(), rollback=AsyncMock())
+    out = SimpleNamespace(
+        id=91,
+        name="gateway-atomic",
+        provider="openai",
+        default_model="gpt-x",
+    )
+    monkeypatch.setattr(commands_api, "_require_ai_enabled", AsyncMock(return_value=None))
+    monkeypatch.setattr(command_service, "create_provider", AsyncMock(return_value=out))
+    monkeypatch.setattr(commands_api.audit, "write", AsyncMock(return_value=None))
+    monkeypatch.setattr(gateway_runtime, "gateway_provider_transaction_lock", asyncio.Lock())
+    monkeypatch.setattr(
+        gateway_runtime,
+        "reconcile_gateway_runtime_from_session",
+        AsyncMock(
+            return_value=GatewayRuntimeStatus(
+                "degraded",
+                True,
+                1,
+                1,
+                error="candidate rejected",
+            )
+        ),
+    )
+    restore = AsyncMock(
+        return_value=GatewayRuntimeStatus("ready", True, 2, 1, version="test")
+    )
+    monkeypatch.setattr(gateway_runtime, "restore_committed_gateway_snapshot", restore)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await commands_api.create_provider(
+            LLMProviderCreate(
+                name="gateway-atomic",
+                provider="openai",
+                api_key="sk-test",
+                default_model="gpt-x",
+                api_format="responses",
+                execution_backend="codex_gateway",
+            ),
+            db,
+            SimpleNamespace(id=1),
+        )
+
+    assert exc_info.value.detail["code"] == "LLM_GATEWAY_UNAVAILABLE"
+    db.commit.assert_not_awaited()
+    db.rollback.assert_awaited_once()
+    restore.assert_awaited_once()
+    assert gateway_runtime.gateway_provider_transaction_lock.locked() is False
+
+
+@pytest.mark.asyncio
+async def test_gateway_create_invalid_proxy_maps_422_and_restores_committed_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import gateway_runtime
+    from app.services.gateway_runtime import GatewayRuntimeStatus
+    from app.util.proxy import ProxyConfigError
+
+    db = SimpleNamespace(commit=AsyncMock(), rollback=AsyncMock())
+    out = SimpleNamespace(
+        id=92,
+        name="gateway-invalid-proxy",
+        provider="openai",
+        default_model="gpt-x",
+    )
+    monkeypatch.setattr(commands_api, "_require_ai_enabled", AsyncMock(return_value=None))
+    monkeypatch.setattr(command_service, "create_provider", AsyncMock(return_value=out))
+    monkeypatch.setattr(commands_api.audit, "write", AsyncMock(return_value=None))
+    monkeypatch.setattr(gateway_runtime, "gateway_provider_transaction_lock", asyncio.Lock())
+    monkeypatch.setattr(
+        gateway_runtime,
+        "reconcile_gateway_runtime_from_session",
+        AsyncMock(
+            side_effect=ProxyConfigError(
+                "代理 #7 不存在，拒绝回落直连"
+            )
+        ),
+    )
+    restore = AsyncMock(
+        return_value=GatewayRuntimeStatus("ready", True, 2, 1, version="test")
+    )
+    monkeypatch.setattr(gateway_runtime, "restore_committed_gateway_snapshot", restore)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await commands_api.create_provider(
+            LLMProviderCreate(
+                name="gateway-invalid-proxy",
+                provider="openai",
+                api_key="sk-test",
+                default_model="gpt-x",
+                api_format="responses",
+                execution_backend="codex_gateway",
+                proxy_id=7,
+            ),
+            db,
+            SimpleNamespace(id=1),
+        )
+
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.detail["code"] == "LLM_PROXY_INVALID"
+    assert "拒绝回落直连" in exc_info.value.detail["message"]
+    db.commit.assert_not_awaited()
+    db.rollback.assert_awaited_once()
+    restore.assert_awaited_once()
+    assert gateway_runtime.gateway_provider_transaction_lock.locked() is False
+
+
+@pytest.mark.asyncio
+async def test_update_provider_waits_for_gateway_lock_before_first_provider_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import gateway_runtime
+
+    current = SimpleNamespace(id=92, execution_backend="direct")
+    out = SimpleNamespace(id=92)
+    db = SimpleNamespace(
+        refresh=AsyncMock(),
+        commit=AsyncMock(),
+        rollback=AsyncMock(),
+    )
+    get_provider = AsyncMock(return_value=current)
+    lock = asyncio.Lock()
+    await lock.acquire()
+    monkeypatch.setattr(gateway_runtime, "gateway_provider_transaction_lock", lock)
+    monkeypatch.setattr(commands_api, "_require_ai_enabled", AsyncMock(return_value=None))
+    monkeypatch.setattr(command_service, "get_provider_row", get_provider)
+    monkeypatch.setattr(command_service, "update_provider", AsyncMock(return_value=out))
+    monkeypatch.setattr(command_service, "list_all_account_ids", AsyncMock(return_value=[]))
+    monkeypatch.setattr(command_service, "notify_reload", AsyncMock())
+    monkeypatch.setattr(commands_api.audit, "write", AsyncMock())
+
+    task = asyncio.create_task(
+        commands_api.update_provider(
+            92,
+            LLMProviderUpdate(notes="updated"),
+            db,
+            SimpleNamespace(id=1),
+        )
+    )
+    await asyncio.sleep(0)
+    get_provider.assert_not_awaited()
+
+    lock.release()
+    assert await task is out
+    get_provider.assert_awaited_once_with(db, 92)
+    db.refresh.assert_awaited_once_with(current)
+
+
+@pytest.mark.asyncio
+async def test_fetch_models_rejects_results_from_changed_provider_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import gateway_runtime
+
+    row = SimpleNamespace(
+        id=93,
+        name="changing-source",
+        provider="openai",
+        execution_backend="direct",
+        base_url="https://old.example/v1",
+        default_model="gpt-x",
+        api_key_enc=None,
+        request_headers_enc=None,
+        api_format="chat_completions",
+        protocol_profile="standard",
+        proxy_id=None,
+        models=[],
+    )
+
+    async def refresh(_row) -> None:  # noqa: ANN001
+        row.base_url = "https://new.example/v1"
+
+    db = SimpleNamespace(
+        refresh=AsyncMock(side_effect=refresh),
+        rollback=AsyncMock(),
+    )
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def get(self, _endpoint, *, headers):  # noqa: ANN001
+            assert headers["Accept"] == "application/json"
+            return SimpleNamespace(
+                status_code=200,
+                text="",
+                json=lambda: {"data": [{"id": "gpt-x"}]},
+            )
+
+    monkeypatch.setattr(commands_api, "_require_ai_enabled", AsyncMock(return_value=None))
+    monkeypatch.setattr(command_service, "get_provider_row", AsyncMock(return_value=row))
+    monkeypatch.setattr(commands_api, "_resolve_proxy_url", AsyncMock(return_value=None))
+    monkeypatch.setattr(commands_api.httpx, "AsyncClient", lambda **_kwargs: _Client())
+    monkeypatch.setattr(gateway_runtime, "gateway_provider_transaction_lock", asyncio.Lock())
+
+    with pytest.raises(HTTPException) as exc_info:
+        await commands_api.fetch_models(93, db, SimpleNamespace(id=1))
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail["code"] == "FETCH_PROVIDER_CHANGED"
+    db.rollback.assert_awaited_once()
 
 
 @pytest.mark.asyncio

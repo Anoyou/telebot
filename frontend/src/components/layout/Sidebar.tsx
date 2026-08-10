@@ -32,8 +32,8 @@ import {
 } from "@/components/ui/dropdown-menu";
 // DropdownMenuContent kept for Suspense fallback shell
 import { cn } from "@/lib/utils";
-import { APP_VERSION_LABEL } from "@/lib/version";
-import { getPlatformCapabilities, getSystemSettings, patchSystemSettings } from "@/api/system";
+import { formatRuntimeVersionLabel } from "@/lib/runtime-version";
+import { getBackendVersion, getPlatformCapabilities, getSystemSettings, patchSystemSettings } from "@/api/system";
 import { listSystemAgentActions } from "@/api/systemAgent";
 import { getErrMsg } from "@/lib/api";
 import {
@@ -67,11 +67,6 @@ export const NAV: NavItem[] = [
   { to: "/settings", label: "系统", icon: Cog },
 ];
 
-/** @deprecated 使用 navForCapabilities；保留兼容导出 */
-function navForAIState(aiEnabled: boolean): NavItem[] {
-  return filterNavByCapabilities(NAV, { ai: aiEnabled });
-}
-
 export function navForCapabilities(enabled: CapabilityEnabledMap): NavItem[] {
   return filterNavByCapabilities(NAV, enabled);
 }
@@ -102,19 +97,6 @@ export function mobileMoreNavForCapabilities(enabled: CapabilityEnabledMap, pref
   const primary = new Set(mobilePrimaryNavForCapabilities(enabled, preferredOrder).map((item) => item.to));
   return orderNavItems(navForCapabilities(enabled).filter((item) => !primary.has(item.to)), preferredOrder);
 }
-
-/** @deprecated 兼容旧调用 */
-export function mobilePrimaryNavForAIState(aiEnabled: boolean): NavItem[] {
-  return mobilePrimaryNavForCapabilities({ ai: aiEnabled });
-}
-
-/** @deprecated 兼容旧调用 */
-export function mobileMoreNavForAIState(aiEnabled: boolean): NavItem[] {
-  return mobileMoreNavForCapabilities({ ai: aiEnabled });
-}
-
-// 避免 unused 警告：仍可能被外部测试引用
-void navForAIState;
 
 function NavList({
   collapsed = false,
@@ -259,6 +241,17 @@ function SidebarBody({
   onNavigate?: () => void;
 }) {
   const [changelogOpen, setChangelogOpen] = useState(false);
+  const versionQ = useQuery({
+    queryKey: ["system", "version"],
+    queryFn: getBackendVersion,
+    staleTime: 30_000,
+    refetchInterval: 60_000,
+    refetchIntervalInBackground: false,
+  });
+  const runtimeVersionLabel = formatRuntimeVersionLabel(
+    versionQ.data,
+    versionQ.isError ? "版本读取失败" : "正在读取…",
+  );
 
   return (
     <>
@@ -318,8 +311,11 @@ function SidebarBody({
               <span className={cn("min-w-0 flex-1 truncate text-sm", collapsed && "sr-only")}>
                 更新日志
               </span>
-              <span className={cn("shrink-0 text-xs font-medium", collapsed && "sr-only")}>
-                {APP_VERSION_LABEL}
+              <span
+                className={cn("max-w-28 truncate text-xs font-medium", collapsed && "sr-only")}
+                title={runtimeVersionLabel}
+              >
+                {runtimeVersionLabel}
               </span>
             </button>
           </DropdownMenuTrigger>
@@ -329,8 +325,8 @@ function SidebarBody({
               align={mobile ? "start" : "end"}
               sideOffset={10}
               collisionPadding={16}
-              className="max-h-[min(72vh,34rem)] w-[min(28rem,calc(100vw-2rem))] p-0"
-              style={{ overflowY: "auto" }}
+              className="w-[min(28rem,calc(100vw-2rem))] p-0"
+              style={{ maxHeight: "min(72dvh, 34rem)", overflowY: "auto" }}
             >
               <Suspense
                 fallback={

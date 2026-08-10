@@ -71,6 +71,27 @@ Web 悬浮助手 → Durable Run / 可续接事件 ──┐
 - 确认、拒绝和密钥补填共享 Action 行锁；预检期间密钥变化时保持 pending，必须再次确认。
 - 会触发文件、Worker 或系统进程的操作在 Action 提交后执行，失败记录为 `runtime_sync_status=failed`；只有幂等副作用允许“重新同步”，测试发送、立即执行、系统更新/重启和插件批量更新等外部副作用必须重新发起并确认。
 
+### Provider 协议档案与客户端运行时
+
+Provider 的 `api_format` 只选择 Chat Completions、Responses 或 Anthropic Messages
+协议族；`protocol_profile` 进一步声明实际方言。当前档案包括 `standard`、
+`openai_responses`、`deepseek_responses`、`codex_responses` 与
+`claude_code_proxy`。协议档案控制请求字段、reasoning 传输、能力硬限制和模型列表
+候选端点，`client_identity_profile` 只控制可复核的 UA 与安全身份头，两者互不替代。
+
+`auto` 身份由本次实际协议档案解析：标准 Responses 与 DeepSeek 使用 OpenAI SDK，
+Codex Responses 使用 Codex TUI，Anthropic Messages 使用 Claude Code。System Agent
+把本地 session/run/turn 仅作为运行时输入，发送给不同 Provider 前会按
+Provider/档案分别伪名化；同一会话保持稳定，每次 HTTP attempt 的 request ID
+保持唯一。原始 TelePilot session/account/Telegram ID、OAuth、设备证明、billing
+header、Agent Identity 与客户端签名不会发送给上游；测活和协议探测使用临时上下文。
+
+Provider 还可以选择 `direct`（标准 API 直连）或 `codex_gateway`（Codex 客户端兼容模式）调用方式。Gateway 模式固定 Responses/Codex 档案，客户端身份由内置 Gateway 管理，但不会清空已保存的 direct 身份配置。Gateway 只替换传输层；System Agent 仍负责工具循环、预算、取消、同 Provider 模型 fallback 和跨 Provider 确认。失败后不会在同一 Provider 内偷跑 direct，RunTrace 与 usage 会记录实际 backend、Gateway 版本、request ID 和阶段。完整边界见 [Codex 客户端兼容模式（Gateway）](./CODEX-GATEWAY.md)。
+
+Web Agent 输入区可为当前会话选择“跟随 Provider”、指定标准 API 直连客户端身份或“Codex 客户端兼容模式”，选择后立即影响下一次请求并随会话保存在浏览器中。“Codex 客户端兼容模式”只使用已经配置为 Gateway、且支持 Tools 的 Provider；没有可用 Gateway Provider 时不会伪装成可选。固定了不兼容模型时，界面会切回可用 Gateway 模型，服务端仍会校验调用组合，避免绕过 Provider 配置。
+
+System Agent 的 Provider 管理工具仍不开放 `execution_backend`，`providers.verify` 也不是 Gateway 专项测活；模型不能自行修改 Provider 的 direct/Gateway 配置、读取 Gateway 进程健康或宣称已完成真实 Gateway 验收。持久配置与状态检查必须在「AI → 模型提供商」完成。助手可通过 `usage.recent` 查看已经发生的调用所记录的实际 backend、Gateway 版本、request ID、阶段和错误类别；这些历史事实不按 Provider 当前配置反推。
+
 ### 上下文与记忆
 
 System Agent 使用四层上下文，避免每轮回放全部原始消息：
@@ -103,6 +124,8 @@ System Agent 使用四层上下文，避免每轮回放全部原始消息：
 - `system_agent_session`：会话（web/bot、账号上下文、标题、状态、滚动摘要、结构化工作记忆）
 - `system_agent_message`：消息（user/assistant/tool/system_event，落库为打码内容；包含运行状态、错误码、错误信息与重试次数）
 - `system_agent_run`：Web 后台运行句柄、幂等请求标识、终态与取消状态
+- `system_agent_pending_turn`：每会话持久消息队列；正文经 `MASTER_KEY` 加密，保存位置、pending/paused 状态、阻塞原因和派发 Run
+- `system_agent_run_input`：运行中的 steer、补充输入与审批结果收件箱；payload 经 `MASTER_KEY` 加密，并按 Run 与 `client_request_id` 幂等
 - `system_agent_run_event`：按 Run 单调序号持久化的 NDJSON 事件，可从游标续接
 - `system_agent_action`：写操作预览与确认（pending → executing → executed/failed/rejected/expired）
 - `system_agent_user_memory`：跨会话长期偏好（scope_type/scope_id、content、source、enabled）
@@ -119,6 +142,7 @@ System Agent 使用四层上下文，避免每轮回放全部原始消息：
 | `rules.list` / `rules.get` / `rules.dry_run` | 通用 Rule 查询与无副作用试运行（拒绝 `feature_key=interaction`） |
 | `scheduler.list` / `scheduler.get` | 定时任务与 `next_run_at` |
 | `providers.list` | 脱敏 Provider 与 tools 模型 |
+| `usage.recent` / `usage.plugins` / `usage.reset` | 查询近期 LLM 调用、插件用量与重置用量；近期调用包含实际 backend 与脱敏 Gateway 元数据 |
 | `commands.list` | 自定义指令与启用账号 |
 | `features.get_account_status` | 账号功能/插件启停矩阵 |
 | `logs.recent` / `search_errors` / `get_event_detail` | 运行日志（默认 20，最大 500） |
@@ -142,6 +166,8 @@ System Agent 使用四层上下文，避免每轮回放全部原始消息：
 
 写工具只产生 `pending` Action，用户确认后由 `ActionExecutor` 统一事务执行。
 Web 用内联卡片确认；Bot 用 Inline 按钮（`ab:{aid}:confirm|cancel:agent:{nonce}`）。
+
+Web 还有一级「待确认」收件箱（`/assistant/inbox`，侧栏带 pending 角标），可跨会话查看、单条确认/拒绝或批量拒绝 Action。会话流中的 Action 卡会展示摘要、风险、预览、密钥补填和运行时重新同步；它与模型调用前的 Run 级工具审批是两层不同门禁：前者确认具体业务写操作，后者只批准本轮模型选中的工具集合。
 
 诊断请求可按“日志 → 错误事件 → 源码搜索 → 按行读取”的顺序定位代码级根因。
 源码工具只对管理员开放，只能读取当前部署包中的 `backend`、`frontend` 和已安装插件源码白名单；
@@ -187,9 +213,34 @@ Agent 回答时必须给出来源，并区分搜索摘要、已读取正文、�
 
 Web 首先通过 `POST /api/system-agent/sessions/{session_id}/runs` 创建持久 Run，再通过 `GET /api/system-agent/runs/{run_id}/stream?after_seq=N` 订阅事件；重试使用 `POST /api/system-agent/sessions/{session_id}/messages/{message_id}/retry/runs`。刷新、切换会话或 PWA 暂时离线不会取消后台执行，前端会保存 Run ID 和最后游标并自动补收缺失事件；`POST /api/system-agent/runs/{run_id}/cancel` 才会明确终止。
 
+### 任务中心、队列与运行中控制
+
+同一会话同一时间只执行一个 `running` / `waiting_input` / `waiting_approval` Run。执行期间再次发送消息时，Web 可选择：
+
+| 操作 | 适用状态 | 行为 |
+| --- | --- | --- |
+| 稍后执行 | 已有活动 Run | 写入持久队列；每会话默认最多 10 条 pending/paused，按 position、创建时间依次派发 |
+| 补充要求（steer） | `running` | `POST /runs/{id}/steer` 写入加密收件箱，在下一安全边界合并到当前 Run，不另建用户消息 |
+| 补充输入 | `waiting_input` | `POST /runs/{id}/input` 提交说明或备用 Provider，让同一 Run 以 retry 继续 |
+| 批准/拒绝工具 | `waiting_approval` | `POST /runs/{id}/approval` 批准指定工具继续；拒绝则取消本轮。写工具产生的 Action 仍需第二层确认 |
+| 改做这条 | `running` / 两种 waiting | `POST /runs/{id}/stop-and-replace` 原子取消当前 Run 并把替代消息插到队首；替代完成后恢复后续队列 |
+| 停止 | 活动 Run | 取消当前 Run，并暂停该会话尚未开始的后续队列，避免用户停止后旧任务自动继续 |
+
+助手面板内的「任务中心」显示当前与历史 Run，也可编辑、删除、前移、后移、清空或恢复尚未开始的队列项；进入 dispatching/已经开始的项不可再编辑。对应 API 是 `/api/system-agent/queue`、`/sessions/{id}/queue/reorder`、`/sessions/{id}/queue` 与 `/sessions/{id}/queue/resume`。
+
+Run 状态为 `queued`、`running`、`waiting_input`、`waiting_approval`、`succeeded`、`failed`、`cancelled`。waiting 状态会释放执行租约并暂停后续队列，必须由 input、approval、cancel 或 replace 明确推进。相同 session + `client_request_id` 且请求摘要一致时返回同一个 Run；同一个 ID 携带不同 payload 返回 409。运行中输入使用同样的幂等约束，调用方重试网络请求时必须复用原 ID。
+
+### 进程重启与租约恢复
+
+浏览器断线只影响订阅，不影响后台 Run。服务启动和周期恢复扫描会接管 `queued` 与租约过期的 `running` Run；正常关闭也会把本进程尚未结束的运行回退到可恢复队列。恢复时先对账持久事件和助手消息：已经提交成功结果的 Run 直接收敛为 `succeeded`，不会重复执行；其余 Run 保留原用户消息并以 retry 重新排队。`waiting_input` / `waiting_approval` 不会被擅自重跑，继续等待用户操作。
+
+执行 worker 通过租约和心跳维持所有权；失去租约的旧 worker 不能继续追加事件或写终态。工具副作用仍以 Action 提交状态和各业务幂等键为事实来源，恢复流程不得仅因流式连接断开而重复已提交操作。
+
 旧的 `messages/stream` 与 `retry/stream` 接口继续兼容，但内部同样创建持久 Run。Web 会实时展示理解到的领域技能、当前 Provider/模型、重试进度和“正在调用某工具”，不再只显示笼统的“思考中”。
 
 `assistant_message` 始终是最终权威全文，用于持久化和重连对账。OpenAI Chat Completions、OpenAI Responses 与 Anthropic Messages 均直接消费上游 SSE；工具参数允许跨多个 SSE 事件拼接。若兼容上游忽略 `stream=true` 并返回普通 JSON，只发送最终 `assistant_message`，同时在 usage 和 UI 标记“完整响应”，绝不伪造 delta。已经向客户端发送任何文本后若上游中断，本轮立即失败，不自动换模型或 Provider，避免把两次回答拼接成一条。
+
+Responses 流同时接受 `response.completed` 与 `response.incomplete` 协议终态，后者会按 `incomplete_details.reason` 映射为输出上限或错误；`response.failed` 始终失败。若终态 `response.output` 为空，运行时会从此前的 `response.output_item.done` 重建 reasoning 与 function call。DeepSeek 官方 `deepseek-v4-flash` 使用 `https://api.deepseek.com` 根地址和 Responses 协议时，工具续轮会把明文 reasoning input item 与 function call output 一起回传；不依赖 `previous_response_id`、`conversation` 或服务端状态。
 
 预算门禁在结构化调用与流式调用中使用同一 scope 语义：高价 Provider 的 `premium_daily` 到限时允许在尚未输出文本前继续尝试更便宜 Provider；账号级请求数、每日 token 或预算后端不可用属于整条请求的终止条件。上游没有返回 usage 时按请求预估值保守结算；已输出部分文本、取消或异常终止同样不会按“未调用”释放费用。
 
@@ -210,8 +261,14 @@ System Agent 在自己的运行入口注册 LLM usage 持久化回调，路由�
 | 命令 | 行为 |
 | --- | --- |
 | `/agent` | 进入助手模式并显示帮助 |
+| `/agent help` / `/agent status` / `/agent ?` | 显示同一份当前帮助、角色、可用工具与 Redis 确认状态 |
 | `/agent <自然语言>` | 直接提问 |
+| `/agent pending` | 列出当前待确认 Action |
 | `/agent new` | 新建会话（归档旧 active） |
+| `/agent stop` | 停止当前任务，并暂停后续队列 |
+| `/agent resume` | 恢复当前会话已暂停的排队任务 |
+| `/agent approve` | 批准当前等待的工具调用 |
+| `/agent reject` | 拒绝当前等待的工具调用，后续队列保持暂停 |
 | `/agent clear` | 删除当前会话 |
 | `/agent exit` | 退出助手模式（保留历史） |
 
@@ -244,7 +301,10 @@ System Agent 在自己的运行入口注册 LLM usage 持久化回调，路由�
 | 已显示部分文本后上游中断 | 立即失败且保守结算预算，不重试或切 Provider，避免重复内容 |
 | Agent 本轮失败 | 消息标记 failed，不进入后续上下文；Web 可直接重试原轮 |
 | 用户发送“重试 / 继续刚才的” | 有失败锚点时原子复用最近失败用户消息，不新增重复消息；没有锚点时按普通消息处理 |
-| PWA 切后台或网络断开 | Run 与订阅连接解耦，恢复页面后自动续接；只有服务进程重启才会把未完成 Run 标记为可重试失败 |
+| PWA 切后台或网络断开 | Run 与订阅连接解耦，恢复页面后按游标自动续接；不会取消后台执行 |
+| 服务进程重启或执行租约过期 | 先对账已提交终态；已成功结果收敛为 succeeded，其余 queued/running 原位恢复，waiting 状态继续等待用户输入或审批 |
+| `gateway_unavailable` / `gateway_overloaded` | 只影响选中 Gateway 的 Provider；查看系统状态和近期调用，不在同一 Provider 内偷跑 direct |
+| `client_rejected` / `official_account_required` | 客户端或账号运行时受限，不等同于 API Key 错误；按 Provider 实际要求处理 |
 | 系统更新/重启中断连接 | Action 已先提交；刷新后以 Action 与运行时同步状态为准 |
 
 ## 扩展新工具

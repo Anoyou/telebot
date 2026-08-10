@@ -116,10 +116,13 @@ def test_codex_responses_uses_random_non_user_runtime_ids() -> None:
         "model",
         identity=resolve_identity("codex_cli", "responses"),
     )
-    session_id = client._runtime_headers["session-id"]
-    assert uuid.UUID(session_id)
-    assert client._runtime_headers["thread-id"] == session_id
-    assert client._runtime_headers["x-client-request-id"] == session_id
+    headers = client._runtime_headers()
+    session_id = headers["session-id"]
+    assert len(session_id) == 32
+    assert int(session_id, 16) >= 0
+    assert headers["thread-id"] == session_id
+    assert uuid.UUID(headers["x-client-request-id"])
+    assert headers["x-client-request-id"] != session_id
 
     minimal = ResponsesClient(
         "secret",
@@ -127,7 +130,7 @@ def test_codex_responses_uses_random_non_user_runtime_ids() -> None:
         "model",
         identity=resolve_identity("minimal", "responses"),
     )
-    assert minimal._runtime_headers == {}
+    assert minimal._runtime_headers() == {}
 
 
 def test_claude_code_uses_random_non_user_session_id() -> None:
@@ -137,7 +140,9 @@ def test_claude_code_uses_random_non_user_session_id() -> None:
         "model",
         identity=resolve_identity("claude_code", "anthropic_messages"),
     )
-    assert uuid.UUID(client._runtime_headers["X-Claude-Code-Session-Id"])
+    session_id = client._headers()["X-Claude-Code-Session-Id"]
+    assert len(session_id) == 32
+    assert int(session_id, 16) >= 0
 
 
 def test_grok_cli_uses_random_non_user_runtime_ids() -> None:
@@ -147,10 +152,12 @@ def test_grok_cli_uses_random_non_user_runtime_ids() -> None:
         "grok-4.5",
         identity=resolve_identity("grok_cli", "responses"),
     )
-    session_id = client._runtime_headers["x-grok-session-id"]
-    assert uuid.UUID(session_id)
-    assert client._runtime_headers["x-grok-conv-id"] == session_id
-    assert uuid.UUID(client._runtime_headers["x-grok-req-id"])
-    assert uuid.UUID(client._runtime_headers["x-grok-agent-id"])
-    assert client._runtime_headers["x-grok-turn-idx"] == "1"
-    assert client._runtime_headers["x-grok-model-override"] == "grok-4.5"
+    headers = client._runtime_headers()
+    session_id = headers["x-grok-session-id"]
+    assert len(session_id) == 32
+    assert int(session_id, 16) >= 0
+    assert headers["x-grok-conv-id"] == session_id
+    assert uuid.UUID(headers["x-grok-req-id"])
+    assert "x-grok-agent-id" not in headers
+    assert headers["x-grok-turn-idx"] == "1"
+    assert headers["x-grok-model-override"] == "grok-4.5"

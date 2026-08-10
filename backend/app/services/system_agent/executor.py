@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import UTC, datetime
@@ -237,6 +238,8 @@ class ActionExecutor:
 
         # ── 阶段 3：行锁 + 业务执行 ─────────────────────────────
         async with AsyncSessionLocal() as db:
+            gateway_lock_acquired = False
+            gateway_candidate_sync_attempted = False
             try:
                 action = await lock_action(db, action_id)
                 if action is None:
@@ -319,6 +322,22 @@ class ActionExecutor:
                 action.error_message = None
                 await db.flush()
 
+                if tool_name in {
+                    "providers.save",
+                    "providers.probe_and_add",
+                    "providers.delete",
+                    "proxies.save",
+                    "proxies.delete",
+                }:
+                    from ...services.gateway_runtime import (
+                        acquire_gateway_configuration_db_lock,
+                        gateway_provider_transaction_lock,
+                    )
+
+                    await gateway_provider_transaction_lock.acquire()
+                    gateway_lock_acquired = True
+                    await acquire_gateway_configuration_db_lock(db)
+
                 result: Any = None
                 result_for_comp: dict[str, Any] = {}
                 try:
@@ -358,20 +377,39 @@ class ActionExecutor:
                         action.runtime_sync_status = RUNTIME_SYNC_PENDING
                     else:
                         action.runtime_sync_status = RUNTIME_SYNC_NOT_REQUIRED
+                    if ctx.gateway_candidate_sync:
+                        from ...services.gateway_runtime import (
+                            reconcile_gateway_runtime_from_session,
+                        )
+
+                        gateway_candidate_sync_attempted = True
+                        gateway_status = await reconcile_gateway_runtime_from_session(db)
+                        if gateway_status.state == "degraded":
+                            raise RuntimeError("内置 Gateway 配置同步失败")
                     try:
                         await db.commit()
                     except Exception as commit_exc:  # noqa: BLE001
                         log.exception("action commit failed id=%s", action_id)
-                        await db.rollback()
+                        gateway_restore_failed = False
+                        if gateway_candidate_sync_attempted:
+                            from ...services.gateway_runtime import rollback_and_restore_gateway
+
+                            gateway_restore_failed = not await rollback_and_restore_gateway(db)
+                        else:
+                            await db.rollback()
                         compensation_error = await self._compensate_plugin_fs_after_failed_commit(
                             tool_name, arguments, result_for_comp
                         )
                         error_code = (
-                            "COMMIT_FAILED_COMPENSATION_FAILED" if compensation_error else "COMMIT_FAILED"
+                            "COMMIT_FAILED_COMPENSATION_FAILED"
+                            if compensation_error or gateway_restore_failed
+                            else "COMMIT_FAILED"
                         )
                         error_message = str(commit_exc)[:500]
                         if compensation_error:
                             error_message = (f"{error_message}; 文件补偿失败: {compensation_error}")[:500]
+                        if gateway_restore_failed:
+                            error_message = (f"{error_message}; Gateway 配置补偿失败")[:500]
                         await self._mark_failed(
                             action_id,
                             error_code=error_code,
@@ -383,7 +421,9 @@ class ActionExecutor:
                                 "ok": False,
                                 "error_code": error_code,
                                 "error_message": error_message,
-                                "business_changed": None if compensation_error else False,
+                                "business_changed": (
+                                    None if compensation_error or gateway_restore_failed else False
+                                ),
                                 "action": action_to_dict(failed) if failed else None,
                             }
                 except Exception as exc:  # noqa: BLE001
@@ -394,15 +434,24 @@ class ActionExecutor:
                             arguments = {**arguments, **dict(action.arguments)}
                     except Exception:  # noqa: BLE001
                         pass
-                    await db.rollback()
+                    gateway_restore_failed = False
+                    if gateway_candidate_sync_attempted:
+                        from ...services.gateway_runtime import rollback_and_restore_gateway
+
+                        gateway_restore_failed = not await rollback_and_restore_gateway(db)
+                    else:
+                        await db.rollback()
                     compensation_error = await self._compensate_plugin_fs_after_failed_commit(
                         tool_name, arguments, result_for_comp
                     )
                     error_code = type(exc).__name__
                     error_message = str(exc)[:500]
-                    if compensation_error:
+                    if compensation_error or gateway_restore_failed:
                         error_code = "EXECUTE_FAILED_COMPENSATION_FAILED"
-                        error_message = (f"{error_message}; 文件补偿失败: {compensation_error}")[:500]
+                        if compensation_error:
+                            error_message = (f"{error_message}; 文件补偿失败: {compensation_error}")[:500]
+                        if gateway_restore_failed:
+                            error_message = (f"{error_message}; Gateway 配置补偿失败")[:500]
                     await self._mark_failed(
                         action_id,
                         error_code=error_code,
@@ -414,9 +463,17 @@ class ActionExecutor:
                             "ok": False,
                             "error_code": error_code,
                             "error_message": error_message,
-                            "business_changed": None if compensation_error else False,
+                            "business_changed": (
+                                None if compensation_error or gateway_restore_failed else False
+                            ),
                             "action": action_to_dict(failed) if failed else None,
                         }
+
+                if gateway_lock_acquired:
+                    from ...services.gateway_runtime import gateway_provider_transaction_lock
+
+                    gateway_provider_transaction_lock.release()
+                    gateway_lock_acquired = False
 
                 if spec.runtime_effects:
                     await self._run_runtime_sync(action_id, list(spec.runtime_effects), arguments=arguments)
@@ -427,6 +484,14 @@ class ActionExecutor:
                         "ok": True,
                         "action": action_to_dict(final) if final else None,
                     }
+            except asyncio.CancelledError:
+                if gateway_candidate_sync_attempted:
+                    from ...services.gateway_runtime import rollback_and_restore_gateway
+
+                    await rollback_and_restore_gateway(db)
+                else:
+                    await db.rollback()
+                raise
             except Exception as exc:  # noqa: BLE001
                 await db.rollback()
                 log.exception("action confirm outer failure id=%s", action_id)
@@ -435,6 +500,11 @@ class ActionExecutor:
                     "error_code": "CONFIRM_FAILED",
                     "error_message": str(exc)[:500],
                 }
+            finally:
+                if gateway_lock_acquired:
+                    from ...services.gateway_runtime import gateway_provider_transaction_lock
+
+                    gateway_provider_transaction_lock.release()
 
     async def retry_runtime_sync(self, action_id: str) -> dict[str, Any]:
         async with AsyncSessionLocal() as db:

@@ -74,7 +74,6 @@ import type {
   LLMProviderOut,
 } from "@/api/types";
 import { getErrMsg } from "@/lib/api";
-import { cn } from "@/lib/utils";
 
 // 指令名仅允许 [a-zA-Z0-9_]，与后端正则对齐
 const NAME_RE = /^[a-zA-Z0-9_]{1,64}$/;
@@ -1006,7 +1005,6 @@ export function CommandTemplates() {
               }
             }}
             saving={createMut.isPending || updateMut.isPending}
-            hasProviders={hasProviders}
             aiEnabled={aiEnabled}
             providerUnavailable={providerUnavailable}
             onGoProviders={() => nav("/ai?tab=providers")}
@@ -1133,7 +1131,6 @@ function CommandEditDialog({
   onCancel,
   onSave,
   saving,
-  hasProviders,
   aiEnabled,
   providerUnavailable,
   onGoProviders,
@@ -1146,7 +1143,6 @@ function CommandEditDialog({
   onCancel: () => void;
   onSave: () => void;
   saving: boolean;
-  hasProviders: boolean;
   aiEnabled: boolean;
   providerUnavailable: boolean;
   onGoProviders: () => void;

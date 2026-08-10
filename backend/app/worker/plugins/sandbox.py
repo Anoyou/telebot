@@ -70,6 +70,7 @@ _NON_CLIENT_PERMISSIONS: frozenset[str] = frozenset(
         "ai_image",
         "ai_stt",
         "payout",
+        "click_bot_button",
     }
 )
 
@@ -480,6 +481,10 @@ class SandboxEvent:
         real = object.__getattribute__(self, "_real")
         if name == "message":
             return _wrap_event_child(getattr(real, "message", None), client, plugin_key)
+        if name == "buttons":
+            return _wrap_message_buttons(getattr(real, "buttons", None), plugin_key)
+        if name == "reply_markup":
+            return _wrap_reply_markup(getattr(real, "reply_markup", None), plugin_key)
 
         if name in _EVENT_METHOD_TO_CLIENT_METHOD:
             _require_event_method(client, plugin_key, name)
@@ -542,4 +547,118 @@ def _wrap_event_child(value: Any, client: SandboxClient, plugin_key: str) -> Any
     return SandboxEvent(value, client, plugin_key=plugin_key)
 
 
-__all__ = ["ALLOWED_API", "SandboxClient", "SandboxEvent", "resolve_permissions"]
+class SandboxButton:
+    """只读按钮视图；不泄露 Telethon MessageButton、client 或 callback data。"""
+
+    __slots__ = ("_kind", "_text")
+
+    def __init__(self, button: Any, *, plugin_key: str) -> None:
+        raw = getattr(button, "button", button)
+        class_name = type(raw).__name__
+        object.__setattr__(
+            self,
+            "_text",
+            str(getattr(button, "text", None) or getattr(raw, "text", None) or ""),
+        )
+        object.__setattr__(
+            self,
+            "_kind",
+            {
+                "KeyboardButtonCallback": "callback",
+                "KeyboardButtonUrl": "url",
+                "KeyboardButtonGame": "game",
+                "KeyboardButtonSwitchInline": "switch_inline",
+                "KeyboardButtonRequestPhone": "request_phone",
+                "KeyboardButtonRequestGeoLocation": "request_location",
+            }.get(class_name, "reply"),
+        )
+
+    @property
+    def text(self) -> str:
+        return object.__getattribute__(self, "_text")
+
+    @property
+    def kind(self) -> str:
+        return object.__getattribute__(self, "_kind")
+
+    def __setattr__(self, name: str, _value: Any) -> None:
+        raise PermissionError(f"插件按钮视图为只读，禁止修改 {name}")
+
+    async def click(self, *_args: Any, **_kwargs: Any) -> None:
+        raise PermissionError(
+            "event.message.buttons[…][…].click() 已被安全阻断；"
+            "请声明 click_bot_button 权限并使用 "
+            "ctx.messages.click_callback_button(...)"
+        )
+
+
+class SandboxButtonRow:
+    """只读按钮行；只保留已净化的按钮视图。"""
+
+    __slots__ = ("_buttons",)
+
+    def __init__(self, row: Any, *, plugin_key: str) -> None:
+        object.__setattr__(
+            self,
+            "_buttons",
+            tuple(
+                SandboxButton(button, plugin_key=plugin_key)
+                for button in (getattr(row, "buttons", None) or ())
+            ),
+        )
+
+    @property
+    def buttons(self) -> tuple[SandboxButton, ...]:
+        return object.__getattribute__(self, "_buttons")
+
+    def __setattr__(self, name: str, _value: Any) -> None:
+        raise PermissionError(f"插件按钮行视图为只读，禁止修改 {name}")
+
+
+class SandboxReplyMarkup:
+    """只读 Inline/Reply keyboard 视图；不保留原始 reply_markup 对象。"""
+
+    __slots__ = ("_rows",)
+
+    def __init__(self, markup: Any, *, plugin_key: str) -> None:
+        object.__setattr__(
+            self,
+            "_rows",
+            tuple(
+                SandboxButtonRow(row, plugin_key=plugin_key)
+                for row in (getattr(markup, "rows", None) or ())
+            ),
+        )
+
+    @property
+    def rows(self) -> tuple[SandboxButtonRow, ...]:
+        return object.__getattribute__(self, "_rows")
+
+    def __setattr__(self, name: str, _value: Any) -> None:
+        raise PermissionError(f"插件按钮布局视图为只读，禁止修改 {name}")
+
+
+def _wrap_message_buttons(value: Any, plugin_key: str) -> tuple[tuple[SandboxButton, ...], ...] | None:
+    if value is None:
+        return None
+    return tuple(
+        tuple(SandboxButton(button, plugin_key=plugin_key) for button in (row or ()))
+        for row in (value or ())
+    )
+
+
+def _wrap_reply_markup(value: Any, plugin_key: str) -> SandboxReplyMarkup | None:
+    if value is None:
+        return None
+    return SandboxReplyMarkup(value, plugin_key=plugin_key)
+
+
+__all__ = [
+    "ALLOWED_API",
+    "SandboxButton",
+    "SandboxButtonRow",
+    "SandboxClient",
+    "SandboxEvent",
+    "SandboxReplyMarkup",
+    "resolve_permissions",
+]

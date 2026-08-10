@@ -8,12 +8,17 @@ import json
 import logging
 import re
 import secrets
+import uuid
 from typing import Any
 
 from ...db.base import AsyncSessionLocal
 from ...db.models.system_agent import (
     ACTION_STATUS_PENDING,
+    AGENT_RUN_WAITING_APPROVAL,
+    AGENT_RUN_WAITING_INPUT,
     CHANNEL_BOT,
+    RUN_INPUT_APPROVAL,
+    RUN_INPUT_USER,
     SESSION_STATUS_ACTIVE,
 )
 from ...redis_client import get_redis
@@ -28,6 +33,11 @@ from .actions import (
 )
 from .executor import get_action_executor
 from .registry import get_registry
+from .run_manager import (
+    RunConflictError,
+    RunNotFoundError,
+    get_system_agent_run_manager,
+)
 from .secrets import extract_plaintext_secrets
 from .service import get_system_agent_service
 
@@ -706,6 +716,7 @@ async def handle_agent_command(
     send: Any,
     draft: Any | None = None,
     edit: bool = False,
+    client_request_id: str | None = None,
 ) -> None:
     """处理 `/agent` 及其子命令与自然语言任务。"""
 
@@ -735,6 +746,10 @@ async def handle_agent_command(
             "/agent &lt;问题&gt; — 直接提问\n"
             "/agent pending — 列出待确认操作\n"
             "/agent new — 新建会话\n"
+            "/agent stop — 停止当前任务并暂停后续队列\n"
+            "/agent resume — 恢复当前会话的排队任务\n"
+            "/agent approve — 批准当前等待的工具调用\n"
+            "/agent reject — 拒绝当前等待的工具调用\n"
             "/agent clear — 删除当前会话\n"
             "/agent exit — 退出助手模式\n\n"
             "助手模式下可直接发送自然语言（既有斜杠命令仍优先）。\n"
@@ -790,6 +805,102 @@ async def handle_agent_command(
         await send(f"已新建助手会话 <code>{session.id[:8]}…</code>，直接发问题即可。", edit=edit)
         return
 
+    if verb in {"stop", "resume", "approve", "reject"}:
+        await enter_agent_mode(account_id, tg_user_id)
+        async with AsyncSessionLocal() as db:
+            svc = get_system_agent_service()
+            sessions = await svc.list_sessions(
+                db,
+                bot_tg_user_id=tg_user_id,
+                account_id=account_id,
+                status=SESSION_STATUS_ACTIVE,
+                limit=1,
+            )
+        if not sessions:
+            await send("当前没有活跃助手会话。", edit=edit)
+            return
+        manager = get_system_agent_run_manager()
+        session_id = sessions[0].id
+        try:
+            if verb == "resume":
+                resumed = await manager.resume_bot_queue(
+                    session_id=session_id,
+                    bot_tg_user_id=tg_user_id,
+                    account_id=account_id,
+                )
+                if resumed:
+                    await send(
+                        f"▶️ 已恢复 <b>{resumed}</b> 条排队任务，将按顺序继续执行。",
+                        edit=edit,
+                    )
+                else:
+                    await send("当前没有已暂停的排队任务。", edit=edit)
+                return
+
+            run = await manager.get_active_run_for_bot(
+                session_id=session_id,
+                bot_tg_user_id=tg_user_id,
+                account_id=account_id,
+            )
+            if run is None:
+                await send("当前没有正在执行或等待处理的任务。", edit=edit)
+                return
+            if verb in {"approve", "reject"}:
+                if run.status != AGENT_RUN_WAITING_APPROVAL:
+                    await send("当前任务没有等待工具审批。", edit=edit)
+                    return
+                approved_tools: list[str] = []
+                if verb == "approve":
+                    events = await manager.list_events(run.id, after_seq=0)
+                    for row in reversed(events):
+                        event = (
+                            dict(row.event or {})
+                            if hasattr(row, "event")
+                            else dict(row or {})
+                        )
+                        approval = event.get("tool_approval")
+                        if not isinstance(approval, dict):
+                            continue
+                        approved_tools = [
+                            str(item.get("name") or "")
+                            for item in approval.get("tools", [])
+                            if isinstance(item, dict) and str(item.get("name") or "")
+                        ]
+                        if approved_tools:
+                            break
+                    if not approved_tools:
+                        await send("未找到可批准的工具列表，请停止本轮后重新发起。", edit=edit)
+                        return
+                await manager.add_run_input(
+                    run.id,
+                    kind=RUN_INPUT_APPROVAL,
+                    client_request_id=(
+                        str(client_request_id)
+                        if client_request_id
+                        else f"bot-approval-{uuid.uuid4().hex}"
+                    )[:64],
+                    payload={
+                        "approved": verb == "approve",
+                        "approved_tools": approved_tools,
+                    },
+                )
+                await send(
+                    "✅ 已批准，当前任务将继续执行。"
+                    if verb == "approve"
+                    else "⛔ 已拒绝，本轮任务已取消；后续队列仍保持暂停。",
+                    edit=edit,
+                )
+                return
+            await manager.cancel_run(run.id)
+            await send(
+                "⏹️ 已请求停止当前任务；后续排队任务将暂停。"
+                "需要继续时发送 /agent resume。",
+                edit=edit,
+            )
+        except (RunConflictError, RunNotFoundError):
+            await send("当前助手会话已变化，请重试。", edit=edit)
+        return
+
     if verb == "clear":
         await enter_agent_mode(account_id, tg_user_id)
         async with AsyncSessionLocal() as db:
@@ -818,6 +929,7 @@ async def handle_agent_command(
         send=send,
         draft=draft,
         edit=edit,
+        client_request_id=client_request_id,
     )
 
 
@@ -830,8 +942,9 @@ async def run_agent_query(
     send: Any,
     draft: Any | None = None,
     edit: bool = False,
+    client_request_id: str | None = None,
 ) -> None:
-    """执行一轮助手查询；写工具附带 Inline 确认按钮。"""
+    """通过 Durable Run 执行一轮助手查询；写工具附带 Inline 确认按钮。"""
 
     await refresh_agent_mode(account_id, tg_user_id)
 
@@ -889,55 +1002,117 @@ async def run_agent_query(
     streamed_assistant_text = ""
     error_text = ""
     proposed_actions: list[dict[str, Any]] = []
+    final_status = ""
+    manager = get_system_agent_run_manager()
+    try:
+        async with AsyncSessionLocal() as db:
+            svc = get_system_agent_service()
+            session = await svc.get_or_create_active_session(
+                db,
+                channel=CHANNEL_BOT,
+                bot_tg_user_id=tg_user_id,
+                account_id=account_id,
+            )
+            await db.commit()
 
-    async with AsyncSessionLocal() as db:
-        svc = get_system_agent_service()
-        session = await svc.get_or_create_active_session(
-            db,
-            channel=CHANNEL_BOT,
+        request_id = str(client_request_id or f"bot-{uuid.uuid4().hex}")[:64]
+        active_run = await manager.get_active_run_for_bot(
+            session_id=session.id,
             bot_tg_user_id=tg_user_id,
             account_id=account_id,
         )
-        await db.commit()
-        session = await svc.get_session(db, session.id, bot_tg_user_id=tg_user_id)
-        assert session is not None
-        try:
-            async for event in svc.stream_message(
-                db,
-                session=session,
-                text=text,
-                role=role or "viewer",
-                channel=CHANNEL_BOT,
+        after_seq = 0
+        if active_run is not None and active_run.status == AGENT_RUN_WAITING_INPUT:
+            after_seq = int(active_run.last_seq or 0)
+            await manager.add_run_input(
+                active_run.id,
+                kind=RUN_INPUT_USER,
+                client_request_id=request_id,
+                payload={"content": text},
+            )
+            run = active_run
+            await update_draft("▶️ 已收到补充说明，正在继续当前任务…")
+        elif active_run is not None and active_run.status == AGENT_RUN_WAITING_APPROVAL:
+            after_seq = int(active_run.last_seq or 0)
+            error_text = (
+                "当前任务正在等待工具审批。请发送 /agent approve 批准，"
+                "或发送 /agent reject 拒绝。"
+            )
+            final_status = AGENT_RUN_WAITING_APPROVAL
+            run = active_run
+        else:
+            run = await manager.start_run(
+                session_id=session.id,
+                web_user_id=None,
                 bot_tg_user_id=tg_user_id,
-            ):
-                et = event.get("type")
-                if et == "assistant_delta_reset":
-                    streamed_assistant_text = ""
-                elif et == "assistant_delta":
-                    # 流式过程只推进 draft；最终正文只走真实消息，避免 draft 与 final 双气泡
-                    streamed_assistant_text += str(event.get("delta") or "")
-                    await update_draft(_markdown_to_telegram_html(streamed_assistant_text))
-                elif et == "assistant_message":
-                    # 完整正文不进 draft：随后会 send 真实消息，若再 update_draft 会与 final 并存
-                    assistant_text = str(event.get("content") or "")
-                elif et == "error":
-                    error_text = str(event.get("message") or "助手运行失败")
-                elif et == "action_proposed":
-                    action = event.get("action")
-                    if isinstance(action, dict):
-                        proposed_actions.append(action)
-                else:
-                    await update_draft(_agent_progress_text(event))
-            await db.commit()
-        except Exception as exc:  # noqa: BLE001
-            await db.rollback()
-            log.exception("bot agent query failed")
-            error_text = str(exc)[:400]
+                account_id=account_id,
+                channel=CHANNEL_BOT,
+                role=role or "viewer",
+                client_request_id=request_id,
+                text=text,
+            )
+        queue_position = await manager.get_queue_position(run.id)
+        if queue_position is not None:
+            queued_text = f"🕒 已加入队列，当前第 <b>{queue_position}</b> 位…"
+            if draft_active:
+                await update_draft(queued_text)
+            else:
+                queued = await send(
+                    queued_text,
+                    edit=placeholder_message_id is not None,
+                    edit_message_id=placeholder_message_id,
+                )
+                if (
+                    placeholder_message_id is None
+                    and isinstance(queued, dict)
+                    and queued.get("message_id") is not None
+                ):
+                    placeholder_message_id = int(queued["message_id"])
+
+        async for event in manager.stream_events(run.id, after_seq=after_seq):
+            et = event.get("type")
+            if et == "assistant_delta_reset":
+                streamed_assistant_text = ""
+            elif et == "assistant_delta":
+                # 流式过程只推进 draft；最终正文只走真实消息，避免 draft 与 final 双气泡
+                streamed_assistant_text += str(event.get("delta") or "")
+                await update_draft(_markdown_to_telegram_html(streamed_assistant_text))
+            elif et == "assistant_message":
+                # 完整正文不进 draft：随后会 send 真实消息，若再 update_draft 会与 final 并存
+                assistant_text = str(event.get("content") or "")
+            elif et == "error":
+                error_text = str(event.get("message") or "助手运行失败")
+            elif et == "action_proposed":
+                action = event.get("action")
+                if isinstance(action, dict):
+                    proposed_actions.append(action)
+            else:
+                await update_draft(_agent_progress_text(event))
+        final_status = (await manager.get_run(run.id)).status
+    except (RunConflictError, RunNotFoundError) as exc:
+        error_text = str(exc)[:400]
+    except Exception as exc:  # noqa: BLE001
+        log.exception("bot durable agent query failed")
+        error_text = f"助手后台运行失败（{type(exc).__name__}），请稍后重试。"
 
     if error_text and not assistant_text and not proposed_actions:
         await clear_draft()
+        if final_status == AGENT_RUN_WAITING_INPUT:
+            message = (
+                "⏸️ 当前任务需要补充输入后才能继续。\n"
+                f"{_html_escape(error_text)}\n"
+                "直接发送补充说明即可继续；后续队列已暂停。"
+            )
+        elif final_status == AGENT_RUN_WAITING_APPROVAL:
+            message = (
+                "⏸️ 当前任务正在等待审批。\n"
+                f"{_html_escape(error_text)}\n"
+                "发送 /agent approve 批准，或 /agent reject 拒绝；后续队列已暂停。"
+            )
+        else:
+            message = f"❌ {_html_escape(error_text)}"
         await send(
-            f"❌ {_html_escape(error_text)}",
+            message,
             edit=not draft_active and placeholder_message_id is not None,
             edit_message_id=placeholder_message_id,
         )

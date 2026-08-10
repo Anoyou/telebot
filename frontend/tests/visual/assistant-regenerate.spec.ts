@@ -5,6 +5,80 @@ import { installApiFixture } from "./fixtures";
 test.describe("系统助手原位编辑与重新生成", () => {
   test.skip(({ browserName }) => browserName !== "chromium", "只在 Chromium 项目运行");
 
+  test("桌面配置并入页头且窄屏不再显示配置行", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name === "tablet", "桌面与 375px 移动视口各验证一次");
+    const fixture = await installApiFixture(page);
+    if (testInfo.project.name === "mobile") {
+      await page.setViewportSize({ width: 375, height: 812 });
+    }
+    const session = {
+      id: "header-controls-session",
+      web_user_id: 1,
+      bot_tg_user_id: null,
+      account_id: null,
+      channel: "web",
+      title: "页头配置验证",
+      origin: "interactive",
+      status: "active",
+      created_at: "2026-07-31T01:00:00Z",
+      updated_at: "2026-07-31T01:00:00Z",
+    };
+    await page.route("**/api/system-agent/sessions?**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify([session]),
+      });
+    });
+    await page.route(
+      "**/api/system-agent/sessions/header-controls-session/messages?**",
+      async (route) => {
+        await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+      },
+    );
+
+    await page.goto("/assistant", { waitUntil: "networkidle" });
+
+    const composer = page.locator("[data-assistant-composer]");
+    await expect(composer.getByPlaceholder("想让 Agent 怎么帮你？直接用自然语言问她吧！")).toBeVisible();
+    const headerControls = page.locator('[data-assistant-context-controls="header"]');
+    const settingsControls = page.locator('[data-assistant-context-controls="settings"]');
+    await expect(settingsControls).toHaveCount(0);
+    if (testInfo.project.name === "desktop") {
+      const header = page.locator("[data-assistant-surface] [data-page-header]");
+      await expect(headerControls).toBeVisible();
+      const placement = await header.evaluate((element) => {
+        const controls = element.querySelector<HTMLElement>(
+          '[data-assistant-context-controls="header"]',
+        );
+        const controlsRect = controls?.getBoundingClientRect();
+        return {
+          insidePageHeader: controls?.closest("[data-page-header]") === element,
+          width: controlsRect?.width ?? 0,
+          height: controlsRect?.height ?? 0,
+        };
+      });
+      expect(placement.insidePageHeader).toBe(true);
+      expect(placement.width).toBeGreaterThan(0);
+      expect(placement.height).toBeGreaterThan(0);
+    } else {
+      await expect(headerControls).toBeHidden();
+      await page.locator("[data-assistant-mobile-summary]").click();
+      const bounds = await page.evaluate(() => ({
+        viewportWidth: document.documentElement.clientWidth,
+        documentWidth: document.documentElement.scrollWidth,
+      }));
+      expect(bounds.viewportWidth).toBe(375);
+      expect(bounds.documentWidth).toBeLessThanOrEqual(bounds.viewportWidth);
+    }
+
+    await page.screenshot({
+      path: testInfo.outputPath(`assistant-header-controls-${testInfo.project.name}.png`),
+      fullPage: true,
+    });
+    fixture.assertClean();
+  });
+
   test("只有最新完成轮次可编辑和重新生成", async ({ page }, testInfo) => {
     test.skip(testInfo.project.name === "tablet", "桌面与移动视口各验证一次");
     const fixture = await installApiFixture(page);
