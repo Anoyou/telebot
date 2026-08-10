@@ -234,13 +234,18 @@ def test_runtime_content_bind_mount_uses_the_host_project_path() -> None:
     assert expected_export in prod_update
 
 
-def test_incremental_script_uses_compose_health_without_localhost_frontend_probe() -> None:
+def test_incremental_script_waits_for_frontend_image_healthcheck() -> None:
     repo_root = Path(__file__).resolve().parents[3]
     script = (repo_root / "scripts" / "prod-update.sh").read_text(encoding="utf-8")
+    dockerfile = (repo_root / "frontend" / "Dockerfile").read_text(encoding="utf-8")
 
     assert "frontend_url" not in script
     assert 'wait_http "$(frontend_url)"' not in script
     assert "wait_compose_healthy docker-compose.yml frontend" in script
+    assert (
+        "HEALTHCHECK --interval=10s --timeout=3s "
+        "CMD wget -qO- http://127.0.0.1/ >/dev/null 2>&1 || exit 1"
+    ) in dockerfile
     assert "@@TELEPILOT_PROGRESS@@" in script
 
 

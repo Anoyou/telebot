@@ -38,6 +38,63 @@ func TestInvalidProviderRejectsWholeTable(t *testing.T) {
 	}
 }
 
+func TestInvalidProxyURLRejectsWholeTable(t *testing.T) {
+	for _, proxyURL := range []string{
+		"://broken",
+		"ftp://proxy.example:21",
+		"http:///missing-host",
+		"http://proxy.example:8080/private",
+		"http://proxy.example:8080?mode=direct",
+		"socks5://proxy.example:1080#fragment",
+	} {
+		_, err := NewTable(contract.ConfigSnapshot{
+			SchemaVersion:   1,
+			ProtocolVersion: contract.ProtocolVersion,
+			Revision:        2,
+			Providers: []contract.ProviderConfig{{
+				ID:              1,
+				BaseURL:         "https://ok.example/v1",
+				APIKey:          "ok",
+				ProxyURL:        proxyURL,
+				Models:          []string{"a"},
+				ModelsEndpoints: []string{"https://ok.example/v1/models"},
+			}},
+		})
+		if err == nil {
+			t.Fatalf("invalid proxy URL was accepted: %q", proxyURL)
+		}
+	}
+}
+
+func TestSupportedProxyURLIsCopiedToRoutes(t *testing.T) {
+	for _, proxyURL := range []string{
+		"http://user:pass@proxy.example:8080",
+		"https://proxy.example:8443/",
+		"socks5://proxy.example:1080",
+	} {
+		table, err := NewTable(contract.ConfigSnapshot{
+			SchemaVersion:   1,
+			ProtocolVersion: contract.ProtocolVersion,
+			Revision:        2,
+			Providers: []contract.ProviderConfig{{
+				ID:              1,
+				BaseURL:         "https://ok.example/v1",
+				APIKey:          "ok",
+				ProxyURL:        proxyURL,
+				Models:          []string{"a"},
+				ModelsEndpoints: []string{"https://ok.example/v1/models"},
+			}},
+		})
+		if err != nil {
+			t.Fatalf("supported proxy URL %q was rejected: %v", proxyURL, err)
+		}
+		route, ok := table.Resolve(1, "a")
+		if !ok || route.ProxyURL != proxyURL {
+			t.Fatalf("proxy URL was not copied to route: %#v ok=%v", route, ok)
+		}
+	}
+}
+
 func TestNamespacedModelUsesOpaqueInternalRoute(t *testing.T) {
 	table, err := NewTable(contract.ConfigSnapshot{
 		SchemaVersion:   1,

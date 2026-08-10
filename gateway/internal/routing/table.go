@@ -153,6 +153,9 @@ func validateProvider(provider contract.ProviderConfig) error {
 	if strings.TrimSpace(provider.APIKey) == "" {
 		return errors.New("api_key is required")
 	}
+	if err := validateProxyURL(provider.ProxyURL); err != nil {
+		return err
+	}
 	parsed, err := url.Parse(provider.BaseURL)
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
 		return errors.New("base_url must be an absolute HTTP(S) URL")
@@ -203,6 +206,25 @@ func validateProvider(provider contract.ProviderConfig) error {
 		if !strings.EqualFold(parsedEndpoint.Scheme, parsed.Scheme) || !strings.EqualFold(parsedEndpoint.Host, parsed.Host) {
 			return errors.New("models endpoint must use the Provider base URL origin")
 		}
+	}
+	return nil
+}
+
+func validateProxyURL(value string) error {
+	if value == "" {
+		return nil
+	}
+	parsed, err := url.Parse(value)
+	if err != nil ||
+		(parsed.Scheme != "http" && parsed.Scheme != "https" && parsed.Scheme != "socks5") ||
+		parsed.Host == "" {
+		return errors.New("proxy_url must be an absolute HTTP(S) or SOCKS5 URL")
+	}
+	if parsed.Path != "" && parsed.Path != "/" {
+		return errors.New("proxy_url must not contain a path")
+	}
+	if parsed.RawQuery != "" || parsed.Fragment != "" {
+		return errors.New("proxy_url must not contain a query or fragment")
 	}
 	return nil
 }

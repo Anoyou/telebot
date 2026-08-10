@@ -1109,6 +1109,125 @@ async def test_stale_worker_cannot_append_events_or_finish_after_claim_changes(
 
 
 @pytest.mark.asyncio
+async def test_heartbeat_failure_stops_execution_before_service_can_continue(
+    run_db,
+    monkeypatch,
+) -> None:
+    service = _ControlledService()
+    manager = SystemAgentRunManager(
+        session_factory=run_db,
+        service_factory=lambda: service,
+        poll_interval=0.01,
+        worker_id="heartbeat-worker",
+    )
+
+    async def fail_heartbeat(_run_id, _cancel_event):
+        await asyncio.sleep(0)
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(manager, "_heartbeat", fail_heartbeat)
+    run = await manager.start_run(
+        session_id="session-1",
+        web_user_id=7,
+        client_request_id="request-heartbeat-failure",
+        text="heartbeat 失败后不能继续",
+    )
+    await _wait_for_service_calls(service)
+    for _ in range(200):
+        task = manager._tasks.get(run.id)
+        if task is None or task.done():
+            break
+        await asyncio.sleep(0.01)
+    else:
+        raise AssertionError("execution task did not stop after heartbeat failure")
+
+    service.release.set()
+    await asyncio.sleep(0.05)
+    stored = await manager.get_run(run.id)
+    events = await manager.list_events(run.id)
+    assert stored.status == AGENT_RUN_RUNNING
+    assert stored.claimed_by == "heartbeat-worker"
+    assert all((event.event or {}).get("type") != "assistant_message" for event in events)
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_missing_retry_message_fails_run_instead_of_recovery_loop(
+    run_db,
+) -> None:
+    service = _ControlledService()
+    manager = SystemAgentRunManager(
+        session_factory=run_db,
+        service_factory=lambda: service,
+        poll_interval=0.01,
+    )
+    run = await manager.start_run(
+        session_id="session-1",
+        web_user_id=7,
+        client_request_id="request-missing-retry-message",
+        text="",
+        retry_message_id=999999,
+    )
+
+    failed = await _wait_for_status(manager, run.id, AGENT_RUN_FAILED)
+    events = await manager.list_events(run.id)
+    assert failed.error_code == "AGENT_RUN_CONTEXT_MISSING"
+    assert [event.event["type"] for event in events[-2:]] == ["error", "done"]
+    assert service.calls == 0
+    await asyncio.sleep(0.05)
+    assert (await manager.get_run(run.id)).status == AGENT_RUN_FAILED
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_invalid_encrypted_queue_content_fails_without_recovery_loop(
+    run_db,
+) -> None:
+    pending = SystemAgentPendingTurn(
+        id="invalid-content-turn",
+        session_id="session-1",
+        web_user_id=7,
+        channel=CHANNEL_WEB,
+        kind="message",
+        position=1,
+        status=PENDING_TURN_PENDING,
+        client_request_id="request-invalid-content",
+        request_hash="invalid-content-hash",
+        content_enc="not-a-valid-encrypted-value",
+        request_payload={"role": "admin"},
+        dispatch_run_id="invalid-content-run",
+    )
+    async with run_db() as db:
+        db.add(pending)
+        db.add(
+            SystemAgentRun(
+                id="invalid-content-run",
+                session_id="session-1",
+                web_user_id=7,
+                channel=CHANNEL_WEB,
+                pending_turn_id=pending.id,
+                client_request_id="request-invalid-content",
+                request_hash="invalid-content-hash",
+                kind="message",
+                status=AGENT_RUN_QUEUED,
+            )
+        )
+        await db.commit()
+
+    manager = SystemAgentRunManager(session_factory=run_db, poll_interval=0.01)
+    await manager.ensure_ready()
+    failed = await _wait_for_status(
+        manager,
+        "invalid-content-run",
+        AGENT_RUN_FAILED,
+    )
+    assert failed.error_code == "AGENT_RUN_CONTEXT_INVALID"
+    await asyncio.sleep(0.05)
+    assert (await manager.get_run(failed.id)).status == AGENT_RUN_FAILED
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_recovery_scan_preserves_explicitly_paused_queue(run_db) -> None:
     pending = SystemAgentPendingTurn(
         id="paused-recovery-turn",
@@ -1424,6 +1543,7 @@ async def test_expired_stop_replace_cancels_old_run_and_only_dispatches_replacem
     await manager.cancel_run(replacement.id)
     await _wait_for_status(manager, replacement.id, AGENT_RUN_CANCELLED)
     assert service.calls == 1
+    await manager.shutdown()
 
 
 @pytest.mark.asyncio

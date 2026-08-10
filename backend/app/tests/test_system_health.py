@@ -94,7 +94,7 @@ async def test_version_endpoint_exposes_revision_and_channel(monkeypatch) -> Non
     out = await sh.get_version()
 
     assert out.revision == "b" * 40
-    assert out.channel == "beta"
+    assert out.channel == "stable"
     assert out.version
 
 

@@ -1729,6 +1729,7 @@ class SystemAgentRunManager:
     async def _dispatch_session(self, session_id: str) -> None:
         run_id: str | None = None
         request: _RunRequest | None = None
+        request_error: Exception | None = None
         cancel_event: asyncio.Event | None = None
         async with self._session_factory() as db:
             session_result = await db.execute(
@@ -1797,9 +1798,34 @@ class SystemAgentRunManager:
             run.updated_at = now
             await db.commit()
             run_id = run.id
-            request = _request_from_pending(pending)
+            try:
+                request = _request_from_pending(pending)
+            except (TypeError, ValueError) as exc:
+                request_error = exc
 
-        if run_id is None or request is None:
+        if run_id is None:
+            return
+        if request_error is not None:
+            log.warning(
+                "system agent queued request payload is invalid run=%s error=%s",
+                run_id,
+                type(request_error).__name__,
+            )
+            message = "助手队列内容无法读取，请删除该任务后重新发送。"
+            await self._append_terminal_events(
+                run_id,
+                code="AGENT_RUN_CONTEXT_INVALID",
+                message=message,
+            )
+            await self._finish_run(
+                run_id,
+                status=AGENT_RUN_FAILED,
+                error_code="AGENT_RUN_CONTEXT_INVALID",
+                error_message=message,
+            )
+            await self._pause_following(session_id, AGENT_RUN_FAILED)
+            return
+        if request is None:
             return
         cancel_event = asyncio.Event()
         self._cancel_events[run_id] = cancel_event
@@ -1873,7 +1899,12 @@ class SystemAgentRunManager:
                 )
                 while True:
                     try:
-                        event = await self._next_event(stream, cancel_event)
+                        event = await self._next_event(
+                            stream,
+                            cancel_event,
+                            heartbeat,
+                            run_id=run_id,
+                        )
                     except StopAsyncIteration:
                         break
                     await self._link_user_message(run_id, request)
@@ -1995,8 +2026,34 @@ class SystemAgentRunManager:
                 run_id,
                 self._worker_id,
             )
-        except RunNotFoundError:
-            log.info("system agent durable run removed while executing run=%s", run_id)
+        except RunNotFoundError as exc:
+            if not await self._owns_worker_claim(run_id):
+                log.info(
+                    "system agent durable run removed while executing run=%s",
+                    run_id,
+                )
+                return
+            error_message = f"助手运行所需上下文不存在（{exc}），请重新发起本轮。"
+            log.warning(
+                "system agent durable run context missing run=%s context=%s",
+                run_id,
+                exc,
+            )
+            await self._append_terminal_events(
+                run_id,
+                code="AGENT_RUN_CONTEXT_MISSING",
+                message=error_message,
+            )
+            await self._finish_run(
+                run_id,
+                status=AGENT_RUN_FAILED,
+                error_code="AGENT_RUN_CONTEXT_MISSING",
+                error_message=error_message,
+            )
+            await self._pause_following(
+                request.session_id,
+                AGENT_RUN_FAILED,
+            )
         except Exception as exc:  # noqa: BLE001
             log.exception("system agent durable run failed run=%s", run_id)
             await self._append_terminal_events(
@@ -2051,6 +2108,9 @@ class SystemAgentRunManager:
         self,
         stream: AsyncIterator[dict[str, Any]],
         cancel_event: asyncio.Event,
+        heartbeat: asyncio.Task[None],
+        *,
+        run_id: str,
     ) -> dict[str, Any]:
         if cancel_event.is_set():
             raise _RunCancelled
@@ -2058,7 +2118,7 @@ class SystemAgentRunManager:
         cancel_task = asyncio.create_task(cancel_event.wait())
         try:
             done, _pending = await asyncio.wait(
-                {next_task, cancel_task},
+                {next_task, cancel_task, heartbeat},
                 return_when=asyncio.FIRST_COMPLETED,
             )
             if cancel_task in done and cancel_event.is_set():
@@ -2068,6 +2128,18 @@ class SystemAgentRunManager:
                 except (asyncio.CancelledError, StopAsyncIteration):
                     pass
                 raise _RunCancelled
+            if heartbeat in done:
+                next_task.cancel()
+                try:
+                    await next_task
+                except (asyncio.CancelledError, StopAsyncIteration):
+                    pass
+                if heartbeat.cancelled():
+                    raise _WorkerLeaseLost(run_id)
+                heartbeat_error = heartbeat.exception()
+                if heartbeat_error is not None:
+                    raise _WorkerLeaseLost(run_id) from heartbeat_error
+                raise _WorkerLeaseLost(run_id)
             return await next_task
         finally:
             if not cancel_task.done():
