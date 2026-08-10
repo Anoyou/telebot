@@ -253,10 +253,13 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           REF_NAME: ${{ github.ref_name }}
           BASE_REF: ${{ github.base_ref }}
+          CURRENT_SHA: ${{ github.sha }}
         run: |
+          git fetch --no-tags origin main
           python - <<'PY'
           import os
           import re
+          import subprocess
           from pathlib import Path
 
           current_text = Path("backend/app/__init__.py").read_text()
@@ -278,9 +281,16 @@ jobs:
                   "请在发布准备分支去掉 prerelease 后缀后再创建或更新 PR。"
               )
           if event == "push" and ref_name == "Beta" and not prerelease:
-              raise SystemExit(
-                  f"Beta 发布线只允许 alpha/beta/rc 预发布版本，当前为 {current}。"
-              )
+              current_sha = os.environ["CURRENT_SHA"]
+              main_sha = subprocess.check_output(
+                  ["git", "rev-parse", "origin/main"],
+                  text=True,
+              ).strip()
+              if current_sha != main_sha:
+                  raise SystemExit(
+                      f"Beta 只允许预发布版本；稳定版本 {current} 仅可作为发布检查点"
+                      f"与 main 完全同步，当前 Beta={current_sha}，main={main_sha}。"
+                  )
           channel = "预发布" if prerelease else "稳定版"
           print(f"release channel guard ok: {current} ({channel})")
           PY

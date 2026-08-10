@@ -129,11 +129,14 @@ jobs:
               fi
               echo "${image}:stable"
             elif [[ "$REF_NAME" == "Beta" ]]; then
-              if [[ ! "$version" =~ $prerelease_pattern ]]; then
-                echo "Beta 只允许预发布版本镜像，当前为 ${version}" >&2
+              if [[ "$version" =~ $prerelease_pattern ]]; then
+                echo "${image}:beta"
+              elif [[ "$version" =~ $stable_pattern ]]; then
+                echo "Beta 正在同步稳定发布检查点，仅保留提交 SHA 标签" >&2
+              else
+                echo "不支持的 Beta 版本格式：${version}" >&2
                 exit 1
               fi
-              echo "${image}:beta"
             fi
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
