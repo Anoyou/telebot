@@ -50,6 +50,7 @@
 ### 测试与发布
 
 - 补充 Gateway、插件按钮与权限、Provider/代理 fail-closed、System Agent、Trace、迁移、灾备、前端交互、无障碍和视觉回归覆盖。
+- 隔离 Durable Run worker fencing 回归测试的后台执行生命周期，消除 CI 中真实 System Agent service 与 claim 转移断言之间的竞态。
 - `0.93.0-beta.9` 已通过完整 CI Gate；Web、Frontend 与 Updater 三张 `beta` 镜像均发布 `linux/amd64`、`linux/arm64` 清单。
 
 ## [0.93.0-beta.9] - 2026-08-10 · patch（补丁预发布） · 代理兼容与发布安全收口

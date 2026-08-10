@@ -1048,8 +1048,10 @@ async def test_waiting_run_rejects_input_kind_for_the_other_waiting_state(
 async def test_stale_worker_cannot_append_events_or_finish_after_claim_changes(
     run_db,
 ) -> None:
+    service = _ControlledService()
     manager = SystemAgentRunManager(
         session_factory=run_db,
+        service_factory=lambda: service,
         poll_interval=0.01,
         worker_id="stale-worker",
     )
