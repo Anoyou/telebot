@@ -5103,7 +5103,7 @@ RECENT_PEERS_LIMIT = 50
 _BUILTIN_DIR: Path = Path(__file__).parent / "builtin"
 _BACKEND_DIR: Path = Path(__file__).resolve().parents[3]
 # 非核心可选插件已经迁出 Core。保留这份跳过名单，是为了防止旧镜像或
-# 增量部署残留目录被重新当作 builtin 加载；新安装必须走 official/repo installed。
+# 增量部署残留目录不能重新当作 builtin 加载；新安装必须来自使用者接入的仓库。
 _NON_CORE_BUILTIN_COMPAT_KEYS: frozenset[str] = frozenset(
     {
         "auto_reply",
@@ -5198,9 +5198,9 @@ def _missing_plugin_error(feature_key: str) -> tuple[str, str]:
     """为缺失插件提供统一错误码与可读日志，便于前端/运维识别。"""
     if feature_key == "codex_image":
         return (
-            "official plugin codex_image not installed",
+            "plugin codex_image not installed",
             (
-                "feature codex_image 已启用但未找到插件库插件实现。"
+                "feature codex_image 已启用但未找到仓库插件实现。"
                 "请先在“安装插件”页安装 Codex 图片生成，并确认 plugins/installed/codex_image 存在；"
                 "已跳过加载并保持 worker 运行。"
             ),

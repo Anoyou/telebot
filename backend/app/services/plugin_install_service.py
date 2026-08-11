@@ -32,7 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db.models.feature import BUILTIN_FEATURES, AccountFeature, Feature
 from ..db.models.plugin import (
-    PLUGIN_SOURCE_OFFICIAL,
+    PLUGIN_SOURCE_LEGACY,
     PLUGIN_SOURCE_ZIP,
     PLUGIN_TRUST_COMMUNITY,
     PLUGIN_TRUST_VERIFIED,
@@ -50,8 +50,8 @@ from .remote_plugin_service import (
 )
 
 log = logging.getLogger(__name__)
-# ``official`` 仅保留给旧安装记录的启停/卸载兼容；新推荐入口写入 repo。
-_PACKAGE_MANAGED_SOURCES = (PLUGIN_SOURCE_ZIP, PLUGIN_SOURCE_OFFICIAL)
+# 历史 source 值只用于升级兼容；所有新仓库安装统一写入 repo。
+_PACKAGE_MANAGED_SOURCES = (PLUGIN_SOURCE_ZIP, PLUGIN_SOURCE_LEGACY)
 
 
 # ─────────────────────────────────────────────────────

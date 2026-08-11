@@ -308,14 +308,13 @@ DOMAIN_CATALOG: dict[str, tuple[str, tuple[str, ...]]] = {
         ),
     ),
     "plugin_repos": (
-        "插件仓库、官方库与从仓库安装",
+        "使用者接入的插件仓库与从仓库安装",
         (
             "插件仓库",
             "仓库",
             "repository",
             "repo",
             "plugin repo",
-            "官方库",
             "remote plugin",
         ),
     ),
@@ -724,7 +723,7 @@ def route_locally(
         and "plugins" in matched
         and (
             "插件仓库" in normalized
-            or "官方库" in normalized
+            or "仓库" in normalized
             or "pluginrepo" in normalized
             or "repository" in normalized
         )
@@ -738,7 +737,7 @@ def route_locally(
         and any(token in normalized for token in ("启用", "停用", "禁用", "开启", "关闭"))
     )
     if plugin_account_toggle:
-        install_intent = any(token in normalized for token in ("安装", "install", "从官方库"))
+        install_intent = any(token in normalized for token in ("安装", "install"))
         if install_intent:
             # 安装与账号启用是两个有依赖的 Action。当前轮只披露安装域，
             # 安装成功后下一轮再读取 feature matrix 并生成启用 Action。

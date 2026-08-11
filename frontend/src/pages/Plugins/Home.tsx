@@ -11,7 +11,6 @@ import {
   MessageSquareText,
   Package2,
   Package,
-  PackagePlus,
   Pencil,
   Settings2,
   Sparkles,
@@ -87,9 +86,6 @@ const CATEGORY_META: Record<ModuleCategory, { title: string; hint: string; icon:
     icon: Package2,
   },
 };
-const OFFICIAL_RECOMMENDED_INSTALL_BANNER_KEY = "telebot.plugins_home.official_recommended_install_closed.v0_35";
-const OFFICIAL_RECOMMENDED_KEYS = ["auto_reply", "autorepeat"] as const;
-
 function moduleRuntimeLabel(status: string, enabled: boolean) {
   if (!enabled) return "已停用";
   if (status === "active") return "运行中";
@@ -98,7 +94,7 @@ function moduleRuntimeLabel(status: string, enabled: boolean) {
 }
 
 function moduleSourceLabel(feature: FeatureInfo) {
-  if (feature.source_label === "Official") return "历史推荐源";
+  if (feature.source_label === "Official") return "历史安装记录";
   if (feature.source_label === "core") return "平台";
   return feature.source_type === "remote" ? "远程" : "本地";
 }
@@ -131,9 +127,9 @@ function moduleTrustBadge(
   }
   if (feature.source_label === "Official" || install?.source === "official") {
     return {
-      label: "历史推荐源",
+      label: "历史安装记录",
       tone: "success",
-      title: "由旧推荐源安装记录保留；新安装会按普通插件库插件记录。",
+      title: "升级前的安装记录；后续更新请关联使用者自行接入的插件仓库。",
     };
   }
   if (signatureOk === true) {
@@ -203,10 +199,6 @@ export function PluginsHome() {
   const [aiPanelExpanded, setAiPanelExpanded] = useState(false);
   const [selectedCategory, setSelectedCategory] = useState<ModuleCategoryFilter>("all");
   const guideActive = searchParams.get("guide") === "1";
-  const [officialInstallBannerVisible, setOfficialInstallBannerVisible] = useState(() => {
-    if (typeof window === "undefined") return false;
-    return localStorage.getItem(OFFICIAL_RECOMMENDED_INSTALL_BANNER_KEY) !== "1";
-  });
   const matrixQ = useQuery({
     queryKey: ["matrix"],
     queryFn: getFeatureMatrix,
@@ -271,15 +263,6 @@ export function PluginsHome() {
     }
     return map;
   }, [installedQ.data]);
-  const missingRecommendedOfficialPlugins = useMemo(
-    () => OFFICIAL_RECOMMENDED_KEYS.filter((key) => !installByKey.has(key)),
-    [installByKey],
-  );
-  const showOfficialInstallBanner =
-    officialInstallBannerVisible
-    && !installedQ.isLoading
-    && !installedQ.isError
-    && missingRecommendedOfficialPlugins.length > 0;
   const pluginUsageByKey = useMemo(() => {
     const map = new Map<string, PluginLLMUsageSummaryItem>();
     for (const item of pluginUsageQ.data?.items ?? []) {
@@ -329,36 +312,6 @@ export function PluginsHome() {
 
   return (
     <PageShell>
-      {showOfficialInstallBanner ? (
-        <Card className="border-primary/30 bg-primary/5">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-base">首次部署推荐安装</CardTitle>
-            <CardDescription>
-              首次部署只推荐安装自动回复和自动复读。需要关键词回复或群内复读时，可以按需安装；安装后仍可随时卸载。
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="flex flex-wrap items-center gap-2">
-            <MetaBadge tone="outline">
-              待安装 {missingRecommendedOfficialPlugins.length}
-            </MetaBadge>
-            <Button size="sm" onClick={() => nav("/plugins/manage?tab=plugins")}>
-              <PackagePlus className="mr-1 h-4 w-4" />
-              去安装推荐插件
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => {
-                localStorage.setItem(OFFICIAL_RECOMMENDED_INSTALL_BANNER_KEY, "1");
-                setOfficialInstallBannerVisible(false);
-              }}
-            >
-              暂不需要
-            </Button>
-          </CardContent>
-        </Card>
-      ) : null}
-
       <PluginWorkspaceHeader activeTab="home" guideActive={guideActive} />
 
       <Card className="hidden md:block">
@@ -445,7 +398,7 @@ export function PluginsHome() {
           <CardHeader className="pb-2">
             <CardTitle className="text-base text-warning">codex_image 加载提示</CardTitle>
             <CardDescription className="text-warning">
-              当前账号启用了 codex_image，但 worker 未能加载这个插件库插件。系统已自动降级为失败态并保持 worker 持续运行。
+              当前账号启用了 codex_image，但 worker 未能加载这个仓库插件。系统已自动降级为失败态并保持 worker 持续运行。
             </CardDescription>
           </CardHeader>
           <CardContent className="pt-0 text-sm text-warning">

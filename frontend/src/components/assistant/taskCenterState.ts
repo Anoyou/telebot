@@ -10,6 +10,13 @@ const RUN_STATUS_PRIORITY: Record<string, number> = {
   cancelled: 6,
 };
 
+const OPEN_RUN_STATUSES = new Set([
+  "queued",
+  "running",
+  "waiting_input",
+  "waiting_approval",
+]);
+
 export type SystemAgentRunSettlement =
   | "waiting"
   | "complete"
@@ -42,6 +49,42 @@ export function sortSystemAgentRuns(runs: SystemAgentRun[]): SystemAgentRun[] {
       timestamp(left.updated_at || left.created_at);
     return timeDelta || left.id.localeCompare(right.id);
   });
+}
+
+export function sessionRunStatusById(
+  runs: SystemAgentRun[],
+): Record<string, string> {
+  const statuses: Record<string, string> = {};
+
+  // 未结束的运行需要持续提示；同一会话出现多个未结束记录时沿用任务中心优先级。
+  for (const run of sortSystemAgentRuns(runs)) {
+    if (
+      statuses[run.session_id] === undefined
+      && OPEN_RUN_STATUSES.has(run.status)
+    ) {
+      statuses[run.session_id] = run.status;
+    }
+  }
+
+  // 已结束的运行只看该会话最新一次结果，避免历史失败覆盖后续成功。
+  const latestBySession = new Map<string, SystemAgentRun>();
+  for (const run of runs) {
+    const current = latestBySession.get(run.session_id);
+    if (
+      current === undefined
+      || timestamp(run.updated_at || run.created_at)
+        > timestamp(current.updated_at || current.created_at)
+    ) {
+      latestBySession.set(run.session_id, run);
+    }
+  }
+  for (const [sessionId, run] of latestBySession) {
+    if (statuses[sessionId] === undefined && run.status === "failed") {
+      statuses[sessionId] = run.status;
+    }
+  }
+
+  return statuses;
 }
 
 export function sortSystemAgentQueue(

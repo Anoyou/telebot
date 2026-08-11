@@ -519,15 +519,15 @@ POST /api/plugin-config-action-jobs/{job_id}/control  {"action":"pause"|"cancel"
 
 长时间动作支持真实中断和终止。`pause` 将任务标记为“已中断”，适合插件已经分批持久化阶段性结果后调整配置再重新执行；`cancel` 将任务标记为“已终止”。平台会取消当前进程中的在途异步调用，但“继续”的业务进度仍需插件自行持久化，不能只保存在插件实例内存中。
 
-**字段验证清单（平台能力与插件库插件）：**
+**字段验证清单（平台能力与仓库插件）：**
 
 | 插件 | config_schema | UI 模式 | 状态 |
 |------|--------------|---------|------|
-| auto_reply | 规则通过 Rules API 管理 | `rules` | 插件库推荐插件，按需安装 |
-| autorepeat | ✅ trigger / repeat / chat 配置 | `rules` | 插件库推荐插件，按需安装 |
-| game24 | ✅ command, timeout | `single` | 插件库插件，按需安装 |
-| math10 | ✅ Event Bus / prize；历史 `interaction_entries.start_math_game` 兼容 | `single` | 插件库插件，交互 Bot 可启动 |
-| codex_image | ✅ command, access_token, model, message_template, image_size/aspect_ratio/image_format, timeout/status/output/instructions | `single` | 插件库图片插件，按需安装 |
+| auto_reply | 规则通过 Rules API 管理 | `rules` | 仓库插件，按需安装 |
+| autorepeat | ✅ trigger / repeat / chat 配置 | `rules` | 仓库插件，按需安装 |
+| game24 | ✅ command, timeout | `single` | 仓库插件，按需安装 |
+| math10 | ✅ Event Bus / prize；历史 `interaction_entries.start_math_game` 兼容 | `single` | 仓库插件，交互 Bot 可启动 |
+| codex_image | ✅ command, access_token, model, message_template, image_size/aspect_ratio/image_format, timeout/status/output/instructions | `single` | 仓库图片插件，按需安装 |
 | scheduler | ✅ default_notify, max_tasks | `platform` | 平台基础能力 |
 
 新增第三方 Telegram 事件插件优先参考 `examples/plugins/event_bus_demo`；需要 HTTP 时参考 `examples/plugins/with_http`，需要 AI 文本能力时参考 `examples/plugins/with_ai`，需要把旧交互入口迁移到标准信封时参考 `examples/plugins/with_interaction`。曾经存在的 `translate` 示例依赖后端私有 LLM 链路，已从当前示例集移除；如需考古只查看 Git 历史，不要把它复原成可安装模板。

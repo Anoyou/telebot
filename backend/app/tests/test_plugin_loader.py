@@ -1451,7 +1451,7 @@ async def test_reload_account_config_force_reload_unregisters_stale_commands(mon
 def test_missing_plugin_error_uses_codex_image_repo_plugin_hint() -> None:
     err, message = _missing_plugin_error("codex_image")
     assert "codex_image" in err
-    assert "插件库插件" in message
+    assert "仓库插件" in message
     assert "plugins/installed/codex_image" in message
 
 

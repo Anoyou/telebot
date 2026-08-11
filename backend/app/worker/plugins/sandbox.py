@@ -1,6 +1,6 @@
 """插件运行时沙箱（阶段 C，阶段 E 安全加固）。
 
-目标：限制安装型插件 (``installed`` source，含远程/本地/插件库插件) 能调用的 Telethon API 范围；
+目标：限制安装型插件（含远程、本地和仓库插件）能调用的 Telethon API 范围；
 核心 builtin 兼容代码直接拿到原 ``TelegramClient``，不走沙箱。
 
 安全设计（阶段 E 修复）：

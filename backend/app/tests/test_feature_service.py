@@ -13,6 +13,7 @@ from app.db.models.plugin import InstalledPlugin
 from app.db.models.plugin_global_config import PluginGlobalConfig
 from app.schemas.feature import FeatureInfo
 from app.services.feature_service import (
+    _migrate_optional_builtin_features,
     _seed_local_installed_features,
     apply_required_config_defaults,
     config_schema_for_scope,
@@ -22,6 +23,53 @@ from app.services.feature_service import (
     set_plugin_global_config,
     validate_config_against_schema,
 )
+
+
+@pytest.mark.asyncio
+async def test_optional_builtin_migration_skips_already_migrated_features() -> None:
+    """普通 repo 插件不能在功能矩阵读取时继续进入历史迁移。"""
+
+    feature = Feature(
+        key="game24",
+        display_name="24 点",
+        is_builtin=False,
+        version="1.1.12",
+    )
+    db = AsyncMock()
+
+    added, changed = await _migrate_optional_builtin_features(db, {"game24": feature})
+
+    assert (added, changed) == (0, False)
+    db.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_optional_builtin_migration_keeps_config_without_fetching_a_repo() -> None:
+    """仍被引用的历史插件保留配置，但不由 TelePilot 选择或访问仓库。"""
+
+    feature = Feature(
+        key="game24",
+        display_name="24 点",
+        is_builtin=True,
+        version="1.0.0",
+    )
+    account_features = MagicMock()
+    account_features.scalars.return_value.all.return_value = [
+        SimpleNamespace(feature_key="game24")
+    ]
+    empty_result = MagicMock()
+    empty_result.scalars.return_value.all.return_value = []
+    db = AsyncMock()
+    db.execute = AsyncMock(
+        side_effect=[account_features, empty_result, empty_result, empty_result]
+    )
+    db.get = AsyncMock(return_value=None)
+
+    added, changed = await _migrate_optional_builtin_features(db, {"game24": feature})
+
+    assert (added, changed) == (0, True)
+    assert feature.is_builtin is False
+    assert db.execute.await_count == 4
 
 
 def test_account_schema_allows_direct_passthrough_only_when_declared() -> None:
@@ -623,6 +671,43 @@ async def test_seed_local_installed_features_skips_orphan_dirs(monkeypatch, tmp_
     assert added == 0
     assert changed is True
     db.delete.assert_awaited_once_with(existing_row)
+
+
+@pytest.mark.asyncio
+async def test_seed_local_installed_features_normalizes_legacy_source(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """升级前的来源值收敛为普通仓库记录，不继续暴露独立来源类型。"""
+
+    class Result:
+        def scalars(self):
+            return self
+
+        def all(self):
+            return [installed_plugin]
+
+    monkeypatch.setattr("app.settings.settings.plugins_installed_dir", str(tmp_path / "missing"))
+    installed_plugin = InstalledPlugin(
+        key="game24",
+        source="official",
+        source_url="https://example.com/plugins.git",
+        version="1.0.0",
+        manifest_json={"name": "game24", "display_name": "24 点", "version": "1.0.0"},
+        trust_tier="official",
+        source_label="Official",
+        lint_warnings=[],
+    )
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=Result())
+    db.add = MagicMock()
+
+    added, changed = await _seed_local_installed_features(db, {})
+
+    assert (added, changed) == (1, True)
+    assert installed_plugin.source == "repo"
+    assert installed_plugin.trust_tier == "community"
+    assert installed_plugin.source_label == "Plugin Repo"
 
 
 @pytest.mark.asyncio

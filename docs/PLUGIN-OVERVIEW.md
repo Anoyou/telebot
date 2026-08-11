@@ -144,7 +144,7 @@ plugins/installed/       # 远程/本地/插件库安装后的运行目录
 └── (更多插件...)
 ```
 
-`backend/app/worker/plugins/builtin/` 只保留平台能力和兼容壳，扫描器只把平台能力纳入 builtin registry。`auto_reply`、`autorepeat`、`chatgpt_image`、`codex_image`、`game24`、`math10` 都不再由 TelePilot 本体分发；Web 推荐入口只从 `OFFICIAL_PLUGIN_REPO_URL` 指向的插件库读取，安装后复制到 `plugins/installed/{key}/`，再按安装型插件加载。
+`backend/app/worker/plugins/builtin/` 只保留平台能力和兼容壳，扫描器只把平台能力纳入 builtin registry。普通插件不由 TelePilot 本体分发，也不存在预设或推荐插件目录；使用者需在 Web 的插件管理页自行接入 Git 仓库，再选择插件安装到 `plugins/installed/{key}/`。
 
 ### 生命周期
 

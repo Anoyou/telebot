@@ -308,7 +308,7 @@ function isLocalImportedInstalledPlugin(row: InstalledPluginOverviewItem) {
 function installedOverviewTypeLabel(row: InstalledPluginOverviewItem) {
   switch (row.source) {
     case "official":
-      return "历史推荐源";
+      return "历史安装记录";
     case "repo":
       return "仓库插件";
     case "git":
@@ -418,7 +418,7 @@ function loadStatusTone(status?: string | null): "neutral" | "success" | "warn" 
 function trustTierLabel(tier?: string | null) {
   switch ((tier || "").toLowerCase()) {
     case "official":
-      return "官方";
+      return "历史可信记录";
     case "trusted":
       return "可信";
     case "community":
@@ -506,7 +506,7 @@ function shortSourceUrl(value?: string | null): string {
   const raw = (value || "").trim();
   if (!raw) return "-";
   if (raw.startsWith("local://")) return "本地导入";
-  if (raw.startsWith("official://")) return "历史推荐源";
+  if (raw.startsWith("official://")) return "历史安装记录";
   const urlText = raw.startsWith("git+ssh://") ? raw.replace(/^git\+/, "") : raw;
   try {
     const url = new URL(urlText);
@@ -532,7 +532,7 @@ function installSourceLibraryLabel(
 ): string {
   const sourceValue = (source || "").toLowerCase();
   if (sourceValue === "builtin") return "系统核心";
-  if (sourceValue === "official" || sourceUrl?.startsWith("official://")) return "历史推荐源";
+  if (sourceValue === "official" || sourceUrl?.startsWith("official://")) return "历史安装记录";
   if (sourceValue === "local" || sourceUrl?.startsWith("local://")) return "本地导入";
   const repoName = repoNameForSourceUrl(sourceUrl, repos);
   if (repoName) return repoName;

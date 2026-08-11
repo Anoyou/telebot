@@ -26,11 +26,7 @@ import hashlib
 import logging
 import re
 import shutil
-import tempfile
 from base64 import b64encode
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -90,14 +86,6 @@ log = logging.getLogger(__name__)
 
 PLUGIN_REPO_AUTH_NONE = "none"
 PLUGIN_REPO_AUTH_GITHUB_TOKEN = "github_token"
-DEFAULT_OFFICIAL_PLUGIN_REPO_URL = "https://github.com/Anoyou/telebot-plugins"
-
-
-@dataclass(frozen=True, slots=True)
-class _OfficialPluginSource:
-    plugin_dir: Path
-    meta: PluginMetadata
-    source_url: str
 
 
 async def git_env_for_source_url(db: AsyncSession, source_url: str) -> dict[str, str] | None:
@@ -155,18 +143,6 @@ def _local_import_root() -> Path:
     root = settings.resolve_project_path("./plugins/local_imports")
     root.mkdir(parents=True, exist_ok=True)
     return root
-
-
-def _official_plugin_repo_url() -> str:
-    return str(getattr(settings, "official_plugin_repo_url", "") or DEFAULT_OFFICIAL_PLUGIN_REPO_URL).strip()
-
-
-async def _official_remote_plugin_root(*, force_refresh: bool = False) -> Path:
-    # 调用方必须持有 ``_repo_cache_lock(_official_plugin_repo_url())``。
-    return await _ensure_repo_cached_unlocked(
-        _official_plugin_repo_url(),
-        force_refresh=force_refresh,
-    )
 
 
 def _cache_dir_for(url: str) -> Path:
@@ -1123,138 +1099,6 @@ def list_local_import_candidates() -> list[PluginRepoPlugin]:
     return out
 
 
-def _official_plugin_sort_key(item: PluginRepoPlugin) -> tuple[int, str]:
-    recommended = {"auto_reply", "autorepeat"}
-    return (0 if item.name in recommended else 1, item.name)
-
-
-def _plugin_meta_has_official_tag(meta: PluginMetadata) -> bool:
-    return "official" in {str(tag or "").strip().lower() for tag in (meta.tags or [])}
-
-
-async def _iter_remote_official_sources(*, force_refresh: bool = False) -> list[_OfficialPluginSource]:
-    url = _official_plugin_repo_url()
-    async with _repo_cache_lock(url):
-        root = await _official_remote_plugin_root(force_refresh=force_refresh)
-        return _remote_official_sources_from_root(root, url)
-
-
-def _remote_official_sources_from_root(root: Path, source_url: str) -> list[_OfficialPluginSource]:
-    out: list[_OfficialPluginSource] = []
-    for default_name, plugin_dir in _scan_plugins(root):
-        try:
-            meta = _read_plugin_metadata(plugin_dir, fallback_name=default_name)
-        except InvalidPluginMetadata:
-            log.warning("跳过远程官方非法插件目录: %s", plugin_dir)
-            continue
-        if not _plugin_meta_has_official_tag(meta):
-            continue
-        out.append(
-            _OfficialPluginSource(
-                plugin_dir=plugin_dir,
-                meta=meta,
-                source_url=source_url,
-            )
-        )
-    return out
-
-
-@asynccontextmanager
-async def official_plugin_source_snapshot(plugin_name: str) -> AsyncIterator[_OfficialPluginSource]:
-    """返回独立快照，避免后续 fetch/reset 在扫描或复制期间改写源目录。"""
-
-    url = _official_plugin_repo_url()
-    snapshot_root = Path(tempfile.mkdtemp(prefix="telepilot-official-plugin-"))
-    try:
-        async with _repo_cache_lock(url):
-            root = await _official_remote_plugin_root()
-            source = next(
-                (item for item in _remote_official_sources_from_root(root, url) if item.meta.name == plugin_name),
-                None,
-            )
-            if source is None:
-                raise PluginNotInRepo(
-                    "PLUGIN_NOT_FOUND_OFFICIAL",
-                    f"推荐插件源里未找到插件: {plugin_name}",
-                )
-            snapshot_dir = snapshot_root / source.plugin_dir.name
-            shutil.copytree(
-                source.plugin_dir,
-                snapshot_dir,
-                ignore=shutil.ignore_patterns(".git", ".gitignore", "__pycache__"),
-            )
-            snapshot_meta = _read_plugin_metadata(snapshot_dir, fallback_name=source.meta.name)
-        yield _OfficialPluginSource(
-            plugin_dir=snapshot_dir,
-            meta=snapshot_meta,
-            source_url=source.source_url,
-        )
-    finally:
-        shutil.rmtree(snapshot_root, ignore_errors=True)
-
-
-async def copy_official_plugin_source(plugin_name: str, destination: Path) -> str:
-    async with official_plugin_source_snapshot(plugin_name) as source:
-        shutil.copytree(
-            source.plugin_dir,
-            destination,
-            ignore=shutil.ignore_patterns(".git", ".gitignore", "__pycache__"),
-        )
-        return source.source_url
-
-
-async def _find_official_plugin_source(plugin_name: str) -> _OfficialPluginSource | None:
-    for source in await _iter_remote_official_sources():
-        if source.meta.name == plugin_name:
-            return source
-    return None
-
-
-def _manifest_json_for_official_source(source: _OfficialPluginSource) -> dict[str, Any]:
-    data = _manifest_json_from_remote_meta(source.meta)
-    data["source_url"] = source.source_url
-    return data
-
-
-async def list_official_plugins(db: AsyncSession) -> list[PluginRepoPlugin]:
-    """列出推荐插件库中带 official/recommended 标签的插件，并标记安装状态."""
-
-    installed_rows = (await db.execute(select(InstalledPlugin.key, InstalledPlugin.version))).all()
-    installed_versions = {str(name): str(version or "") for name, version in installed_rows}
-    out: list[PluginRepoPlugin] = []
-    seen: set[str] = set()
-    sources = await _iter_remote_official_sources()
-    for source in sources:
-        meta = source.meta
-        if meta.name in seen:
-            continue
-        seen.add(meta.name)
-        installed_version = installed_versions.get(meta.name)
-        out.append(
-            PluginRepoPlugin(
-                name=meta.name,
-                display_name=meta.display_name or meta.name,
-                description=meta.description,
-                usage=meta.usage,
-                author=meta.author,
-                version=meta.version,
-                installed=installed_version is not None,
-                installed_version=installed_version,
-                update_available=(
-                    installed_version is not None
-                    and _version_tuple(meta.version) > _version_tuple(installed_version)
-                ),
-                event_subscriptions=[item for item in meta.event_subscriptions if isinstance(item, dict)],
-                capabilities=dict(meta.capabilities) if isinstance(meta.capabilities, dict) else {},
-                permissions=list(meta.permissions or []),
-                tags=list(meta.tags or []),
-                subdir=str(source.plugin_dir.name),
-            )
-        )
-    out.sort(key=_official_plugin_sort_key)
-    return out
-
-
 async def install_local_plugin(
     db: AsyncSession,
     plugin_name: str,
@@ -1424,178 +1268,6 @@ def _feature_manifest_from_manifest_json(manifest_json: dict[str, Any]) -> dict[
     return manifest or None
 
 
-async def install_official_plugin(
-    db: AsyncSession,
-    plugin_name: str,
-    *,
-    default_enabled: bool = False,
-) -> RemotePluginView:
-    """从推荐插件库导入指定插件。
-
-    推荐入口只是插件库的快捷安装入口；安装记录仍按普通 repo 插件落库，
-    不把插件标记为 TelePilot 本体内置或随包插件。
-    """
-
-    async with official_plugin_source_snapshot(plugin_name) as source:
-        return await _install_official_plugin_from_snapshot(
-            db,
-            source,
-            default_enabled=default_enabled,
-        )
-
-
-async def _install_official_plugin_from_snapshot(
-    db: AsyncSession,
-    source: _OfficialPluginSource,
-    *,
-    default_enabled: bool,
-) -> RemotePluginView:
-
-    _validate_runtime_plugin_shape(source.plugin_dir, source.meta)
-    final_name = source.meta.name
-    install_path = _plugin_dir(final_name)
-    staging = install_path.parent / f"{install_path.name}.installing"
-    backup = install_path.parent / f"{install_path.name}.bak-official"
-
-    existing = await db.get(InstalledPlugin, final_name)
-    updating_existing = existing is not None and _version_tuple(source.meta.version) > _version_tuple(
-        existing.version
-    )
-    if existing is not None and not updating_existing:
-        raise DuplicatePluginName("PLUGIN_EXISTS", f"插件 {final_name!r} 已安装")
-    if install_path.exists() and not updating_existing:
-        raise DuplicatePluginName("DIR_EXISTS", f"目录已存在但 DB 无记录: {install_path}")
-    if staging.exists():
-        shutil.rmtree(staging, ignore_errors=True)
-    if backup.exists():
-        shutil.rmtree(backup, ignore_errors=True)
-
-    install_path.parent.mkdir(parents=True, exist_ok=True)
-    renamed = False
-    backed_up = False
-    legacy_sqlite_names: list[str] = []
-    legacy_json_names: list[str] = []
-    try:
-        shutil.copytree(
-            source.plugin_dir,
-            staging,
-            ignore=shutil.ignore_patterns(".git", ".gitignore", "__pycache__"),
-        )
-        staged_meta = _read_plugin_metadata(staging, fallback_name=final_name)
-        _validate_runtime_plugin_shape(staging, staged_meta)
-        manifest_json = _manifest_json_for_official_source(
-            _OfficialPluginSource(
-                plugin_dir=staging,
-                meta=staged_meta,
-                source_url=source.source_url,
-            )
-        )
-        lint_warnings = lint_plugin_metadata_files(staging)
-        if updating_existing:
-            legacy_sqlite_names = _relocate_legacy_plugin_sqlite(install_path, final_name)
-            legacy_json_names = _relocate_legacy_plugin_json(install_path, final_name)
-            begin_plugin_update(install_path.parent, final_name, target_version=staged_meta.version)
-        if updating_existing and install_path.exists():
-            install_path.rename(backup)
-            backed_up = True
-        staging.rename(install_path)
-        renamed = True
-        _attach_legacy_plugin_sqlite_links(install_path, final_name, legacy_sqlite_names)
-        _attach_legacy_plugin_json_links(install_path, final_name, legacy_json_names)
-    except Exception as exc:
-        if updating_existing:
-            clear_plugin_update(install_path.parent, final_name)
-        if staging.exists():
-            shutil.rmtree(staging, ignore_errors=True)
-        if backed_up and backup.exists():
-            if install_path.exists():
-                shutil.rmtree(install_path, ignore_errors=True)
-            backup.rename(install_path)
-        elif renamed and install_path.exists():
-            shutil.rmtree(install_path, ignore_errors=True)
-        raise PluginRepoError("COPY_FAILED", f"复制插件库插件目录失败: {exc}") from exc
-    finally:
-        if staging.exists():
-            shutil.rmtree(staging, ignore_errors=True)
-
-    try:
-        final_enabled = bool(existing.enabled) if existing is not None else bool(default_enabled)
-        feature_manifest = _feature_manifest_from_manifest_json(manifest_json)
-        feat = (await db.execute(select(Feature).where(Feature.key == final_name))).scalar_one_or_none()
-        if feat is None:
-            db.add(
-                Feature(
-                    key=final_name,
-                    display_name=str(manifest_json.get("display_name") or final_name),
-                    is_builtin=False,
-                    version=str(manifest_json.get("version") or staged_meta.version),
-                    manifest=feature_manifest,
-                )
-            )
-        else:
-            feat.display_name = str(manifest_json.get("display_name") or final_name)
-            feat.version = str(manifest_json.get("version") or staged_meta.version)
-            feat.is_builtin = False
-            feat.manifest = feature_manifest
-
-        await db.flush()
-        installed_row = await upsert_installed_plugin(
-            db,
-            key=final_name,
-            source=PLUGIN_SOURCE_REPO,
-            source_url=source.source_url,
-            installed_path=str(install_path),
-            version=str(manifest_json.get("version") or staged_meta.version),
-            manifest_json=manifest_json,
-            enabled=final_enabled,
-            signature_ok=None,
-            trust_tier=PLUGIN_TRUST_COMMUNITY,
-            source_label="Plugin Repo",
-            last_install_error=None,
-            lint_warnings=lint_warnings,
-        )
-        await db.flush()
-
-        if default_enabled:
-            aids = (await db.execute(select(Account.id))).scalars().all()
-            for aid in aids:
-                af = (
-                    await db.execute(
-                        select(AccountFeature).where(
-                            AccountFeature.account_id == int(aid),
-                            AccountFeature.feature_key == final_name,
-                        )
-                    )
-                ).scalar_one_or_none()
-                if af is None:
-                    db.add(
-                        AccountFeature(
-                            account_id=int(aid),
-                            feature_key=final_name,
-                            enabled=True,
-                            state=FEATURE_STATE_DISABLED,
-                        )
-                    )
-        await db.flush()
-    except Exception:
-        if updating_existing:
-            clear_plugin_update(install_path.parent, final_name)
-        if staging.exists():
-            shutil.rmtree(staging, ignore_errors=True)
-        if updating_existing and backed_up and backup.exists():
-            if install_path.exists():
-                shutil.rmtree(install_path, ignore_errors=True)
-            backup.rename(install_path)
-        elif renamed and install_path.exists():
-            shutil.rmtree(install_path, ignore_errors=True)
-        raise
-    finally:
-        if backup.exists():
-            shutil.rmtree(backup, ignore_errors=True)
-
-    return remote_plugin_view_from_installed(installed_row)
-
-
 __all__ = [
     "DuplicatePluginRepo",
     "PluginNotInRepo",
@@ -1605,10 +1277,8 @@ __all__ = [
     "cleanup_repo_cache",
     "delete_repo",
     "get_repo",
-    "install_official_plugin",
     "install_plugin_from_repo",
     "install_local_plugin",
-    "list_official_plugins",
     "list_plugins_in_repo",
     "list_local_import_candidates",
     "list_repos",

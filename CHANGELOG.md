@@ -25,33 +25,58 @@
 
 ## [Unreleased]
 
+## [0.94.0] - 2026-08-11 · minor（次版本） · 插件仓库自治与运行状态修复
+
+### 改进
+
+- 移除预设插件目录、快捷安装 API、System Agent 分支和首次部署推荐卡片；插件仓库统一由使用者自行接入，历史可选插件迁移不再访问任何预设远程仓库。
+- 升级前的旧来源记录自动归一为普通仓库插件，保留账号配置与启停、卸载兼容，不再向用户暴露独立来源类型。
+
+### 修复
+
+- 修复 System Agent 会话徽标让历史失败覆盖后续成功的问题；未结束任务仍优先显示，终态只按该会话最近一次运行判断。
+
+### 测试
+
+- 补充会话运行状态、历史可选插件迁移、旧来源归一和仓库意图路由回归覆盖，并同步更新 OpenAPI 与前端生成类型。
+
 ## [0.93.0] - 2026-08-10 · minor（次版本） · Gateway、插件交互与运行安全升级
 
 ### 新增
 
 - 新增内置 Codex Gateway，以独立 Go 运行时和 Unix Socket 承载 Responses 请求，支持 Provider 精确路由、模型列表、流式与非流式响应、工具调用、取消、健康状态和客户端版本维护。
+- System Agent 新增 PostgreSQL 持久化任务队列、运行中补充要求（Steer）、停止并替换、等待输入与审批、跨会话任务中心和浏览器通知；刷新页面、断开连接或应用重启后可恢复任务，并以 lease、claim 与 worker fencing 保证多实例只执行一次。
+- AI Provider 新增标准协议、OpenAI Responses、DeepSeek Responses、Codex Responses 与 Claude Code 反代等可执行协议档案，以及模型能力事实层、协议检测、Provider 隔离的客户端会话和按请求生成的追踪标识。
 - 插件新增受控的第三方 Bot Inline Keyboard 按钮识别与点击能力，并统一 UserBot、Interaction Bot、Event Bus、MessageOps、会话状态和标准事件信封契约。
 - System Agent 与模型测活支持按会话或单次请求选择直连/Gateway 执行后端，并保留真实上游错误、请求标识、用量和运行轨迹。
+- 新增 OpenAPI 契约快照与 TypeScript API 类型生成，统一 Cookie、CSRF、Webhook Token 和错误包络声明，并由 CI 阻止后端接口、生成契约与前端类型发生漂移。
 
 ### 改进
 
 - 统一 Gateway、普通 LLM、插件 AI 与 System Agent 的 Provider、代理、错误和 fallback 语义；Provider 切换执行后端时保留兼容配置，并让桌面端与 PWA 的状态、测活和长文本展示保持一致。
-- 完善生产增量更新、三张 GHCR 多架构镜像、构建来源证明、失败回滚和前后端版本同步，发布检查点会切换到当前提交对应的 Web、Frontend 与 Updater 镜像。
+- Web 与 Telegram Bot 统一使用 Durable Run、持久事件流、幂等请求和队列语义；运行阶段、用量、耗时、心跳、等待状态和失败原因可恢复、可观察，队列编辑、排序、取消与恢复在桌面端和移动端保持一致。
+- 拆分 Chat Completions、Responses、Anthropic 与 SSE 编解码链路，支持多行事件、UTF-8 跨分片、并行工具调用、Responses 不完整终态和 DeepSeek 工具续轮；模型发现仅对端点不兼容继续尝试，保留鉴权、限流和服务端真实错误。
+- 完善生产增量更新、三张 GHCR 多架构镜像、构建来源证明、失败回滚和前后端版本同步；更新计划会从最初未部署的提交累计计算文档、运行文件补丁和服务镜像范围，发布检查点切换到当前提交对应的 Web、Frontend 与 Updater 镜像。
+- CI 按变更范围执行后端、前端、浏览器、Gateway 与 API 契约检查，`main`、Pull Request 和发布 tag 仍需汇总通过完整 CI Gate 后才允许发布镜像。
 - 正式版发布检查点允许 `Beta` 与 `main` 精确同步；CI 仍会拒绝携带稳定版本但未与 `main` 同提交的 Beta 开发状态。
 - 清理断路的旧前端入口、无调用组件和后端私有僵尸代码，收紧插件示例、开发文档、Session 存储与规则配置页的当前维护口径。
 
 ### 修复与安全
 
 - 修复 Telethon 1.44 事件方向、Community peer 转换、插件按钮投递、账号孤儿配置、Trace 父子写入竞态、Durable Run 调度竞态和预构建镜像发布链路中的回归。
+- 修复插件自主 Inline Keyboard 在无交互规则或未声明 `entry_key` 时无法投递的问题；标准事件只公开按钮行列、文字和类型，不暴露 callback data、URL、原始按钮对象或 Telegram 客户端。
 - 对 Gateway 身份、请求头、错误详情、日志与插件事件执行统一脱敏和隔离；插件点击在执行前复核权限、实例、消息与按钮，并以幂等锁覆盖并发和结果未知场景。
+- System Agent 队列正文、补充输入和等待态数据使用 `MASTER_KEY` 加密并纳入 rekey；Web API 与运行管理器双层校验用户、会话、渠道、运行所有权、等待输入类型和审批工具集合。
 - 停止声明未完整实现的 MTProxy 支持；账号、Telegram worker、注销、Gateway、插件 LLM 与插件 HTTP 对缺失、停用或无效代理统一 fail-closed，并提供旧绑定迁移提示和确定性暂停状态。
 - 升级存在已知漏洞的前端生产依赖，修复默认统计窗口不一致，并加固仅数据库灾备恢复、历史 sessions 卷替换和旧代理跨协议凭据清理。
+- 修复旧 updater 跨版本更新时的自举、镜像验签和执行时序问题；目标版本脚本会在服务切换前接管更新，镜像缺失、来源证明不匹配或健康检查失败时保持旧服务并允许安全重试。
 
 ### 测试与发布
 
-- 补充 Gateway、插件按钮与权限、Provider/代理 fail-closed、System Agent、Trace、迁移、灾备、前端交互、无障碍和视觉回归覆盖。
+- 补充 Gateway、插件按钮与权限、Provider 协议与 SSE、代理 fail-closed、System Agent 队列与多实例恢复、OpenAPI 契约、Trace、迁移、生产更新、灾备、前端交互、无障碍和视觉回归覆盖。
+- 使用 PostgreSQL 验证 Durable Run 并发创建、队列接管、等待恢复、停止替换和数据库迁移的升级/降级；使用 Linux CI 验证旧 updater 自举、镜像发布以及 Web、Frontend、Updater 的多架构构建链路。
 - 隔离 Durable Run worker fencing 回归测试的后台执行生命周期，消除 CI 中真实 System Agent service 与 claim 转移断言之间的竞态。
-- `0.93.0-beta.9` 已通过完整 CI Gate；Web、Frontend 与 Updater 三张 `beta` 镜像均发布 `linux/amd64`、`linux/arm64` 清单。
+- `v0.93.0` 已通过完整 CI Gate；Web、Frontend 与 Updater 三张正式镜像均发布 `0.93.0`、`stable` 和提交 SHA 标签，包含 `linux/amd64`、`linux/arm64` 清单及 SLSA 构建来源证明。
 
 ## [0.93.0-beta.9] - 2026-08-10 · patch（补丁预发布） · 代理兼容与发布安全收口
 

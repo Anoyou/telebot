@@ -2,7 +2,7 @@ import { api } from "@/lib/api";
 
 export interface PluginInstallOut {
   key: string;
-  source: "builtin" | "zip" | "repo" | "official" | "local" | "git" | string;
+  source: "builtin" | "zip" | "repo" | "local" | "git" | string;
   source_url?: string | null;
   source_label?: string | null;
   version: string;
@@ -52,7 +52,7 @@ export interface InstalledPluginOverviewUpdateStatus {
 export interface InstalledPluginOverviewItem {
   key: string;
   display_name: string;
-  source: "builtin" | "zip" | "repo" | "official" | "local" | "git" | string;
+  source: "builtin" | "zip" | "repo" | "local" | "git" | string;
   source_url?: string | null;
   source_label?: string | null;
   version?: string | null;

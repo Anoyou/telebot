@@ -193,7 +193,7 @@ UserBot 主动点击第三方 Bot callback 必须声明 `click_bot_button` 权�
 插件 ctx.messages/action: 由 interaction_bot 发开局和按钮；转账/发奖走 userbot 或 settlement
 ```
 
-下面是旧自动回复/命令兼容模型，仅用于迁移历史配置，不作为新插件推荐主路径：
+下面是旧自动回复/命令兼容模型，仅用于迁移历史配置，不作为新插件实现方式：
 
 ```text
 用户: 我想玩 24 点

@@ -19,10 +19,8 @@ from __future__ import annotations
 
 import json
 import logging
-import shutil
 from collections.abc import Iterable
 from copy import deepcopy
-from datetime import UTC, datetime
 from typing import Any
 
 from jsonschema import Draft7Validator
@@ -38,7 +36,12 @@ from ..db.models.feature import (
     AccountFeature,
     Feature,
 )
-from ..db.models.plugin import InstalledPlugin
+from ..db.models.plugin import (
+    PLUGIN_SOURCE_LEGACY,
+    PLUGIN_SOURCE_REPO,
+    PLUGIN_TRUST_COMMUNITY,
+    InstalledPlugin,
+)
 from ..db.models.plugin_global_config import PluginGlobalConfig
 from ..db.models.rule import Rule
 from ..db.models.system import SystemSetting
@@ -53,7 +56,7 @@ from .account_bot_service import normalize_interaction_entry_manifest
 
 log = logging.getLogger(__name__)
 _WARNED_ORPHAN_PLUGIN_KEYS: set[str] = set()
-_OPTIONAL_OFFICIAL_PLUGIN_KEYS: frozenset[str] = frozenset(
+_LEGACY_OPTIONAL_PLUGIN_KEYS: frozenset[str] = frozenset(
     {
         "auto_reply",
         "autorepeat",
@@ -273,26 +276,19 @@ async def _migrate_optional_builtin_features(
     db: AsyncSession,
     existing: dict[str, Feature],
 ) -> tuple[int, bool]:
-    """把历史 builtin 可选插件收敛成插件库 installed 插件。
+    """把历史可选 builtin 收敛为普通插件占位记录。
 
-    0.35 起这些插件不再作为 builtin 自动出现。若旧数据库里已经有账号开关、
-    规则引用、全局配置或交互规则引用，则自动登记为插件库已安装包，保证旧配置
-    继续可用；若从未使用，则删除旧 feature 行，避免插件中心继续展示。
+    TelePilot 不为普通插件预设仓库。仍有引用的旧 Feature 只解除 builtin 身份并
+    保留配置，管理员需自行接入包含该插件的仓库后重新安装；没有任何引用的旧
+    Feature 直接删除。
     """
 
-    keys = sorted(key for key in _OPTIONAL_OFFICIAL_PLUGIN_KEYS if key in existing)
+    keys = sorted(
+        key
+        for key in _LEGACY_OPTIONAL_PLUGIN_KEYS
+        if key in existing and bool(existing[key].is_builtin)
+    )
     if not keys:
-        return 0, False
-
-    try:
-        from ..db.models.plugin import (
-            PLUGIN_SOURCE_REPO,
-            PLUGIN_TRUST_COMMUNITY,
-        )
-        from . import plugin_repo_service, remote_plugin_service
-        from .remote_plugin_service import upsert_installed_plugin
-    except Exception:  # noqa: BLE001
-        log.warning("加载官方插件迁移工具失败，跳过本轮收敛", exc_info=True)
         return 0, False
 
     account_feature_rows = (
@@ -319,12 +315,12 @@ async def _migrate_optional_builtin_features(
     for row in rule_rows:
         cfg = row.config if isinstance(row.config, dict) else {}
         module_key = str(cfg.get("module_key") or "").strip()
-        if module_key in _OPTIONAL_OFFICIAL_PLUGIN_KEYS:
+        if module_key in _LEGACY_OPTIONAL_PLUGIN_KEYS:
             used_keys.add(module_key)
     for setting in interaction_settings:
         value = setting.value if isinstance(setting.value, dict) else {}
         module_key = str(value.get("module_key") or "").strip()
-        if module_key in _OPTIONAL_OFFICIAL_PLUGIN_KEYS:
+        if module_key in _LEGACY_OPTIONAL_PLUGIN_KEYS:
             used_keys.add(module_key)
         raw_rules = value.get("rules")
         if isinstance(raw_rules, list):
@@ -332,115 +328,28 @@ async def _migrate_optional_builtin_features(
                 if not isinstance(item, dict):
                     continue
                 module_key = str(item.get("module_key") or "").strip()
-                if module_key in _OPTIONAL_OFFICIAL_PLUGIN_KEYS:
+                if module_key in _LEGACY_OPTIONAL_PLUGIN_KEYS:
                     used_keys.add(module_key)
 
-    added = 0
     changed = False
     for key in keys:
         feature = existing[key]
         if key not in used_keys:
-            if bool(feature.is_builtin):
-                await db.delete(feature)
-                existing.pop(key, None)
-                changed = True
+            await db.delete(feature)
+            existing.pop(key, None)
+            changed = True
             continue
-        try:
-            official_source = await plugin_repo_service._find_official_plugin_source(key)
-        except Exception:  # noqa: BLE001
-            log.warning("历史 builtin 插件 %s 已被使用，但读取推荐插件源失败", key, exc_info=True)
-            continue
-        if official_source is None:
+
+        feature.is_builtin = False
+        changed = True
+        if await db.get(InstalledPlugin, key) is None:
             log.warning(
-                "历史 builtin 插件 %s 已被使用，但 Core 已不再随包携带源码；请在安装插件页从推荐插件源安装该插件",
+                "历史可选插件 %s 仍有配置引用，但 TelePilot 不再随包提供源码；"
+                "请先添加包含该插件的仓库并重新安装，原配置已保留",
                 key,
             )
-            continue
-        official_source_url = official_source.source_url
-
-        target = plugin_repo_service._plugin_dir(key)
-        installed = await db.get(InstalledPlugin, key)
-        if not target.exists():
-            try:
-                staging = target.parent / f"{target.name}.installing"
-                if staging.exists():
-                    shutil.rmtree(staging, ignore_errors=True)
-                target.parent.mkdir(parents=True, exist_ok=True)
-                official_source_url = await plugin_repo_service.copy_official_plugin_source(
-                    key,
-                    staging,
-                )
-                staging.rename(target)
-            except Exception:  # noqa: BLE001
-                log.warning("复制插件库插件 %s 到 installed 失败", key, exc_info=True)
-                continue
-
-        try:
-            meta = plugin_repo_service._read_plugin_metadata(target, fallback_name=key)
-            base_manifest = plugin_repo_service._manifest_json_from_remote_meta(meta)
-            base_manifest["source_url"] = official_source_url
-            current_info = remote_plugin_service._remote_info_from_manifest(
-                installed.manifest_json if installed is not None else None
-            )
-            current_revision = remote_plugin_service._remote_info_datetime(
-                current_info.get("runtime_revision_at")
-            )
-            manifest_json = remote_plugin_service._with_remote_info(
-                base_manifest,
-                default_enabled=bool(current_info.get("default_enabled", False)),
-                latest_version=official_source.meta.version,
-                update_available=(
-                    plugin_repo_service._version_tuple(official_source.meta.version)
-                    > plugin_repo_service._version_tuple(meta.version)
-                ),
-                last_update_check_at=remote_plugin_service._remote_info_datetime(
-                    current_info.get("last_update_check_at")
-                ),
-                last_update_check_error=current_info.get("last_update_check_error"),
-                runtime_revision_at=current_revision or datetime.now(UTC),
-            )
-            feature_manifest = plugin_repo_service._feature_manifest_from_manifest_json(manifest_json)
-            lint_warnings = plugin_repo_service.lint_plugin_metadata_files(target)
-        except Exception:  # noqa: BLE001
-            log.warning("读取已安装插件 %s 元数据失败", key, exc_info=True)
-            continue
-
-        if feature.is_builtin:
-            feature.is_builtin = False
-            changed = True
-        display_name = str(manifest_json.get("display_name") or meta.display_name or key)
-        version = str(manifest_json.get("version") or meta.version)
-        if feature.display_name != display_name:
-            feature.display_name = display_name
-            changed = True
-        if feature.version != version:
-            feature.version = version
-            changed = True
-        if (feature.manifest or {}) != (feature_manifest or {}):
-            feature.manifest = feature_manifest
-            changed = True
-
-        was_enabled = bool(getattr(installed, "enabled", False)) if installed is not None else bool(
-            any(row.feature_key == key and row.enabled for row in account_feature_rows)
-        )
-        await upsert_installed_plugin(
-            db,
-            key=key,
-            source=PLUGIN_SOURCE_REPO,
-            source_url=official_source.source_url,
-            installed_path=str(target),
-            version=version,
-            manifest_json=manifest_json,
-            enabled=was_enabled,
-            signature_ok=None,
-            trust_tier=PLUGIN_TRUST_COMMUNITY,
-            source_label="Plugin Repo",
-            last_install_error=None,
-            lint_warnings=lint_warnings,
-        )
-        added += 1 if installed is None else 0
         await db.flush()
-    return added, changed
+    return 0, changed
 
 
 async def _seed_local_installed_features(
@@ -462,6 +371,14 @@ async def _seed_local_installed_features(
         if not key or "/" in key or "\\" in key:
             continue
         installed_source = str(getattr(installed_plugin, "source", "") or "")
+        if installed_source == PLUGIN_SOURCE_LEGACY:
+            installed_plugin.source = PLUGIN_SOURCE_REPO
+            if not installed_plugin.source_label or installed_plugin.source_label == "Official":
+                installed_plugin.source_label = "Plugin Repo"
+            if installed_plugin.trust_tier == PLUGIN_SOURCE_LEGACY:
+                installed_plugin.trust_tier = PLUGIN_TRUST_COMMUNITY
+            installed_source = PLUGIN_SOURCE_REPO
+            changed = True
         if installed_source == "builtin":
             continue
         manifest_json = installed_plugin.manifest_json if isinstance(installed_plugin.manifest_json, dict) else {}

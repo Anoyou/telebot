@@ -449,10 +449,9 @@ BUILTIN_SKILLS: tuple[SkillSpec, ...] = (
     ),
     SkillSpec(
         name="plugin-catalog",
-        description="浏览官方或已保存的插件仓库，并在确认后安装插件或维护仓库。",
+        description="浏览使用者已保存的插件仓库，并在确认后安装插件或维护仓库。",
         domains=("plugin_repos",),
         allowed_tools=(
-            "plugin_repos.list_official",
             "plugin_repos.list",
             "plugin_repos.list_plugins",
             "plugin_repos.refresh",
@@ -463,12 +462,12 @@ BUILTIN_SKILLS: tuple[SkillSpec, ...] = (
             "plugin_repos.delete",
         ),
         instructions=(
-            "官方插件先浏览官方目录；私有或自建仓库先列出仓库，再浏览其中插件。",
+            "先列出使用者已接入的仓库，再浏览目标仓库中的插件。",
             "仓库凭据会加密保存，回复不得复述；安装和仓库维护只生成待确认 Action。",
             "安装完成后如需给账号启用，下一轮使用 features 技能读取最新状态并生成启用 Action。",
         ),
-        examples=("列出官方插件", "从这个仓库安装插件", "添加私有插件仓库"),
-        required_context=("官方目录或仓库 ID", "插件名", "仓库凭据（仅私有仓库需要）"),
+        examples=("列出插件仓库", "从这个仓库安装插件", "添加私有插件仓库"),
+        required_context=("仓库 ID", "插件名", "仓库凭据（仅私有仓库需要）"),
     ),
     SkillSpec(
         name="product",

@@ -76,7 +76,7 @@ async def _accept_provider_capabilities(_db, resolved, **_kwargs):  # noqa: ANN0
             ("commands", "ai-config"),
         ),
         ("检查已安装插件更新", {"plugins", "plugin_repos"}, ("plugins",)),
-        ("浏览官方插件仓库", {"plugins", "plugin_repos"}, ("plugin-catalog",)),
+        ("浏览已经接入的插件仓库", {"plugins", "plugin_repos"}, ("plugin-catalog",)),
         ("看看最近错误日志", {"logs", "system"}, ("diagnostics",)),
         ("联网查一下官方文档", {"web", "logs"}, ("web-research",)),
     ],
@@ -144,7 +144,7 @@ def test_builtin_skills_only_reference_registered_tools() -> None:
 
 def test_plugin_install_and_account_enable_starts_with_install_only() -> None:
     route = route_locally(
-        "从官方库安装这个插件并给账号启用",
+        "从仓库 #1 安装这个插件并给账号启用",
         available={"accounts", "features", "plugins", "plugin_repos"},
     )
 

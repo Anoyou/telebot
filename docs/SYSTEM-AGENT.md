@@ -159,7 +159,7 @@ System Agent 使用四层上下文，避免每轮回放全部原始消息：
 | `commands.save` / `delete` / `set_enabled_for_accounts` | 自定义指令与账号启用 |
 | `plugins.list_installed` / `get` / `check_updates` | 远程插件包查询 |
 | `plugins.install` / `update` / `uninstall` / `set_package_enabled` | 安装包装卸更新与全局启停（危险项需确认） |
-| `plugin_repos.list` / `list_plugins` / `refresh` / `list_official` | 远程/官方仓库浏览与强制刷新 |
+| `plugin_repos.list` / `list_plugins` / `refresh` | 使用者已接入仓库的浏览与强制刷新 |
 | `plugin_repos.create` / `update_credential` / `delete` / `install_plugin` / `update_installed` | 仓库凭据维护、安装和批量更新 |
 | `system.check_update` / `apply_update` / `restart` | 系统更新检查/应用/重启 |
 | `routing.list_ai_commands` / `preview` / `set_command_mode` | AI 指令 fixed/auto 路由 |

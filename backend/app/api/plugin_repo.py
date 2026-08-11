@@ -161,45 +161,6 @@ async def install_local_plugin(
         raise HTTPException(400, detail={"code": e.code, "message": e.message}) from e
 
 
-@router.get("/official/plugins", response_model=list[PluginRepoPlugin])
-async def list_official_plugins(db: DBSession, _user: CurrentUser):
-    """列出推荐插件库中的插件。"""
-    try:
-        return await svc.list_official_plugins(db)
-    except (GitOperationFailed, InvalidPluginMetadata) as e:
-        raise HTTPException(400, detail={"code": e.code, "message": e.message}) from e
-    except (PluginRepoError, RemotePluginError) as e:
-        raise HTTPException(400, detail={"code": e.code, "message": e.message}) from e
-
-
-@router.post(
-    "/official/plugins/{plugin_name}/install",
-    response_model=RemotePluginOut,
-    status_code=201,
-)
-async def install_official_plugin(
-    plugin_name: str,
-    db: DBSession,
-    _user: CurrentUser,
-    body: InstallFromRepoBody | None = None,
-):
-    """从推荐插件库快捷安装插件。"""
-    default_enabled = bool(body.default_enabled) if body else False
-    try:
-        row = await svc.install_official_plugin(
-            db, plugin_name, default_enabled=default_enabled,
-        )
-        await db.commit()
-        await trigger_reload(db, row.name)
-        return row
-    except PluginNotInRepo as e:
-        raise HTTPException(404, detail={"code": e.code, "message": e.message}) from e
-    except DuplicatePluginName as e:
-        raise HTTPException(409, detail={"code": e.code, "message": e.message}) from e
-    except (PluginRepoError, RemotePluginError) as e:
-        raise HTTPException(400, detail={"code": e.code, "message": e.message}) from e
-
-
 @router.get("/{repo_id}/plugins", response_model=list[PluginRepoPlugin])
 async def list_repo_plugins(repo_id: int, db: DBSession, _user: CurrentUser):
     """列出指定仓库内所有可装插件。

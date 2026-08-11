@@ -101,7 +101,7 @@ def _forward_dry_run_match(*args):
 async def _installed_plugin_dry_run_match(db, feature_key: str, *args):
     installed = await db.get(InstalledPlugin, feature_key)
     if installed is None:
-        return False, f"{feature_key} 插件库插件未安装，无法执行 dry-run。"
+        return False, f"{feature_key} 仓库插件未安装，无法执行 dry-run。"
     if not bool(getattr(installed, "enabled", False)):
         return False, f"{feature_key} 已安装但全局开关关闭，无法执行 dry-run。"
     if str(getattr(installed, "trust_tier", "") or "") == PLUGIN_TRUST_ORPHAN:
@@ -121,7 +121,7 @@ async def _installed_plugin_dry_run_match(db, feature_key: str, *args):
 
     loaded = _load_installed_plugin(feature_key)
     if feature_key not in loaded:
-        return False, f"{feature_key} 插件库插件未安装或加载失败，无法执行 dry-run。"
+        return False, f"{feature_key} 仓库插件未安装或加载失败，无法执行 dry-run。"
 
     package_name = _installed_module_name(feature_key)
     for module_name in (f"{package_name}.plugin", package_name):

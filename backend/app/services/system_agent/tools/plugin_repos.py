@@ -83,20 +83,6 @@ async def refresh_repo_plugins(ctx: ToolContext, args: dict[str, Any]) -> dict[s
     return result
 
 
-async def list_official(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
-    from ....services import plugin_repo_service as svc
-
-    try:
-        plugins = await svc.list_official_plugins(ctx.db)
-    except Exception as exc:  # noqa: BLE001
-        return {"error": "list_failed", "message": _err(exc)}
-    return {
-        "count": len(plugins),
-        "plugins": [_plugin_in_repo_view(p) for p in plugins],
-        "note": "官方/推荐插件目录。",
-    }
-
-
 async def create_repo_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     url = str(args.get("url") or args.get("source_url") or "").strip()
     if not url:
@@ -241,16 +227,14 @@ async def delete_repo_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[st
 async def install_from_repo_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     repo_id = args.get("repo_id")
     plugin_name = str(args.get("plugin_name") or args.get("name") or "").strip()
-    official = bool(args.get("official", False))
     if not plugin_name:
         raise ValueError("需要 plugin_name")
-    if not official and repo_id in (None, ""):
-        raise ValueError("需要 repo_id，或 official=true 安装官方插件")
+    if repo_id in (None, ""):
+        raise ValueError("需要 repo_id")
     return {
-        "summary": f"从{'官方库' if official else f'仓库 #{repo_id}'}安装插件 {plugin_name}",
+        "summary": f"从仓库 #{repo_id} 安装插件 {plugin_name}",
         "repo_id": repo_id,
         "plugin_name": plugin_name,
-        "official": official,
         "default_enabled": bool(args.get("default_enabled", False)),
         "warning": "危险：将安装插件代码到本机 plugins/installed。",
     }
@@ -262,19 +246,13 @@ async def install_from_repo_execute(ctx: ToolContext, args: dict[str, Any]) -> d
 
     plugin_name = str(args.get("plugin_name") or args.get("name") or "").strip()
     default_enabled = bool(args.get("default_enabled", False))
-    official = bool(args.get("official", False))
     try:
-        if official:
-            row = await svc.install_official_plugin(
-                ctx.db, plugin_name, default_enabled=default_enabled
-            )
-        else:
-            row = await svc.install_plugin_from_repo(
-                ctx.db,
-                int(args.get("repo_id")),
-                plugin_name,
-                default_enabled=default_enabled,
-            )
+        row = await svc.install_plugin_from_repo(
+            ctx.db,
+            int(args.get("repo_id")),
+            plugin_name,
+            default_enabled=default_enabled,
+        )
     except Exception as exc:  # noqa: BLE001
         raise ValueError(_err(exc)) from None
 
@@ -370,17 +348,6 @@ def register(registry: ToolRegistry) -> None:
     )
     registry.register(
         ToolSpec(
-            name="plugin_repos.list_official",
-            channels=("web",),
-            description="列出官方/推荐插件目录。",
-            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
-            read_only=True,
-            min_role="viewer",
-            read_handler=list_official,
-        )
-    )
-    registry.register(
-        ToolSpec(
             name="plugin_repos.update_installed",
             channels=("web",),
             description="批量更新指定仓库中已有新版本的已安装插件。",
@@ -449,14 +416,13 @@ def register(registry: ToolRegistry) -> None:
         ToolSpec(
             name="plugin_repos.install_plugin",
             channels=("web",),
-            description="从已保存仓库或官方库安装插件。official=true 时走官方目录。",
+            description="从使用者已保存的插件仓库安装插件。",
             input_schema={
                 "type": "object",
                 "properties": {
                     "repo_id": {"type": "integer"},
                     "plugin_name": {"type": "string"},
                     "name": {"type": "string"},
-                    "official": {"type": "boolean"},
                     "default_enabled": {"type": "boolean"},
                 },
                 "additionalProperties": False,

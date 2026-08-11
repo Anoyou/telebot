@@ -89,30 +89,12 @@ export async function fetchLocalPlugins(): Promise<PluginRepoPlugin[]> {
   return data;
 }
 
-export async function fetchOfficialPlugins(): Promise<PluginRepoPlugin[]> {
-  const { data } = await api.get<PluginRepoPlugin[]>(
-    `${BASE}/official/plugins`,
-  );
-  return data;
-}
-
 export async function installLocalPlugin(
   pluginName: string,
   body?: InstallFromRepoBody,
 ): Promise<RemotePlugin> {
   const { data } = await api.post<RemotePlugin>(
     `${BASE}/local/plugins/${encodeURIComponent(pluginName)}/install`,
-    body ?? {},
-  );
-  return data;
-}
-
-export async function installOfficialPlugin(
-  pluginName: string,
-  body?: InstallFromRepoBody,
-): Promise<RemotePlugin> {
-  const { data } = await api.post<RemotePlugin>(
-    `${BASE}/official/plugins/${encodeURIComponent(pluginName)}/install`,
     body ?? {},
   );
   return data;

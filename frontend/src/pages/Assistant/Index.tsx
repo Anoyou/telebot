@@ -63,6 +63,7 @@ import { Conversation, type LiveBubble } from "@/components/assistant/Conversati
 import { TaskCenter } from "@/components/assistant/TaskCenter";
 import {
   classifySystemAgentRunSettlement,
+  sessionRunStatusById,
   sortSystemAgentQueue,
   sortSystemAgentRuns,
 } from "@/components/assistant/taskCenterState";
@@ -336,18 +337,7 @@ export function AssistantIndex() {
     [queueQ.data],
   );
   const runStatusBySession = useMemo(() => {
-    const statuses: Record<string, string> = {};
-    for (const run of allRuns) {
-      if (
-        statuses[run.session_id] === undefined &&
-        ["queued", "running", "waiting_input", "waiting_approval", "failed"].includes(
-          run.status,
-        )
-      ) {
-        statuses[run.session_id] = run.status;
-      }
-    }
-    return statuses;
+    return sessionRunStatusById(allRuns);
   }, [allRuns]);
   const queueCountBySession = useMemo(() => {
     const counts: Record<string, number> = {};

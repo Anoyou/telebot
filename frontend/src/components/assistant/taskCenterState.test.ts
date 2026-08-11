@@ -4,6 +4,7 @@ import test from "node:test";
 import type { SystemAgentQueueItem, SystemAgentRun } from "../../api/systemAgent.ts";
 import {
   classifySystemAgentRunSettlement,
+  sessionRunStatusById,
   sortSystemAgentQueue,
   sortSystemAgentRuns,
 } from "./taskCenterState.ts";
@@ -88,4 +89,32 @@ test("运行流结束后按持久状态区分等待、完成、失败和取消",
   assert.equal(classifySystemAgentRunSettlement("succeeded"), "complete");
   assert.equal(classifySystemAgentRunSettlement("failed"), "failed");
   assert.equal(classifySystemAgentRunSettlement("cancelled"), "cancelled");
+});
+
+test("会话徽标不会让历史失败覆盖后续成功", () => {
+  const statuses = sessionRunStatusById([
+    run("failed-old", "failed", "2026-07-30T01:00:00Z"),
+    run("succeeded-new", "succeeded", "2026-07-30T02:00:00Z"),
+  ]);
+
+  assert.deepEqual(statuses, {});
+});
+
+test("会话徽标显示最新失败并优先提示未结束运行", () => {
+  const latestFailed = run("failed-new", "failed", "2026-07-30T03:00:00Z");
+  latestFailed.session_id = "failed-session";
+  const olderSuccess = run("succeeded-old", "succeeded", "2026-07-30T02:00:00Z");
+  olderSuccess.session_id = "failed-session";
+  const waiting = run("waiting", "waiting_approval", "2026-07-30T01:00:00Z");
+  waiting.session_id = "active-session";
+  const newerFailure = run("failed", "failed", "2026-07-30T04:00:00Z");
+  newerFailure.session_id = "active-session";
+
+  assert.deepEqual(
+    sessionRunStatusById([olderSuccess, latestFailed, waiting, newerFailure]),
+    {
+      "active-session": "waiting_approval",
+      "failed-session": "failed",
+    },
+  );
 });

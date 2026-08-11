@@ -47,8 +47,8 @@ from ..db.models.account import Account
 from ..db.models.feature import FEATURE_STATE_DISABLED, AccountFeature, Feature
 from ..db.models.plugin import (
     PLUGIN_SOURCE_GIT,
+    PLUGIN_SOURCE_LEGACY,
     PLUGIN_SOURCE_LOCAL,
-    PLUGIN_SOURCE_OFFICIAL,
     PLUGIN_SOURCE_REPO,
     PLUGIN_TRUST_COMMUNITY,
     InstalledPlugin,
@@ -422,7 +422,7 @@ def _set_remote_update_info(
 def _source_label_for_installed(row: InstalledPlugin) -> str:
     if row.source_label:
         return row.source_label
-    if row.source == PLUGIN_SOURCE_OFFICIAL:
+    if row.source == PLUGIN_SOURCE_LEGACY:
         return "Plugin Repo"
     if row.source == PLUGIN_SOURCE_REPO:
         return "Plugin Repo"

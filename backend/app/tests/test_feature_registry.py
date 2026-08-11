@@ -64,7 +64,7 @@ def test_lazy_registry_refresh_picks_latest_manifest(monkeypatch, tmp_path) -> N
     assert registry["alpha"] == "Alpha V2"
 
 
-def test_builtin_registry_excludes_optional_official_plugins() -> None:
+def test_builtin_registry_excludes_legacy_optional_plugins() -> None:
     BUILTIN_FEATURES.refresh()
     keys = set(BUILTIN_FEATURES.keys())
     assert "codex_image" not in keys
@@ -75,7 +75,7 @@ def test_builtin_registry_excludes_optional_official_plugins() -> None:
     assert "autorepeat" not in keys
 
 
-def test_recommended_plugins_are_not_bundled_in_core() -> None:
+def test_optional_plugins_are_not_bundled_in_core() -> None:
     builtin_root = Path(__file__).resolve().parents[1] / "worker" / "plugins" / "builtin"
     for key in ("auto_reply", "autorepeat", "game24", "math10"):
         assert not (builtin_root / key / "plugin.py").exists()

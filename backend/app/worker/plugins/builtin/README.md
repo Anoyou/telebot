@@ -6,5 +6,5 @@
 
 - `scheduler` 是平台调度能力，运行时由 `PlatformScheduler` 承接，builtin 目录只保留兼容壳。
 - `forward` 保留为核心兼容插件。
-- `auto_reply`、`autorepeat`、`chatgpt_image`、`codex_image`、`game24`、`math10` 都不随 TelePilot 本体分发；推荐入口只从 `OFFICIAL_PLUGIN_REPO_URL` 指向的插件库读取并安装。
+- `auto_reply`、`autorepeat`、`chatgpt_image`、`codex_image`、`game24`、`math10` 都不随 TelePilot 本体分发；需要时由使用者自行接入包含它们的 Git 仓库并安装。
 - `feature_registry` 和 worker loader 仍保留非核心可选插件的跳过名单，用来防止旧镜像或增量部署残留目录被重新注册为 builtin；这不是这些插件仍属于 Core 的信号。

@@ -183,7 +183,7 @@ function jsonResponse(pathname: string): unknown | undefined {
   if (pathname === "/api/llm/usage/plugins/summary") return { items: [] };
   if (pathname === "/api/commands/ai/enablement-summary") return { total_accounts: 0, enabled_accounts: 0, ai_templates: 0 };
   if (pathname === "/api/proxies") return [];
-  if (pathname === "/api/plugin-repos" || pathname === "/api/plugin-repos/local/plugins" || pathname === "/api/plugin-repos/official/plugins") return [];
+  if (pathname === "/api/plugin-repos" || pathname === "/api/plugin-repos/local/plugins") return [];
   if (pathname === "/api/plugins/installed-overview" || pathname === "/api/plugins/installed-packages") return [];
   if (pathname === "/api/remote-plugins") return [];
   if (pathname === "/api/system/network") return { online: true };
