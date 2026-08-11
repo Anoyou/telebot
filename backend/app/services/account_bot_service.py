@@ -1208,10 +1208,17 @@ def normalize_interaction_rules(raw: Any) -> list[dict[str, Any]]:
             module_prize = int(item["module_prize"]) if item.get("module_prize") not in (None, "") else None
         except (TypeError, ValueError):
             module_prize = None
+        entry_has_prize = (
+            declared_module_entry_has_field(module_key, module_action, "prize")
+            if action == "module"
+            else None
+        )
+        if module_prize is None and entry_has_prize is True and math_prize > 0:
+            module_prize = math_prize
         if (
             action == "module"
             and module_prize is not None
-            and declared_module_entry_has_field(module_key, module_action, "prize") is False
+            and entry_has_prize is False
         ):
             module_prize = None
         try:

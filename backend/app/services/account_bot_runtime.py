@@ -6709,6 +6709,16 @@ def _interaction_module_prize(rule: dict[str, Any], data: dict[str, Any]) -> int
             if parsed is not None and parsed > 0:
                 return parsed
 
+    math_prize = _int_or_none(rule.get("math_prize"))
+    entry_has_prize = account_bot_service.declared_module_entry_has_field(
+        str(rule.get("module_key") or "").strip() or None,
+        str(rule.get("module_action") or "").strip() or None,
+        "prize",
+    )
+    # 旧版规则把模块奖励保存在 math_prize；已声明奖励字段时不能被支付门槛覆盖。
+    if entry_has_prize is True and math_prize is not None and math_prize > 0:
+        return math_prize
+
     rule_amount = _int_or_none(rule.get("amount"))
     if rule_amount is not None and rule_amount > 0:
         return rule_amount
@@ -6717,9 +6727,7 @@ def _interaction_module_prize(rule: dict[str, Any], data: dict[str, Any]) -> int
         parsed = _int_or_none(data.get(key))
         if parsed is not None and parsed > 0:
             return parsed
-
-    math_prize = _int_or_none(rule.get("math_prize"))
-    if math_prize is not None and math_prize > 0 and math_prize != 123:
+    if entry_has_prize is not False and math_prize is not None and math_prize > 0 and math_prize != 123:
         return math_prize
     return None
 

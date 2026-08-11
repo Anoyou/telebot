@@ -4098,6 +4098,45 @@ def test_account_bot_interaction_rule_normalizes_module_action() -> None:
     assert rule["module_start_text"] == "正在开启 24 点"
 
 
+@pytest.mark.parametrize("legacy_prize", [2333, 123])
+def test_account_bot_interaction_rule_migrates_legacy_prize_for_prize_entry(monkeypatch, legacy_prize) -> None:
+    monkeypatch.setattr(
+        account_bot_service,
+        "declared_module_entry_has_field",
+        lambda module_key, module_action, field_name: (
+            module_key == "dice_grid_hunt"
+            and module_action == "start_dice_grid_hunt"
+            and field_name == "prize"
+        ),
+    )
+
+    cfg = account_bot_service.normalize_transfer_notice_config(
+        {
+            "enabled": True,
+            "rules": [
+                {
+                    "id": "dice-grid-ticket",
+                    "enabled": True,
+                    "chat_ids": ["-100123"],
+                    "trigger_mode": "payment",
+                    "amount": "1111",
+                    "action": "module",
+                    "module_key": "dice_grid_hunt",
+                    "module_action": "start_dice_grid_hunt",
+                    "module_prize": None,
+                    "math_prize": str(legacy_prize),
+                }
+            ],
+        }
+    )
+
+    rule = cfg["rules"][0]
+    assert rule["amount"] == 1111
+    assert rule["math_prize"] == legacy_prize
+    assert rule["module_prize"] == legacy_prize
+    assert cfg["module_prize"] == legacy_prize
+
+
 def test_account_bot_interaction_rule_infers_single_module_action() -> None:
     cfg = account_bot_service.normalize_transfer_notice_config(
         {
@@ -8373,6 +8412,122 @@ def test_interaction_module_payload_keeps_explicit_module_prize_default_value() 
         rule,
         None,
         event_type="keyword",
+    )
+
+    assert payload["prize"] == 123
+
+
+def test_interaction_module_payload_prefers_legacy_prize_over_trigger_threshold(monkeypatch) -> None:
+    monkeypatch.setattr(
+        account_bot_service,
+        "declared_module_entry_has_field",
+        lambda module_key, module_action, field_name: (
+            module_key == "dice_grid_hunt"
+            and module_action == "start_dice_grid_hunt"
+            and field_name == "prize"
+        ),
+    )
+    incoming = account_bot_runtime.Incoming(
+        account_id=1,
+        token="bbot-token",
+        update_id=10,
+        user_id=20,
+        chat_id=-100123,
+        message_id=30,
+        text="转账成功",
+        display_name="AAA",
+    )
+    rule = {
+        "id": "dice-grid-ticket",
+        "action": "module",
+        "amount": 1111,
+        "module_key": "dice_grid_hunt",
+        "module_action": "start_dice_grid_hunt",
+        "module_prize": None,
+        "math_prize": 2333,
+        "module_config": {},
+    }
+
+    payload = account_bot_runtime._interaction_module_payload(
+        incoming,
+        rule,
+        {"amount": "1111"},
+        event_type="payment_confirmed",
+    )
+
+    assert payload["amount"] == "1111"
+    assert payload["prize"] == 2333
+
+
+def test_interaction_module_payload_ignores_legacy_prize_for_no_prize_entry(monkeypatch) -> None:
+    monkeypatch.setattr(
+        account_bot_service,
+        "declared_module_entry_has_field",
+        lambda module_key, module_action, field_name: False,
+    )
+    incoming = account_bot_runtime.Incoming(
+        account_id=1,
+        token="bbot-token",
+        update_id=10,
+        user_id=20,
+        chat_id=-100123,
+        message_id=30,
+        text="转账成功",
+        display_name="AAA",
+    )
+    rule = {
+        "id": "no-prize-ticket",
+        "action": "module",
+        "amount": 1111,
+        "module_key": "no_prize_game",
+        "module_action": "start_no_prize_game",
+        "module_prize": None,
+        "math_prize": 2333,
+        "module_config": {},
+    }
+
+    payload = account_bot_runtime._interaction_module_payload(
+        incoming,
+        rule,
+        {"amount": "1111"},
+        event_type="payment_confirmed",
+    )
+
+    assert payload["prize"] == 1111
+
+
+def test_interaction_module_payload_keeps_legacy_prize_equal_to_default_sentinel(monkeypatch) -> None:
+    monkeypatch.setattr(
+        account_bot_service,
+        "declared_module_entry_has_field",
+        lambda module_key, module_action, field_name: True,
+    )
+    incoming = account_bot_runtime.Incoming(
+        account_id=1,
+        token="bbot-token",
+        update_id=10,
+        user_id=20,
+        chat_id=-100123,
+        message_id=30,
+        text="转账成功",
+        display_name="AAA",
+    )
+    rule = {
+        "id": "legacy-default-prize-ticket",
+        "action": "module",
+        "amount": 1111,
+        "module_key": "legacy_prize_game",
+        "module_action": "start_legacy_prize_game",
+        "module_prize": None,
+        "math_prize": 123,
+        "module_config": {},
+    }
+
+    payload = account_bot_runtime._interaction_module_payload(
+        incoming,
+        rule,
+        {"amount": "1111"},
+        event_type="payment_confirmed",
     )
 
     assert payload["prize"] == 123
