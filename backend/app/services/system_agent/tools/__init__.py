@@ -28,6 +28,7 @@ def register_all_tools(registry: ToolRegistry) -> None:
         memory,
         message_templates,
         notifications,
+        plugin_data,
         plugin_repos,
         plugins,
         product,
@@ -64,6 +65,7 @@ def register_all_tools(registry: ToolRegistry) -> None:
     dispatch.register(registry)
     routing.register(registry)
     features.register(registry)
+    plugin_data.register(registry)
     plugins.register(registry)
     product.register(registry)
     plugin_repos.register(registry)

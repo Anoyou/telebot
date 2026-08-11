@@ -164,6 +164,8 @@ BUILTIN_SKILLS: tuple[SkillSpec, ...] = (
         allowed_tools=(
             "features.get_account_status",
             "features.get_config",
+            "features.list_plugin_databases",
+            "features.query_plugin_database",
             "features.set_enabled",
             "features.save_account_config",
             "features.save_global_config",
@@ -177,6 +179,9 @@ BUILTIN_SKILLS: tuple[SkillSpec, ...] = (
             "先读取账号功能矩阵，并通过元数据区分内置功能与插件。",
             "启停只修改账号级 AccountFeature，不等于插件安装包全局开关；配置工具会明确区分账号字段与 level=global 字段。",
             "配置保存使用 JSON 对象补丁，未提供字段保持不变；敏感配置整体加密进待确认 Action。",
+            "询问插件配置时联合读取功能矩阵、配置 Schema/生效 JSON；若奖励、触发条件等属于交互规则，再读取 interaction 配置和规则。",
+            "插件 SQLite 先列数据库与表结构，再使用参数化 SELECT/WITH 查询；只读结果会限制行数、执行时间并遮罩敏感字段。",
+            "不能直接修改 SQLite；插件数据变更只能使用插件声明的配置动作并由用户确认。",
             "插件声明的配置动作先列出再运行；后台动作可查询、中断或终止，返回的 config_patch 仍需用户确认后再保存。",
             "禁用不会自动恢复；启停只生成待确认 Action。",
         ),

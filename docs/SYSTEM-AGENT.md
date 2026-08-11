@@ -145,6 +145,8 @@ System Agent 使用四层上下文，避免每轮回放全部原始消息：
 | `usage.recent` / `usage.plugins` / `usage.reset` | 查询近期 LLM 调用、插件用量与重置用量；近期调用包含实际 backend 与脱敏 Gateway 元数据 |
 | `commands.list` | 自定义指令与启用账号 |
 | `features.get_account_status` | 账号功能/插件启停矩阵 |
+| `features.get_config` / `save_account_config` / `save_global_config` | 读取脱敏后的插件配置 JSON；修改受 Schema、管理员角色与 Action 确认约束 |
+| `features.list_plugin_databases` / `query_plugin_database` | 管理员列出插件私有 SQLite 结构并执行受限、参数化的只读查询 |
 | `logs.recent` / `search_errors` / `get_event_detail` | 运行日志（默认 20，最大 500） |
 | `source.search` / `source.read` | 管理员只读检索部署源码并按行查看；拒绝敏感目录、路径越界、执行和写入 |
 | `web.search` / `web.read` | 搜索公开互联网，或读取指定公开 URL 并提取文本正文 |
@@ -171,7 +173,7 @@ Web 还有一级「待确认」收件箱（`/assistant/inbox`，侧栏带 pendin
 
 诊断请求可按“日志 → 错误事件 → 源码搜索 → 按行读取”的顺序定位代码级根因。
 源码工具只对管理员开放，只能读取当前部署包中的 `backend`、`frontend` 和已安装插件源码白名单；
-`.env`、运行日志、会话、数据目录、依赖、构建产物及路径穿越均拒绝。System Agent 没有源码写入或任意命令执行工具，只能给出修复方案。
+`.env`、运行日志、会话、依赖、构建产物及路径穿越均拒绝。插件私有数据目录只通过专用 SQLite 工具开放：仅限已安装插件的 `_data/<plugin_key>`、Web/Bot 管理员、真实 SQLite 文件和单条参数化 `SELECT/WITH`；符号链接、常见密钥列、写入、DDL、`ATTACH`、`PRAGMA`、扩展加载、超时和超量结果均拒绝。System Agent 没有源码写入或任意命令执行工具，只能给出修复方案。
 
 联网搜索通过独立的 `web.search` 工具访问固定 DuckDuckGo HTML 搜索出口，与当前聊天 Provider 是否原生支持 Web Search 解耦。
 `web.search` 不接受 URL 参数，也不打开结果页面；查询最多 240 字符、单次最多 10 条结果、12 秒超时，并限制响应体积。
@@ -189,7 +191,7 @@ Agent 回答时必须给出来源，并区分搜索摘要、已读取正文、�
 
 ### 明确安全边界
 
-- Agent 没有项目/插件源码写工具，也没有 Shell、任意 SQL 或任意文件写入能力；插件 Debug 只读取安装状态、脱敏日志和白名单源码，并报告根因、修复文件/行号与验证步骤。
+- Agent 没有项目/插件源码写工具，也没有 Shell、任意 SQL 或任意文件写入能力。插件配置 JSON 只能通过 manifest Schema 读取，修改必须生成待确认 Action；SQLite 只允许在插件私有数据目录执行受限只读查询，不能改库。插件 Debug 可读取安装状态、脱敏日志、白名单源码与上述受限数据，并报告根因、修复文件/行号与验证步骤。
 - Telegram 登录绑定、需要 OTP/二维码的交互向导，以及包含账号 Session 或可复用密钥的敏感整机备份继续在专用 Web 页面完成。Agent 可处理脱敏账号 Config Bundle，但不会把这些交互式凭据流程伪装成普通聊天 Action。
 
 ## NDJSON 事件

@@ -76,6 +76,11 @@ async def _accept_provider_capabilities(_db, resolved, **_kwargs):  # noqa: ANN0
             ("commands", "ai-config"),
         ),
         ("检查已安装插件更新", {"plugins", "plugin_repos"}, ("plugins",)),
+        (
+            "获取下我猜骰插件的配置信息是怎样的",
+            {"plugins", "features", "interaction"},
+            ("features", "interaction"),
+        ),
         ("浏览已经接入的插件仓库", {"plugins", "plugin_repos"}, ("plugin-catalog",)),
         ("看看最近错误日志", {"logs", "system"}, ("diagnostics",)),
         ("联网查一下官方文档", {"web", "logs"}, ("web-research",)),

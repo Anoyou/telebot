@@ -6757,6 +6757,11 @@ async def _dispatch_userbot_session_message(
             redis=redis,
             fail_open=False,
         ):
+            # claim=False 表示该 Telegram 消息已经被 Interaction Bot 管道消费，
+            # 或去重存储暂时无法安全确认。两种情况都必须 fail-closed：若仍返回
+            # consumed=False，调用方会继续落到 legacy on_message，造成同一业务动作
+            # （尤其 payout）被旧、新两条入口各执行一次。
+            consumed = True
             await record_span(
                 trace,
                 "route",

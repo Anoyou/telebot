@@ -207,6 +207,41 @@ def test_log_root_cause_route_adds_source_domain() -> None:
     assert route.domains == ("logs", "source")
 
 
+def test_plugin_config_phrase_exposes_config_and_interaction_before_package_metadata() -> None:
+    route = route_locally(
+        "获取下我猜骰插件的配置信息是怎样的",
+        available={"plugins", "features", "interaction", "logs"},
+    )
+
+    assert route == ToolRoute(
+        ("features", "interaction", "plugins"),
+        "local",
+        "keyword_match",
+    )
+
+
+def test_plugin_database_phrase_exposes_only_feature_data_tools() -> None:
+    route = route_locally(
+        "读取 dice_grid_hunt 插件的 SQLite 数据库",
+        available={"plugins", "features", "interaction", "source"},
+    )
+
+    assert route == ToolRoute(("features",), "local", "keyword_match")
+
+
+def test_plugin_config_diagnostics_keeps_logs_and_source_route() -> None:
+    route = route_locally(
+        "排查这个插件的配置为什么报错",
+        available={"plugins", "features", "interaction", "logs", "source"},
+    )
+
+    assert route == ToolRoute(
+        ("plugins", "logs", "source"),
+        "local",
+        "keyword_match",
+    )
+
+
 @pytest.mark.parametrize(
     "text",
     (

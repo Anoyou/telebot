@@ -115,6 +115,11 @@ DOMAIN_CATALOG: dict[str, tuple[str, tuple[str, ...]]] = {
             "停用插件",
             "禁用插件",
             "插件配置",
+            "插件的配置",
+            "插件配置信息",
+            "插件数据库",
+            "插件的数据库",
+            "sqlite",
             "全局配置",
             "账号级配置",
             "feature config",
@@ -718,6 +723,27 @@ def route_locally(
         # 写工具会由 diagnostics 技能的 diagnostic_safe 门禁自动排除。
         matched = ["plugins"]
         matched.extend(domain for domain in ("logs", "source") if domain in available)
+    plugin_database_intent = not plugin_diagnostic_intent and "plugins" in matched and any(
+        token in normalized for token in ("插件数据库", "插件的数据库", "sqlite")
+    )
+    plugin_config_action_intent = (
+        not plugin_diagnostic_intent and "plugins" in matched and "配置动作" in normalized
+    )
+    plugin_config_intent = not plugin_diagnostic_intent and "plugins" in matched and any(
+        token in normalized
+        for token in ("插件配置", "插件的配置", "插件配置信息", "配置json")
+    )
+    if plugin_config_action_intent or plugin_database_intent:
+        matched = [domain for domain in ("features",) if domain in available]
+    elif plugin_config_intent:
+        # 插件的“配置”可能同时指功能矩阵、Schema 配置和账号交互规则；
+        # 三个领域一起授权，技能层优先披露 features + interaction，避免只看到
+        # 安装包而误报“无法读取配置”。
+        matched = [
+            domain
+            for domain in ("features", "interaction", "plugins")
+            if domain in available
+        ]
     if (
         "plugin_repos" in matched
         and "plugins" in matched

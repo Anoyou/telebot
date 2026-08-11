@@ -5434,7 +5434,7 @@ async def test_userbot_channel_session_still_consumes_without_actions(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_userbot_session_message_skips_cross_channel_duplicate(monkeypatch) -> None:
+async def test_userbot_session_message_consumes_cross_channel_duplicate(monkeypatch) -> None:
     redis = _FakeRedis()
     state = loader_mod._AccountState(89)
     state.redis = redis
@@ -5468,7 +5468,9 @@ async def test_userbot_session_message_skips_cross_channel_duplicate(monkeypatch
         redis=redis,
     )
 
-    assert consumed is False
+    # 已由另一条交互管道处理的消息必须被视为已消费，阻断调用方继续执行
+    # legacy on_message；旧行为返回 False，会让同一中奖回复发奖两次。
+    assert consumed is True
     claim.assert_awaited_once_with(
         account_id=89,
         chat_id=-10089,
@@ -5485,6 +5487,7 @@ async def test_userbot_session_message_skips_cross_channel_duplicate(monkeypatch
     )
     finish_trace.assert_awaited_once()
     assert finish_trace.await_args.args[1] == loader_mod.TRACE_STATUS_SKIPPED
+    assert finish_trace.await_args.kwargs["consumed"] is True
 
 
 @pytest.mark.asyncio
