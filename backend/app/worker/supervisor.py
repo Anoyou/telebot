@@ -512,6 +512,8 @@ class _WorkerHandle:
 # 全局状态：account_id → handle
 _WORKERS: dict[int, _WorkerHandle] = {}
 _WORKER_LOCKS: dict[int, asyncio.Lock] = {}
+_START_QUEUED: set[int] = set()
+_STARTING: set[int] = set()
 # 后台协程列表（global listener / monitor / 两个 stream 消费者）
 _BG_TASKS: list[asyncio.Task] = []
 
@@ -529,9 +531,57 @@ def get_worker_runtime_snapshot() -> list[dict[str, int | str | bool | None]]:
                 "alive": bool(proc and proc.is_alive()),
                 "desired": handle.desired,
                 "fail_count": int(handle.fail_count),
+                "queued": aid in _START_QUEUED,
+                "starting": aid in _STARTING,
+            }
+        )
+    known = set(_WORKERS)
+    for aid in sorted(_START_QUEUED - known):
+        rows.append(
+            {
+                "account_id": int(aid),
+                "pid": None,
+                "alive": False,
+                "desired": "running",
+                "fail_count": 0,
+                "queued": True,
+                "starting": False,
             }
         )
     return rows
+
+
+async def _start_workers_bounded(account_ids: list[int]) -> None:
+    """分批拉起账号 worker，避免多账号部署时同时冷加载 Telethon session。"""
+
+    pending = list(dict.fromkeys(int(value) for value in account_ids))
+    _START_QUEUED.update(pending)
+    batch_size = 4
+    try:
+        for offset in range(0, len(pending), batch_size):
+            batch = pending[offset : offset + batch_size]
+            for aid in batch:
+                _START_QUEUED.discard(aid)
+                _STARTING.add(aid)
+            try:
+                results = await asyncio.gather(
+                    *(start_worker(aid) for aid in batch),
+                    return_exceptions=True,
+                )
+                for aid, result in zip(batch, results, strict=True):
+                    if isinstance(result, BaseException):
+                        log.exception(
+                            "账号 worker 启动失败 aid=%s",
+                            aid,
+                            exc_info=(type(result), result, result.__traceback__),
+                        )
+            finally:
+                _STARTING.difference_update(batch)
+            if offset + batch_size < len(pending):
+                await asyncio.sleep(0.25)
+    finally:
+        _START_QUEUED.difference_update(pending)
+        _STARTING.difference_update(pending)
 
 
 async def start_supervisor() -> None:
@@ -556,8 +606,7 @@ async def start_supervisor() -> None:
     if await _kill_switch_enabled():
         log.warning("kill switch 已开启，启动阶段跳过 %d 个 active worker", len(rows))
     else:
-        for acc in rows:
-            await start_worker(acc.id)
+        await _start_workers_bounded([int(acc.id) for acc in rows])
 
     # 2. 启动后台监听协程
     _BG_TASKS.append(asyncio.create_task(_listen_global()))
@@ -640,6 +689,8 @@ async def stop_all_workers() -> None:
     for t in _BG_TASKS:
         t.cancel()
     _BG_TASKS.clear()
+    _START_QUEUED.clear()
+    _STARTING.clear()
 
 
 async def start_worker(account_id: int) -> None:
@@ -758,8 +809,7 @@ async def start_active_workers() -> None:
                 select(Account.id).where(Account.status == ACCOUNT_STATUS_ACTIVE)
             )
         ).scalars().all()
-    for aid in rows:
-        await start_worker(int(aid))
+    await _start_workers_bounded([int(aid) for aid in rows])
 
 
 async def _kill_switch_enabled() -> bool:

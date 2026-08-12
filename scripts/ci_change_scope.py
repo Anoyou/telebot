@@ -93,8 +93,9 @@ def classify_paths(paths: list[str], *, force_full: bool = False) -> CiScope:
         for path in files
     )
     plugin = any(
-        path.startswith(("plugins/", "backend/app/worker/plugins/", "examples/"))
+        path.startswith(("plugins/", "backend/app/worker/plugins/", "examples/", "schemas/"))
         or path in {
+            "scripts/export-plugin-schema.py",
             "scripts/validate-plugin-examples.py",
             "scripts/validate-installed-interaction-plugins.py",
         }
@@ -109,7 +110,9 @@ def classify_paths(paths: list[str], *, force_full: bool = False) -> CiScope:
             "backend/app/openapi_contract.py",
             "frontend/src/api/schema.ts",
             "openapi/telepilot.openapi.json",
+            "schemas/plugin.schema.json",
             "scripts/export-openapi.py",
+            "scripts/export-plugin-schema.py",
         }
         for path in files
     )

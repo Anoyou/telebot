@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -31,7 +32,7 @@ from pathlib import Path
 from statistics import median
 from typing import Any, Literal
 
-from fastapi import APIRouter, Body, File, HTTPException, UploadFile
+from fastapi import APIRouter, Body, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, select, text
@@ -2894,6 +2895,7 @@ class ImportConfigResponse(BaseModel):
     reloaded_accounts: list[int] = Field(default_factory=list)
     restart_required: bool = False
     id_mappings: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    preview_signature: str | None = None
 
 
 class ConfigImportError(RuntimeError):
@@ -2983,6 +2985,7 @@ async def _import_config_payload(
     *,
     session_factory: Callable[[], Any] | None = None,
     model_map: dict[str, Any] | None = None,
+    dry_run: bool = False,
 ) -> ImportConfigResponse:
     if not isinstance(payload, dict):
         raise ConfigImportError("配置包根节点必须是 JSON object")
@@ -3134,7 +3137,10 @@ async def _import_config_payload(
             if affected_categories & runtime_categories and "Account" in models:
                 account_ids = (await db.execute(select(models["Account"].id))).scalars().all()
                 affected_accounts.update(int(account_id) for account_id in account_ids)
-            await db.commit()
+            if dry_run:
+                await db.rollback()
+            else:
+                await db.commit()
     except ConfigImportError:
         raise
     except Exception as exc:  # noqa: BLE001
@@ -3157,6 +3163,45 @@ async def _import_config_payload(
         affected_accounts=sorted(affected_accounts),
         id_mappings=public_mappings,
     )
+
+
+def _config_import_preview_signature(
+    content: bytes,
+    outcome: ImportConfigResponse,
+) -> str:
+    """绑定上传内容与当前数据库冲突判定，避免用旧预览确认新状态。"""
+
+    context = {
+        "imported": outcome.imported,
+        "skipped": outcome.skipped,
+        "warnings": outcome.warnings,
+        "bundle_version": outcome.bundle_version,
+        "affected_categories": outcome.affected_categories,
+    }
+    digest = hashlib.sha256()
+    digest.update(content)
+    digest.update(
+        json.dumps(
+            context,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
+    return digest.hexdigest()
+
+
+async def _read_config_import_file(file: UploadFile) -> tuple[bytes, dict[str, Any]]:
+    content = await file.read()
+    if len(content) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="配置包超过 10MB")
+    try:
+        data = json.loads(content)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="上传的文件不是合法的 JSON") from exc
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=400, detail="配置包根节点必须是 JSON object")
+    return content, data
 
 
 async def _reload_imported_runtime(account_ids: list[int]) -> tuple[list[int], bool]:
@@ -3192,23 +3237,43 @@ async def _reload_imported_runtime(account_ids: list[int]) -> tuple[list[int], b
     return reloaded, restart_required
 
 
+@router.post("/import-config/preview", response_model=ImportConfigResponse)
+async def preview_import_config(
+    _user: CurrentUser,
+    file: UploadFile = File(...),
+) -> ImportConfigResponse:
+    """只执行完整校验与冲突判定，不提交数据库，也不触发 Worker 热重载。"""
+
+    content, data = await _read_config_import_file(file)
+    try:
+        outcome = await _import_config_payload(data, dry_run=True)
+    except ConfigImportError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return outcome.model_copy(
+        update={
+            "id_mappings": {},
+            "preview_signature": _config_import_preview_signature(content, outcome),
+        }
+    )
+
+
 @router.post("/import-config", response_model=ImportConfigResponse)
 async def import_config(
     _user: CurrentUser,
     file: UploadFile = File(...),
+    preview_signature: str = Form(""),
 ) -> ImportConfigResponse:
-    """从上传的 JSON 文件导入配置。冲突策略：同名/同 ID 跳过并记录。"""
-    import json as _json
+    """确认预检结果后导入配置。冲突策略：同名/同 ID 跳过并记录。"""
 
-    content = await file.read()
-    if len(content) > 10 * 1024 * 1024:
-        raise HTTPException(status_code=413, detail="配置包超过 10MB")
+    content, data = await _read_config_import_file(file)
     try:
-        data = _json.loads(content)
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail="上传的文件不是合法的 JSON") from exc
-
-    try:
+        preview = await _import_config_payload(data, dry_run=True)
+        expected_signature = _config_import_preview_signature(content, preview)
+        if not preview_signature or preview_signature != expected_signature:
+            raise HTTPException(
+                status_code=409,
+                detail="预览已失效，请重新预检后再确认恢复",
+            )
         outcome = await _import_config_payload(data)
     except ConfigImportError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

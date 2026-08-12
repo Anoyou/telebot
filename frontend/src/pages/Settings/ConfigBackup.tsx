@@ -42,6 +42,18 @@ interface CategoryDef {
   sensitive?: string[];
 }
 
+interface ConfigImportResult {
+  imported: number;
+  skipped: number;
+  warnings: string[];
+  bundle_version: number;
+  affected_categories: string[];
+  affected_accounts: number[];
+  reloaded_accounts: number[];
+  restart_required: boolean;
+  preview_signature?: string | null;
+}
+
 const CATEGORIES: CategoryDef[] = [
   {
     key: "system_settings",
@@ -86,14 +98,9 @@ export function ConfigBackup() {
   const [includeSensitive, setIncludeSensitive] = useState(false);
   const [sensitivePassword, setSensitivePassword] = useState("");
   const [sensitiveTotp, setSensitiveTotp] = useState("");
-  const [importResult, setImportResult] = useState<{
-    imported: number;
-    skipped: number;
-    warnings: string[];
-    affected_accounts: number[];
-    reloaded_accounts: number[];
-    restart_required: boolean;
-  } | null>(null);
+  const [importFile, setImportFile] = useState<File | null>(null);
+  const [importPreview, setImportPreview] = useState<ConfigImportResult | null>(null);
+  const [importResult, setImportResult] = useState<ConfigImportResult | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const bundleFileRef = useRef<HTMLInputElement>(null);
   const [bundleSourceAid, setBundleSourceAid] = useState("");
@@ -171,21 +178,37 @@ export function ConfigBackup() {
     onError: (err) => toast.error(getErrMsg(err)),
   });
 
-  const importMut = useMutation({
+  const previewImportMut = useMutation({
     mutationFn: async (file: File) => {
       const form = new FormData();
       form.append("file", file);
+      const { data } = await api.post("/api/system/import-config/preview", form, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      return data as ConfigImportResult;
+    },
+    onSuccess: (data) => {
+      setImportPreview(data);
+      toast.success(`预检完成：将新增 ${data.imported} 条，跳过 ${data.skipped} 条`);
+    },
+    onError: (err) => {
+      setImportPreview(null);
+      toast.error(getErrMsg(err));
+    },
+  });
+
+  const importMut = useMutation({
+    mutationFn: async () => {
+      if (!importFile || !importPreview?.preview_signature) {
+        throw new Error("请先选择配置包并完成预检");
+      }
+      const form = new FormData();
+      form.append("file", importFile);
+      form.append("preview_signature", importPreview.preview_signature);
       const { data } = await api.post("/api/system/import-config", form, {
         headers: { "Content-Type": "multipart/form-data" },
       });
-      return data as {
-        imported: number;
-        skipped: number;
-        warnings: string[];
-        affected_accounts: number[];
-        reloaded_accounts: number[];
-        restart_required: boolean;
-      };
+      return data as ConfigImportResult;
     },
     onSuccess: async (data) => {
       setImportResult(data);
@@ -269,12 +292,14 @@ export function ConfigBackup() {
     (e: React.ChangeEvent<HTMLInputElement>) => {
       const file = e.target.files?.[0];
       if (!file) return;
+      setImportFile(file);
+      setImportPreview(null);
       setImportResult(null);
-      importMut.mutate(file);
+      previewImportMut.mutate(file);
       // 清空 file input 以支持重复选择同一文件
       e.target.value = "";
     },
-    [importMut],
+    [previewImportMut],
   );
 
   const handleBundleFileChange = useCallback(
@@ -419,7 +444,7 @@ export function ConfigBackup() {
         <div className="space-y-3">
           <Label className="text-sm font-medium">导入配置</Label>
           <p className="text-xs text-muted-foreground">
-            上传之前导出的版本化 JSON 配置包。恢复会按依赖顺序在单个事务中完成，
+            上传后先做完整预检，不会写入数据库或刷新 Worker。确认结果后，恢复才会按依赖顺序在单个事务中完成；
             同一自然标识的配置项将被跳过。
           </p>
 
@@ -434,14 +459,59 @@ export function ConfigBackup() {
           <Button
             variant="outline"
             onClick={() => fileRef.current?.click()}
-            disabled={importMut.isPending}
+            disabled={previewImportMut.isPending || importMut.isPending}
             className="gap-1.5"
           >
             <Upload className="h-4 w-4" />
-            {importMut.isPending ? "导入中..." : "选择文件导入"}
+            {previewImportMut.isPending ? "预检中..." : "选择文件并预检"}
           </Button>
 
-          {/* 导入结果 */}
+          {importFile && (
+            <p className="break-all text-xs text-muted-foreground">
+              当前文件：{importFile.name}
+            </p>
+          )}
+
+          {importPreview && (
+            <div className="space-y-3 rounded-md border bg-muted/30 px-3 py-3">
+              <div className="text-sm font-medium">恢复预览</div>
+              <div className="flex flex-wrap items-center gap-3 text-sm">
+                <span className="text-success">将新增 {importPreview.imported}</span>
+                <span className="text-muted-foreground">将跳过 {importPreview.skipped}</span>
+                <span className="text-muted-foreground">
+                  涉及 {importPreview.affected_categories.length} 类配置
+                </span>
+              </div>
+              {importPreview.affected_categories.length > 0 && (
+                <p className="break-words text-xs text-muted-foreground">
+                  配置类别：{importPreview.affected_categories.join("、")}
+                </p>
+              )}
+              {importPreview.warnings.length > 0 && (
+                <div className="space-y-1 text-xs text-warning">
+                  {importPreview.warnings.slice(0, 5).map((warning, index) => (
+                    <p key={index}>{warning}</p>
+                  ))}
+                  {importPreview.warnings.length > 5 && (
+                    <p>... 还有 {importPreview.warnings.length - 5} 条警告</p>
+                  )}
+                </div>
+              )}
+              <Button
+                onClick={() => importMut.mutate()}
+                disabled={!importPreview.preview_signature || importMut.isPending}
+                className="gap-1.5"
+              >
+                <CheckCircle2 className="h-4 w-4" />
+                {importMut.isPending ? "恢复中..." : "确认恢复"}
+              </Button>
+              <p className="text-xs text-muted-foreground">
+                确认后才会写入数据库，并尝试通知受影响账号的 Worker 热加载配置。
+              </p>
+            </div>
+          )}
+
+          {/* 恢复结果 */}
           {importResult && (
             <div className="rounded-md border px-3 py-2 space-y-2">
               <div className="flex items-center gap-4 text-sm">

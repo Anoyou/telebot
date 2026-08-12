@@ -131,3 +131,12 @@ def test_version_sync_gate_includes_openapi_snapshot_version() -> None:
 
     assert 'openapi_snapshot = json.loads(Path("openapi/telepilot.openapi.json").read_text())' in workflow
     assert '"openapi/telepilot.openapi.json": openapi_snapshot["info"]["version"]' in workflow
+
+
+def test_plugin_schema_codegen_is_guarded_by_contract_ci() -> None:
+    scope = classify_paths(["scripts/export-plugin-schema.py", "schemas/plugin.schema.json"])
+    workflow = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+    assert scope.plugin is True
+    assert scope.contract is True
+    assert "schemas/plugin.schema.json" in workflow

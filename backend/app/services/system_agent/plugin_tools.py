@@ -11,6 +11,7 @@ import re
 import secrets
 from typing import Any
 
+from jsonschema import Draft7Validator, SchemaError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -89,6 +90,13 @@ def parse_exposed_tools(
         parameters = raw.get("parameters")
         if not isinstance(parameters, dict) or parameters.get("type") != "object":
             warn.append(f"{plugin_key}.{name}: parameters 必须是 type=object，静默跳过")
+            continue
+        try:
+            Draft7Validator.check_schema(parameters)
+        except SchemaError as exc:
+            warn.append(
+                f"{plugin_key}.{name}: parameters 不是合法 Draft-07 JSON Schema（{exc.message}），静默跳过"
+            )
             continue
         read_only = bool(raw.get("read_only", True))
         if not read_only:

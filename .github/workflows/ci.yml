@@ -179,11 +179,11 @@ jobs:
           python -m pip install -e "./backend[dev]"
           pnpm --dir frontend install --frozen-lockfile
 
-      - name: Regenerate OpenAPI and TypeScript contract
+      - name: Regenerate OpenAPI, TypeScript and plugin contracts
         run: make codegen
 
       - name: Reject stale generated contract
-        run: git diff --exit-code -- openapi/telepilot.openapi.json frontend/src/api/schema.ts
+        run: git diff --exit-code -- openapi/telepilot.openapi.json frontend/src/api/schema.ts schemas/plugin.schema.json
 
       - name: Test API contract invariants
         working-directory: backend

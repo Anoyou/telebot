@@ -2130,6 +2130,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/logs/runtime/stats": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Runtime Log Stats
+         * @description 返回筛选范围内的数字聚合；Redis 仅短暂缓存统计，不缓存原始日志。
+         */
+        get: operations["get_runtime_log_stats_api_logs_runtime_stats_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/logs/system-console": {
         parameters: {
             query?: never;
@@ -2539,6 +2559,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/plugins/install/batch-state": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Batch Install State */
+        post: operations["batch_install_state_api_plugins_install_batch_state_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/plugins/install/upload": {
         parameters: {
             query?: never;
@@ -2618,6 +2655,23 @@ export interface paths {
         put?: never;
         /** Enable Install */
         post: operations["enable_install_api_plugins_install__key__enable_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/plugins/install/{key}/history": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Installed Plugin History */
+        get: operations["get_installed_plugin_history_api_plugins_install__key__history_get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -3840,9 +3894,29 @@ export interface paths {
         put?: never;
         /**
          * Import Config
-         * @description 从上传的 JSON 文件导入配置。冲突策略：同名/同 ID 跳过并记录。
+         * @description 确认预检结果后导入配置。冲突策略：同名/同 ID 跳过并记录。
          */
         post: operations["import_config_api_system_import_config_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/system/import-config/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Preview Import Config
+         * @description 只执行完整校验与冲突判定，不提交数据库，也不触发 Worker 热重载。
+         */
+        post: operations["preview_import_config_api_system_import_config_preview_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -5075,6 +5149,16 @@ export interface components {
         };
         /** Body_import_config_api_system_import_config_post */
         Body_import_config_api_system_import_config_post: {
+            /** File */
+            file: string;
+            /**
+             * Preview Signature
+             * @default
+             */
+            preview_signature: string;
+        };
+        /** Body_preview_import_config_api_system_import_config_preview_post */
+        Body_preview_import_config_api_system_import_config_preview_post: {
             /** File */
             file: string;
         };
@@ -6767,6 +6851,8 @@ export interface components {
              * @default 0
              */
             imported: number;
+            /** Preview Signature */
+            preview_signature?: string | null;
             /** Reloaded Accounts */
             reloaded_accounts?: number[];
             /**
@@ -7871,6 +7957,38 @@ export interface components {
             /** Account Ids */
             account_ids: number[];
         };
+        /** PluginBatchStateIn */
+        PluginBatchStateIn: {
+            /** Enabled */
+            enabled: boolean;
+            /** Keys */
+            keys: string[];
+        };
+        /** PluginBatchStateItem */
+        PluginBatchStateItem: {
+            /** Code */
+            code?: string | null;
+            /** Key */
+            key: string;
+            /** Message */
+            message?: string | null;
+            /** Ok */
+            ok: boolean;
+            plugin?: components["schemas"]["PluginInstallOut"] | null;
+        };
+        /** PluginBatchStateOut */
+        PluginBatchStateOut: {
+            /** Enabled */
+            enabled: boolean;
+            /** Failed */
+            failed: number;
+            /** Items */
+            items: components["schemas"]["PluginBatchStateItem"][];
+            /** Reloaded Accounts */
+            reloaded_accounts: number;
+            /** Succeeded */
+            succeeded: number;
+        };
         /** PluginCenterAccountItem */
         PluginCenterAccountItem: {
             /** Account Id */
@@ -8109,6 +8227,34 @@ export interface components {
             config: {
                 [key: string]: unknown;
             };
+        };
+        /** PluginInstallHistoryOut */
+        PluginInstallHistoryOut: {
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Detail */
+            detail?: string | null;
+            /** Enabled */
+            enabled?: boolean | null;
+            /** Event Type */
+            event_type: string;
+            /** Id */
+            id: number;
+            /** Plugin Key */
+            plugin_key: string;
+            /** Previous Version */
+            previous_version?: string | null;
+            /** Signature Ok */
+            signature_ok?: boolean | null;
+            /** Source */
+            source?: string | null;
+            /** Source Label */
+            source_label?: string | null;
+            /** Version */
+            version?: string | null;
         };
         /** PluginInstallOut */
         PluginInstallOut: {
@@ -9173,6 +9319,13 @@ export interface components {
             /** Priority */
             priority?: number | null;
         };
+        /** RuntimeLogBucket */
+        RuntimeLogBucket: {
+            /** Count */
+            count: number;
+            /** Key */
+            key: string;
+        };
         /**
          * RuntimeLogItem
          * @description 运行日志条目（worker 上抛）。
@@ -9220,6 +9373,28 @@ export interface components {
              * @default 0
              */
             last_5m_warn: number;
+        };
+        /** RuntimeLogStatsOut */
+        RuntimeLogStatsOut: {
+            /** By Account */
+            by_account?: components["schemas"]["RuntimeLogBucket"][];
+            /** By Source */
+            by_source?: components["schemas"]["RuntimeLogBucket"][];
+            /**
+             * Cached
+             * @default false
+             */
+            cached: boolean;
+            /** Debug */
+            debug: number;
+            /** Error */
+            error: number;
+            /** Info */
+            info: number;
+            /** Total */
+            total: number;
+            /** Warn */
+            warn: number;
         };
         /**
          * StrictRequest
@@ -17975,6 +18150,7 @@ export interface operations {
                 /** @description 日志类别："event"（消息事件）/"plugin"（插件内部日志）/"system"（worker 启停/错误） */
                 source?: string | null;
                 since?: string | null;
+                until?: string | null;
                 limit?: number;
             };
             header?: never;
@@ -17992,6 +18168,63 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RuntimeLogItem"][];
+                };
+            };
+            /** @description 认证失败 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get_runtime_log_stats_api_logs_runtime_stats_get: {
+        parameters: {
+            query?: {
+                account_id?: number | null;
+                level?: string | null;
+                plugin_key?: string | null;
+                keyword?: string | null;
+                source?: string | null;
+                since?: string | null;
+                until?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: {
+                auth_token?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RuntimeLogStatsOut"];
                 };
             };
             /** @description 认证失败 */
@@ -19440,6 +19673,68 @@ export interface operations {
             };
         };
     };
+    batch_install_state_api_plugins_install_batch_state_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: {
+                auth_token?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PluginBatchStateIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PluginBatchStateOut"];
+                };
+            };
+            /** @description 认证失败 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description CSRF 校验失败或权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
     upload_plugin_package_api_plugins_install_upload_post: {
         parameters: {
             query?: never;
@@ -19704,6 +19999,59 @@ export interface operations {
             };
             /** @description CSRF 校验失败或权限不足 */
             403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get_installed_plugin_history_api_plugins_install__key__history_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                key: string;
+            };
+            cookie?: {
+                auth_token?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PluginInstallHistoryOut"][];
+                };
+            };
+            /** @description 认证失败 */
+            401: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -24554,6 +24902,68 @@ export interface operations {
         requestBody: {
             content: {
                 "multipart/form-data": components["schemas"]["Body_import_config_api_system_import_config_post"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ImportConfigResponse"];
+                };
+            };
+            /** @description 认证失败 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description CSRF 校验失败或权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    preview_import_config_api_system_import_config_preview_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: {
+                auth_token?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": components["schemas"]["Body_preview_import_config_api_system_import_config_preview_post"];
             };
         };
         responses: {

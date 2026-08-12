@@ -30,7 +30,7 @@ from httpx import ASGITransport, AsyncClient
 
 from app.api import plugins_install as plugins_install_api
 from app.db.models.feature import FEATURE_FORWARD, AccountFeature, Feature
-from app.db.models.plugin import InstalledPlugin
+from app.db.models.plugin import InstalledPlugin, PluginInstallHistory
 from app.db.models.plugin_global_config import PluginGlobalConfig
 from app.deps import get_current_user, get_db
 from app.main import app
@@ -48,6 +48,7 @@ class _FakeDB:
         self.features: dict[str, Feature] = {}
         self.account_features: list[AccountFeature] = []
         self.global_configs: dict[str, PluginGlobalConfig] = {}
+        self.install_history: list[PluginInstallHistory] = []
         self.committed = False
 
     async def get(self, model, pk):  # noqa: ANN001
@@ -68,6 +69,8 @@ class _FakeDB:
             self.account_features.append(obj)
         elif isinstance(obj, PluginGlobalConfig):
             self.global_configs[obj.plugin_key] = obj
+        elif isinstance(obj, PluginInstallHistory):
+            self.install_history.append(obj)
 
     async def delete(self, obj) -> None:  # noqa: ANN001
         if isinstance(obj, InstalledPlugin):
@@ -96,6 +99,11 @@ class _FakeDB:
             key = _where_value(stmt)
             return _FakeResult(
                 [row for row in self.account_features if row.feature_key == key]
+            )
+        if model is PluginInstallHistory:
+            key = _where_value(stmt)
+            return _FakeResult(
+                [row for row in reversed(self.install_history) if row.plugin_key == key]
             )
         return _FakeResult([])
 
@@ -685,6 +693,7 @@ async def test_set_enabled_updates_installed_plugin_row(tmp_path, monkeypatch) -
     await pis.set_enabled(db, "toggle", True)
 
     assert db.installed_rows["toggle"].enabled is True
+    assert [event.event_type for event in db.install_history] == ["installed", "enabled"]
 
 
 @pytest.mark.asyncio
@@ -713,6 +722,9 @@ async def test_uninstall_removes_row_and_dir(tmp_path, monkeypatch) -> None:
     assert "other" in db.features
     assert "other" in db.global_configs
     assert not target.exists()
+    assert [event.event_type for event in db.install_history] == ["installed", "uninstalled"]
+    assert db.install_history[-1].plugin_key == "bye"
+    assert db.install_history[-1].detail is None
 
 
 @pytest.mark.asyncio

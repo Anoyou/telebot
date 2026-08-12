@@ -52,6 +52,18 @@ tp_plugin check plugins/local_imports/my_game
 
 它会检查必备运行期文件、`plugin.json` 结构、`manifest.py` 语法、事件订阅白名单，并做权限推导审计。`check` 只打印错误/警告，不修改 `plugin.json` 或 `manifest.py`。
 
+`plugin.json` 的公开契约位于 `schemas/plugin.schema.json`。该文件不是手工维护：
+它由后端安装路径实际使用的 `PluginMetadataSchema` 生成，因此 CLI `check`、远程安装校验和编辑器提示共享同一来源。
+修改插件元数据字段后，从仓库根运行：
+
+```bash
+make codegen
+```
+
+CI 会和 OpenAPI、前端类型一起检查生成结果是否漂移。编辑器可把
+`schemas/plugin.schema.json` 配置为 `plugin.json` 的 JSON Schema；Schema 本身使用 JSON Schema 2020-12，
+插件内部的 `config_schema` 与 `agent_tools[].parameters` 仍按平台运行时支持的 Draft-07 规则校验。
+
 ### `register`
 
 `register` 把本地目录登记进 `installed_plugin` 台账，让 loader 能按安装插件加载：

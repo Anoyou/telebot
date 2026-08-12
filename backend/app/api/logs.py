@@ -10,6 +10,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import datetime
 from typing import Any
 
@@ -19,6 +21,7 @@ from sqlalchemy import String, and_, cast, desc, func, or_, select
 
 from ..db.models.log import AuditLog, EventAction, EventSpan, EventTrace, RuntimeLog
 from ..deps import CurrentUser, DBSession
+from ..redis_client import get_redis
 from ..services.event_probe import build_event_probe_report
 from ..services.log_funel import MessageFunel, build_message_funel
 from ..services.redactor import redact_text, redact_value
@@ -33,6 +36,47 @@ router = APIRouter(tags=["logs"])
 _LOCAL_CONSOLE_FILES = LOCAL_CONSOLE_FILES
 _fetch_updater_console_logs = fetch_updater_console_logs
 _filter_console_payload = filter_console_payload
+
+
+def _runtime_filters(
+    account_id: int | None,
+    level: str | None,
+    plugin_key: str | None,
+    keyword: str | None,
+    source: str | None,
+    since: datetime | None,
+    until: datetime | None = None,
+) -> list[Any]:
+    filters: list[Any] = []
+    if account_id is not None:
+        filters.append(RuntimeLog.account_id == account_id)
+    if since is not None:
+        filters.append(RuntimeLog.ts >= since)
+    if until is not None:
+        filters.append(RuntimeLog.ts <= until)
+    if level:
+        norm = level.lower()
+        filters.append(
+            RuntimeLog.level.in_(("warn", "warning", "error"))
+            if norm == "warning"
+            else RuntimeLog.level == norm
+        )
+    if source:
+        aliases = _SOURCE_ALIAS.get(source.lower())
+        filters.append(RuntimeLog.source.in_(aliases) if aliases is not None else RuntimeLog.source == source)
+    if plugin_key:
+        filters.append(RuntimeLog.detail["plugin_key"].as_string() == plugin_key)
+    if keyword and keyword.strip():
+        like = f"%{keyword.strip()}%"
+        filters.append(
+            or_(
+                RuntimeLog.message.ilike(like),
+                RuntimeLog.level.ilike(like),
+                RuntimeLog.source.ilike(like),
+                cast(RuntimeLog.detail, String).ilike(like),
+            )
+        )
+    return filters
 
 # ── 出参 ─────────────────────────────────────────────────────────
 class AuditLogItem(BaseModel):
@@ -75,6 +119,22 @@ class RuntimeLogItem(BaseModel):
         )
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class RuntimeLogBucket(BaseModel):
+    key: str
+    count: int
+
+
+class RuntimeLogStatsOut(BaseModel):
+    total: int
+    debug: int
+    info: int
+    warn: int
+    error: int
+    by_account: list[RuntimeLogBucket] = Field(default_factory=list)
+    by_source: list[RuntimeLogBucket] = Field(default_factory=list)
+    cached: bool = False
 
 
 class SystemConsoleLogsResponse(BaseModel):
@@ -796,6 +856,7 @@ async def list_runtime_logs(
         description='日志类别："event"（消息事件）/"plugin"（插件内部日志）/"system"（worker 启停/错误）',
     ),
     since: datetime | None = Query(None),
+    until: datetime | None = Query(None),
     limit: int = Query(100, ge=1, le=500),
 ) -> list[RuntimeLogItem]:
     """返回最近运行日志。
@@ -804,36 +865,107 @@ async def list_runtime_logs(
     ``source`` 支持 ``"event"`` / ``"plugin"`` / ``"system"`` 三种 tab。
     """
     stmt = select(RuntimeLog).order_by(RuntimeLog.ts.desc()).limit(limit)
-    if account_id is not None:
-        stmt = stmt.where(RuntimeLog.account_id == account_id)
-    if since is not None:
-        stmt = stmt.where(RuntimeLog.ts >= since)
-    if level:
-        norm = level.lower()
-        if norm == "warning":
-            stmt = stmt.where(RuntimeLog.level.in_(("warn", "warning", "error")))
-        else:
-            stmt = stmt.where(RuntimeLog.level == norm)
-    if source:
-        aliases = _SOURCE_ALIAS.get(source.lower())
-        if aliases is not None:
-            stmt = stmt.where(RuntimeLog.source.in_(aliases))
-        else:
-            stmt = stmt.where(RuntimeLog.source == source)
-    if plugin_key:
-        stmt = stmt.where(RuntimeLog.detail["plugin_key"].as_string() == plugin_key)
-    if keyword and keyword.strip():
-        like = f"%{keyword.strip()}%"
-        stmt = stmt.where(
-            or_(
-                RuntimeLog.message.ilike(like),
-                RuntimeLog.level.ilike(like),
-                RuntimeLog.source.ilike(like),
-                cast(RuntimeLog.detail, String).ilike(like),
-            )
-        )
+    filters = _runtime_filters(account_id, level, plugin_key, keyword, source, since, until)
+    if filters:
+        stmt = stmt.where(*filters)
     rows = (await db.execute(stmt)).scalars().all()
     return [RuntimeLogItem.from_row(r) for r in rows]
+
+
+@router.get("/api/logs/runtime/stats", response_model=RuntimeLogStatsOut)
+async def get_runtime_log_stats(
+    db: DBSession,
+    _user: CurrentUser,
+    account_id: int | None = Query(None),
+    level: str | None = Query(None),
+    plugin_key: str | None = Query(None),
+    keyword: str | None = Query(None, max_length=500),
+    source: str | None = Query(None),
+    since: datetime | None = Query(None),
+    until: datetime | None = Query(None),
+) -> RuntimeLogStatsOut:
+    """返回筛选范围内的数字聚合；Redis 仅短暂缓存统计，不缓存原始日志。"""
+
+    cache_payload = {
+        "account_id": account_id,
+        "level": level,
+        "plugin_key": plugin_key,
+        "keyword": keyword,
+        "source": source,
+        "since": since.isoformat() if since else None,
+        "until": until.isoformat() if until else None,
+    }
+    digest = hashlib.sha256(
+        json.dumps(cache_payload, sort_keys=True, ensure_ascii=False).encode()
+    ).hexdigest()
+    cache_key = f"logs:runtime:stats:v1:{digest}"
+    redis = None
+    try:
+        redis = get_redis()
+        cached = await redis.get(cache_key)
+        if cached:
+            value = RuntimeLogStatsOut.model_validate_json(cached)
+            return value.model_copy(update={"cached": True})
+    except Exception:  # noqa: BLE001
+        redis = None
+
+    filters = _runtime_filters(account_id, level, plugin_key, keyword, source, since, until)
+    where = tuple(filters)
+    total = int(
+        (
+            await db.execute(
+                select(func.count(RuntimeLog.id)).where(*where)
+            )
+        ).scalar_one()
+    )
+    level_rows = (
+        await db.execute(
+            select(RuntimeLog.level, func.count(RuntimeLog.id))
+            .where(*where)
+            .group_by(RuntimeLog.level)
+        )
+    ).all()
+    account_rows = (
+        await db.execute(
+            select(RuntimeLog.account_id, func.count(RuntimeLog.id))
+            .where(*where)
+            .group_by(RuntimeLog.account_id)
+            .order_by(func.count(RuntimeLog.id).desc())
+            .limit(50)
+        )
+    ).all()
+    source_rows = (
+        await db.execute(
+            select(RuntimeLog.source, func.count(RuntimeLog.id))
+            .where(*where)
+            .group_by(RuntimeLog.source)
+            .order_by(func.count(RuntimeLog.id).desc())
+            .limit(50)
+        )
+    ).all()
+    counts = {"debug": 0, "info": 0, "warn": 0, "error": 0}
+    for raw_level, raw_count in level_rows:
+        normalized = "warn" if str(raw_level).lower() == "warning" else str(raw_level).lower()
+        if normalized in counts:
+            counts[normalized] += int(raw_count)
+    result = RuntimeLogStatsOut(
+        total=total,
+        **counts,
+        by_account=[
+            RuntimeLogBucket(key=str(key) if key is not None else "system", count=int(count))
+            for key, count in account_rows
+        ],
+        by_source=[
+            RuntimeLogBucket(key=str(key) if key else "unknown", count=int(count))
+            for key, count in source_rows
+        ],
+    )
+    if redis is not None:
+        try:
+            await redis.setex(cache_key, 20, result.model_dump_json())
+        except Exception:  # noqa: BLE001
+            pass
+    return result
 
 
 @router.post("/api/logs/system-console", response_model=SystemConsoleLogsResponse)

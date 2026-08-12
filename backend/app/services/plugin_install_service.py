@@ -42,6 +42,7 @@ from ..db.models.plugin_global_config import PluginGlobalConfig
 from ..settings import settings
 from ..worker.plugins.manifest import Manifest
 from ..worker.plugins.update_barrier import begin_plugin_update, clear_plugin_update
+from .plugin_install_history import record_plugin_install_history
 from .remote_plugin_service import (
     _attach_legacy_plugin_sqlite_links,
     _relocate_legacy_plugin_sqlite,
@@ -387,6 +388,7 @@ async def install_zip(
 
         # 旧记录（升级情况）
         existing = await db.get(InstalledPlugin, parsed.manifest.key)
+        previous_version = existing.version if existing is not None else None
         was_enabled = bool(existing.enabled) if existing is not None else False
 
         staging = final_dir.with_name(f"{final_dir.name}.installing")
@@ -430,6 +432,12 @@ async def install_zip(
             last_install_error=None,
             lint_warnings=lint_warnings,
         )
+        record_plugin_install_history(
+            db,
+            row=row,
+            event_type="updated" if existing is not None else "installed",
+            previous_version=previous_version,
+        )
         await db.flush()
         if backup.exists():
             shutil.rmtree(backup, ignore_errors=True)
@@ -471,6 +479,7 @@ async def uninstall(db: AsyncSession, key: str) -> bool:
     if feat is not None and not bool(feat.is_builtin):
         await db.delete(feat)
 
+    record_plugin_install_history(db, row=row, event_type="uninstalled")
     await db.delete(row)
     await db.flush()
     # 删目录失败不阻塞 DB 提交（但写日志方便排查）
@@ -493,7 +502,14 @@ async def set_enabled(db: AsyncSession, key: str, enabled: bool) -> InstalledPlu
             "SIGNATURE_FAILED",
             "签名校验失败，禁止启用；管理员可先重新上传带正确签名的 zip",
         )
+    changed = bool(row.enabled) != bool(enabled)
     row.enabled = bool(enabled)
+    if changed:
+        record_plugin_install_history(
+            db,
+            row=row,
+            event_type="enabled" if enabled else "disabled",
+        )
     await db.flush()
     return row
 

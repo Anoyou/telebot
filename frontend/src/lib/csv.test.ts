@@ -28,3 +28,14 @@ test("serializeCsv 防止表格软件执行公式", () => {
   assert.match(csv, /"'@SUM\(A1\)"/);
   assert.match(csv, /"'-2"/);
 });
+
+test("serializeCsv 防止前导空白绕过公式防护", () => {
+  const csv = serializeCsv(
+    [{ value: " =1+1" }, { value: "\t=cmd()" }, { value: "\u00a0=SUM(1,2)" }],
+    [{ header: "值", value: (row) => row.value }],
+  );
+
+  assert.match(csv, /"' =1\+1"/);
+  assert.match(csv, /"'\t=cmd\(\)"/);
+  assert.match(csv, /"'\u00a0=SUM\(1,2\)"/);
+});

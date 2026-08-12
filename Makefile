@@ -154,8 +154,10 @@ lint:
 codegen:
 	@if [ -x backend/.venv/bin/python ]; then \
 		backend/.venv/bin/python scripts/export-openapi.py; \
+		backend/.venv/bin/python scripts/export-plugin-schema.py; \
 	else \
 		python3 scripts/export-openapi.py; \
+		python3 scripts/export-plugin-schema.py; \
 	fi
 	pnpm --dir frontend codegen
 

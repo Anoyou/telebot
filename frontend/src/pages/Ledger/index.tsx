@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { lazy, Suspense, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
@@ -34,7 +34,6 @@ import {
   type LedgerSummary,
   type OperationalStats,
 } from "@/api/ledger";
-import { LineTrend, cssVarHsl } from "@/components/LineTrend";
 import { useTheme } from "@/lib/theme";
 import { PageHeader, PageShell } from "@/components/layout/PageScaffold";
 import { Button } from "@/components/ui/button";
@@ -67,6 +66,18 @@ type FilterState = {
 };
 
 type TrendPeriod = "day" | "week" | "month";
+
+const LineTrend = lazy(async () => {
+  const module = await import("@/components/LineTrend");
+  return { default: module.LineTrend };
+});
+
+function cssVarHsl(name: string, alpha?: number): string {
+  if (typeof document === "undefined") return "#888";
+  const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  if (!value) return "#888";
+  return alpha != null ? `hsl(${value} / ${alpha})` : `hsl(${value})`;
+}
 
 const DEFAULT_FILTERS: FilterState = {
   since: "",
@@ -317,7 +328,9 @@ function OperationalTrend({ stats }: { stats: OperationalStats }) {
           <EmptyState title="暂无运营动作" />
         ) : (
           <div className="space-y-4">
-            <LineTrend xAxis={xAxis} series={series} height={260} />
+            <Suspense fallback={<LoadingState />}>
+              <LineTrend xAxis={xAxis} series={series} height={260} />
+            </Suspense>
             <div className="grid grid-cols-3 gap-3 border-t border-border/70 pt-3 max-sm:gap-1.5">
               <TrendValue label="开局" value={totals.started} tone="primary" />
               <TrendValue label="派奖成功" value={totals.succeeded} tone="success" />
@@ -558,7 +571,9 @@ function TrendPanel({ summary, loading }: { summary?: LedgerSummary; loading: bo
         ) : xAxis.length === 0 ? (
           <EmptyState title="暂无流水" />
         ) : (
-          <LineTrend xAxis={xAxis} series={series} height={260} />
+          <Suspense fallback={<LoadingState />}>
+            <LineTrend xAxis={xAxis} series={series} height={260} />
+          </Suspense>
         )}
       </CardContent>
     </Card>

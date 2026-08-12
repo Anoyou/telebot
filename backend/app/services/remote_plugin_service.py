@@ -67,6 +67,7 @@ from ..worker.plugins.update_barrier import (
 )
 from .event_bus import SUPPORTED_FILTER_KEYS, VALID_EVENT_SCOPES, VALID_EVENT_SOURCES, VALID_EVENT_TYPES
 from .interaction.contracts import send_via_selector_options, unsupported_send_via_values
+from .plugin_install_history import record_plugin_install_history
 from .redactor import redact_text
 
 log = logging.getLogger(__name__)
@@ -1843,6 +1844,7 @@ async def install(
             last_install_error=None,
             lint_warnings=lint_warnings,
         )
+        record_plugin_install_history(db, row=row, event_type="installed")
         await db.flush()
 
         # 如果 default_enabled=True，为所有已有账号启用
@@ -1905,6 +1907,7 @@ async def uninstall(db: AsyncSession, name: str, *, remove_files: bool = True) -
     if feat is not None:
         await db.delete(feat)
 
+    record_plugin_install_history(db, row=row, event_type="uninstalled")
     await db.delete(row)
     await db.flush()
 
@@ -1927,9 +1930,16 @@ async def set_enabled(
     row = await db.get(InstalledPlugin, name)
     if row is None or row.source not in _REMOTE_INSTALL_SOURCES:
         raise RemotePluginNotFound("PLUGIN_NOT_FOUND", f"插件不存在: {name}")
+    changed = bool(row.enabled) != bool(enabled)
     row.enabled = bool(enabled)
     if row.enabled and bootstrap_accounts:
         await _enable_for_all_accounts_if_unclaimed(db, name)
+    if changed:
+        record_plugin_install_history(
+            db,
+            row=row,
+            event_type="enabled" if enabled else "disabled",
+        )
     await db.flush()
     return remote_plugin_view_from_installed(row)
 
@@ -1990,6 +2000,7 @@ async def update(db: AsyncSession, name: str) -> RemotePluginView:
     meta = _read_plugin_metadata(target, fallback_name=name)
     _validate_runtime_plugin_shape(target, meta)
     lint_warnings = lint_plugin_metadata_files(target)
+    previous_version = row.version
     old_source = row.source
     old_source_url = row.source_url
     old_enabled = row.enabled
@@ -2029,6 +2040,12 @@ async def update(db: AsyncSession, name: str) -> RemotePluginView:
         source_label=old_source_label,
         last_install_error=None,
         lint_warnings=lint_warnings,
+    )
+    record_plugin_install_history(
+        db,
+        row=row,
+        event_type="updated",
+        previous_version=previous_version,
     )
     await db.flush()
 

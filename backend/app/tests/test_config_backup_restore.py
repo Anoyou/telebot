@@ -376,6 +376,48 @@ async def test_runtime_reload_contract_marks_unconfirmed_worker_for_restart(
     assert restart_required is True
 
 
+def test_config_import_preview_signature_ignores_rolled_back_account_ids() -> None:
+    content = b'{"_meta":{"format":"telepilot-config","bundle_version":2}}'
+    first = system_health.ImportConfigResponse(
+        imported=2,
+        skipped=1,
+        warnings=["warning"],
+        affected_categories=["account_settings"],
+        affected_accounts=[1],
+    )
+    second = first.model_copy(update={"affected_accounts": [99]})
+
+    assert system_health._config_import_preview_signature(  # noqa: SLF001
+        content,
+        first,
+    ) == system_health._config_import_preview_signature(content, second)  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_config_import_dry_run_rolls_back_without_runtime_reload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine, maker = await _database()
+    reload_runtime = AsyncMock()
+    monkeypatch.setattr(system_health, "_reload_imported_runtime", reload_runtime)
+    try:
+        outcome = await system_health._import_config_payload(  # noqa: SLF001
+            _payload(),
+            session_factory=_factory(maker),
+            model_map=_MODEL_MAP,
+            dry_run=True,
+        )
+
+        assert outcome.imported == 3
+        async with maker() as db:
+            assert (await db.execute(select(_Account))).scalars().all() == []
+            assert (await db.execute(select(_CommandTemplate))).scalars().all() == []
+            assert (await db.execute(select(_AccountCommandLink))).scalars().all() == []
+        reload_runtime.assert_not_awaited()
+    finally:
+        await engine.dispose()
+
+
 @pytest.mark.asyncio
 async def test_config_import_rejects_unknown_or_incomplete_v2_bundle() -> None:
     engine, maker = await _database()

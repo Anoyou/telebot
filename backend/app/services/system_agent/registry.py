@@ -89,6 +89,18 @@ class ToolRegistry:
     """内存工具注册表。"""
 
     _tools: dict[str, ToolSpec] = field(default_factory=dict)
+    _generation: int = 0
+    _list_cache: dict[tuple[str, str, bool, int], tuple[ToolSpec, ...]] = field(
+        default_factory=dict
+    )
+
+    @property
+    def generation(self) -> int:
+        return self._generation
+
+    def _invalidate(self) -> None:
+        self._generation += 1
+        self._list_cache.clear()
 
     def register(self, spec: ToolSpec) -> None:
         if not spec.name:
@@ -99,6 +111,7 @@ class ToolRegistry:
             if spec.preview_handler is None or spec.execute_handler is None:
                 raise ValueError(f"write tool {spec.name} requires preview and execute handlers")
         self._tools[spec.name] = spec
+        self._invalidate()
 
     def get(self, name: str) -> ToolSpec | None:
         return self._tools.get(name)
@@ -106,7 +119,10 @@ class ToolRegistry:
     def unregister(self, name: str) -> bool:
         """移除动态工具；不存在时返回 False。"""
 
-        return self._tools.pop(str(name), None) is not None
+        removed = self._tools.pop(str(name), None) is not None
+        if removed:
+            self._invalidate()
+        return removed
 
     def list_all(self) -> list[ToolSpec]:
         return list(self._tools.values())
@@ -118,6 +134,10 @@ class ToolRegistry:
         role: str,
         read_only_only: bool = False,
     ) -> list[ToolSpec]:
+        cache_key = (channel, role, bool(read_only_only), self._generation)
+        cached = self._list_cache.get(cache_key)
+        if cached is not None:
+            return list(cached)
         out: list[ToolSpec] = []
         for spec in self._tools.values():
             if not spec.available:
@@ -129,7 +149,9 @@ class ToolRegistry:
             if read_only_only and not spec.read_only:
                 continue
             out.append(spec)
-        return sorted(out, key=lambda s: s.name)
+        result = tuple(sorted(out, key=lambda s: s.name))
+        self._list_cache[cache_key] = result
+        return list(result)
 
     def capabilities(
         self,

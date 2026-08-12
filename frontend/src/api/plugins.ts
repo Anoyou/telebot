@@ -74,6 +74,34 @@ export interface PluginChangelogResponse {
   message?: string | null;
 }
 
+export interface PluginBatchStateResult {
+  enabled: boolean;
+  succeeded: number;
+  failed: number;
+  reloaded_accounts: number;
+  items: Array<{
+    key: string;
+    ok: boolean;
+    code?: string | null;
+    message?: string | null;
+    plugin?: PluginInstallOut | null;
+  }>;
+}
+
+export interface PluginInstallHistoryItem {
+  id: number;
+  plugin_key: string;
+  event_type: "installed" | "updated" | "enabled" | "disabled" | "uninstalled" | string;
+  version?: string | null;
+  previous_version?: string | null;
+  source?: string | null;
+  source_label?: string | null;
+  enabled?: boolean | null;
+  signature_ok?: boolean | null;
+  detail?: string | null;
+  created_at: string;
+}
+
 export async function listInstalledPackages(): Promise<PluginInstallOut[]> {
   const { data } = await api.get<PluginInstallOut[]>(
     "/api/plugins/installed-packages",
@@ -122,6 +150,26 @@ export async function enableInstall(key: string): Promise<PluginInstallOut> {
 export async function disableInstall(key: string): Promise<PluginInstallOut> {
   const { data } = await api.post<PluginInstallOut>(
     `/api/plugins/install/${encodeURIComponent(key)}/disable`,
+  );
+  return data;
+}
+
+export async function batchSetInstallState(
+  keys: string[],
+  enabled: boolean,
+): Promise<PluginBatchStateResult> {
+  const { data } = await api.post<PluginBatchStateResult>(
+    "/api/plugins/install/batch-state",
+    { keys, enabled },
+  );
+  return data;
+}
+
+export async function listPluginInstallHistory(
+  key: string,
+): Promise<PluginInstallHistoryItem[]> {
+  const { data } = await api.get<PluginInstallHistoryItem[]>(
+    `/api/plugins/install/${encodeURIComponent(key)}/history`,
   );
   return data;
 }

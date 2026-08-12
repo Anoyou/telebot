@@ -38,6 +38,8 @@ class _FakeProcess:
 def _clear_supervisor_state() -> None:
     supervisor._WORKERS.clear()
     supervisor._WORKER_LOCKS.clear()
+    supervisor._START_QUEUED.clear()
+    supervisor._STARTING.clear()
 
 
 async def _run_one_monitor_iteration(monkeypatch: pytest.MonkeyPatch, *, now: float) -> None:
@@ -164,3 +166,71 @@ async def test_monitor_resets_failure_count_only_after_stable_window(
     )
 
     assert handle.fail_count == 0
+
+
+@pytest.mark.asyncio
+async def test_start_workers_bounded_deduplicates_and_limits_batches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    active = 0
+    max_active = 0
+    started: list[int] = []
+    release = asyncio.Event()
+
+    async def fake_start(account_id: int) -> None:
+        nonlocal active, max_active
+        started.append(account_id)
+        active += 1
+        max_active = max(max_active, active)
+        if len(started) == 4:
+            release.set()
+        await release.wait()
+        await asyncio.sleep(0)
+        active -= 1
+
+    monkeypatch.setattr(supervisor, "start_worker", fake_start)
+    monkeypatch.setattr(supervisor.asyncio, "sleep", AsyncMock())
+
+    await supervisor._start_workers_bounded([1, 2, 3, 4, 4, 5, 6])  # noqa: SLF001
+
+    assert started == [1, 2, 3, 4, 5, 6]
+    assert max_active <= 4
+    assert supervisor._START_QUEUED == set()
+    assert supervisor._STARTING == set()
+
+
+@pytest.mark.asyncio
+async def test_start_workers_bounded_continues_after_single_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started: list[int] = []
+
+    async def fake_start(account_id: int) -> None:
+        started.append(account_id)
+        if account_id == 2:
+            raise RuntimeError("spawn failed")
+
+    monkeypatch.setattr(supervisor, "start_worker", fake_start)
+    monkeypatch.setattr(supervisor.asyncio, "sleep", AsyncMock())
+
+    await supervisor._start_workers_bounded([1, 2, 3, 4, 5])  # noqa: SLF001
+
+    assert started == [1, 2, 3, 4, 5]
+    assert supervisor._START_QUEUED == set()
+    assert supervisor._STARTING == set()
+
+
+def test_worker_runtime_snapshot_includes_queued_account() -> None:
+    supervisor._START_QUEUED.add(77)
+
+    assert supervisor.get_worker_runtime_snapshot() == [
+        {
+            "account_id": 77,
+            "pid": None,
+            "alive": False,
+            "desired": "running",
+            "fail_count": 0,
+            "queued": True,
+            "starting": False,
+        }
+    ]

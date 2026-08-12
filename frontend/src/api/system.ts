@@ -69,12 +69,33 @@ export interface RuntimeLogQuery {
   plugin_key?: string;
   keyword?: string;
   since?: string;
+  until?: string;
   limit?: number;
 }
 export async function listRuntimeLogs(
   q: RuntimeLogQuery = {},
 ): Promise<RuntimeLogItem[]> {
   const { data } = await api.get<RuntimeLogItem[]>("/api/logs/runtime", {
+    params: q,
+  });
+  return data;
+}
+
+export interface RuntimeLogStats {
+  total: number;
+  debug: number;
+  info: number;
+  warn: number;
+  error: number;
+  by_account: Array<{ key: string; count: number }>;
+  by_source: Array<{ key: string; count: number }>;
+  cached: boolean;
+}
+
+export async function getRuntimeLogStats(
+  q: Omit<RuntimeLogQuery, "limit"> = {},
+): Promise<RuntimeLogStats> {
+  const { data } = await api.get<RuntimeLogStats>("/api/logs/runtime/stats", {
     params: q,
   });
   return data;

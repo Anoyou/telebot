@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Boolean, DateTime, String, Text, func
+from sqlalchemy import BigInteger, Boolean, DateTime, Index, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -75,6 +75,30 @@ class InstalledPlugin(Base):
     )
 
 
+class PluginInstallHistory(Base):
+    """插件安装生命周期事件；卸载后仍保留，供审计与版本对比。"""
+
+    __tablename__ = "plugin_install_history"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    plugin_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    previous_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    source: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    source_label: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    signature_ok: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        Index("ix_plugin_install_history_key_created", "plugin_key", "created_at"),
+    )
+
+
 __all__ = [
     "InstalledPlugin",
     "PLUGIN_SOURCE_BUILTIN",
@@ -89,4 +113,5 @@ __all__ = [
     "PLUGIN_TRUST_ORPHAN",
     "PLUGIN_TRUST_VERIFIED",
     "PluginInstall",
+    "PluginInstallHistory",
 ]

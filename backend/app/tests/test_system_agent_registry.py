@@ -130,6 +130,51 @@ def test_list_for_filters_role_and_channel() -> None:
     assert web_viewer == {"bot.viewer"}
 
 
+def test_list_for_cache_is_invalidated_by_register_and_unregister() -> None:
+    async def _handler(_ctx, _args):  # noqa: ANN001
+        return {}
+
+    reg = ToolRegistry()
+    first = ToolSpec(
+        name="cache.first",
+        description="first",
+        input_schema={"type": "object"},
+        read_only=True,
+        read_handler=_handler,
+    )
+    reg.register(first)
+    generation = reg.generation
+
+    assert [tool.name for tool in reg.list_for(channel="web", role="viewer")] == [
+        "cache.first"
+    ]
+    assert len(reg._list_cache) == 1  # noqa: SLF001
+    assert reg.list_for(channel="web", role="viewer")[0] is first
+    assert len(reg._list_cache) == 1  # noqa: SLF001
+
+    reg.register(
+        ToolSpec(
+            name="cache.second",
+            description="second",
+            input_schema={"type": "object"},
+            read_only=True,
+            read_handler=_handler,
+        )
+    )
+    assert reg.generation == generation + 1
+    assert reg._list_cache == {}  # noqa: SLF001
+    assert [tool.name for tool in reg.list_for(channel="web", role="viewer")] == [
+        "cache.first",
+        "cache.second",
+    ]
+
+    assert reg.unregister("cache.first") is True
+    assert reg.generation == generation + 2
+    assert [tool.name for tool in reg.list_for(channel="web", role="viewer")] == [
+        "cache.second"
+    ]
+
+
 def test_capabilities_marks_unavailable() -> None:
     async def _handler(_ctx, _args):  # noqa: ANN001
         return {}

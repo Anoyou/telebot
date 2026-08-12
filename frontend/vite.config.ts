@@ -196,9 +196,9 @@ export default defineConfig({
     host: true,
     port: 5173,
   },
-  // 把几个偏大的依赖单独拆 chunk：浏览器可缓存命中率更高，
-  // 不会每次首屏都把 echarts/highlight 整个 bundle 下下来。
-  // - echarts：~600KB（已通过 echarts/core 子路径 tree-shaken，但仍偏大）
+  // 把偏大的共享依赖单独拆 chunk：浏览器可缓存命中率更高。
+  // ECharts 由 Ledger 内部动态加载，不在这里用宽泛入口强制聚合，
+  // 以保留 echarts/core 子路径的 tree-shaking。
   // - highlight.js + rehype-highlight：~250KB（仅 Extensions 页用）
   // - react-markdown + remark-gfm：~200KB（同 Extensions 页）
   // - radix-ui 系列：复用率高，单独成块利于 long-term cache
@@ -212,7 +212,6 @@ export default defineConfig({
       maxParallelFileOps: 20,
       output: {
         manualChunks: {
-          echarts: ["echarts/core", "echarts/charts", "echarts/components", "echarts/renderers"],
           "markdown-core": ["react-markdown", "remark-gfm"],
           "markdown-highlight": ["rehype-highlight", "highlight.js"],
           radix: [

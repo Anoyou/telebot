@@ -20,7 +20,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.db.models.feature import FEATURE_STATE_DISABLED, AccountFeature, Feature
-from app.db.models.plugin import InstalledPlugin
+from app.db.models.plugin import InstalledPlugin, PluginInstallHistory
 from app.db.models.plugin_global_config import PluginGlobalConfig
 from app.db.models.plugin_repo import PluginRepo
 from app.db.models.remote_plugin import RemotePlugin
@@ -898,6 +898,7 @@ class _FakeRemotePluginDB:
             "idiom_chain": InstalledPlugin(key="idiom_chain", source="git", enabled=False)
         }
         self.added = []
+        self.install_history: list[PluginInstallHistory] = []
         self.flush_count = 0
 
     async def get(self, model, pk):  # noqa: ANN001
@@ -916,7 +917,10 @@ class _FakeRemotePluginDB:
         return _FakeResult([])
 
     def add(self, row):
-        self.added.append(row)
+        if isinstance(row, PluginInstallHistory):
+            self.install_history.append(row)
+        else:
+            self.added.append(row)
         if isinstance(row, AccountFeature):
             self.account_features.append(row)
 
@@ -1069,6 +1073,7 @@ class TestRemotePluginEnableFlow:
             (1, "idiom_chain", True, FEATURE_STATE_DISABLED),
             (2, "idiom_chain", True, FEATURE_STATE_DISABLED),
         ]
+        assert [event.event_type for event in db.install_history] == ["enabled"]
 
     @pytest.mark.asyncio
     async def test_enable_preserves_existing_account_choices(self):
@@ -1085,6 +1090,7 @@ class TestRemotePluginEnableFlow:
 
         assert db.added == []
         assert existing.enabled is False
+        assert [event.event_type for event in db.install_history] == ["enabled"]
 
     @pytest.mark.asyncio
     async def test_internal_enable_does_not_bootstrap_accounts_by_default(self):
@@ -1095,6 +1101,7 @@ class TestRemotePluginEnableFlow:
 
         assert db.installed_rows["idiom_chain"].enabled is True
         assert db.added == []
+        assert [event.event_type for event in db.install_history] == ["enabled"]
 
     @pytest.mark.asyncio
     async def test_disable_updates_installed_plugin_row(self):

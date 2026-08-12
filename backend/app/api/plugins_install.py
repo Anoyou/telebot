@@ -10,11 +10,11 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
 from ..db.models.account import Account
-from ..db.models.plugin import InstalledPlugin
+from ..db.models.plugin import InstalledPlugin, PluginInstallHistory
 from ..deps import CurrentUser, DBSession
 from ..redis_client import get_redis
 from ..schemas.plugin_center import PluginCenterItem
@@ -49,6 +49,43 @@ class PluginChangelogOut(BaseModel):
     content: str = ""
     truncated: bool = False
     message: str | None = None
+
+
+class PluginBatchStateIn(BaseModel):
+    keys: list[str] = Field(min_length=1, max_length=100)
+    enabled: bool
+
+
+class PluginBatchStateItem(BaseModel):
+    key: str
+    ok: bool
+    code: str | None = None
+    message: str | None = None
+    plugin: PluginInstallOut | None = None
+
+
+class PluginBatchStateOut(BaseModel):
+    enabled: bool
+    succeeded: int
+    failed: int
+    reloaded_accounts: int
+    items: list[PluginBatchStateItem]
+
+
+class PluginInstallHistoryOut(BaseModel):
+    id: int
+    plugin_key: str
+    event_type: str
+    version: str | None = None
+    previous_version: str | None = None
+    source: str | None = None
+    source_label: str | None = None
+    enabled: bool | None = None
+    signature_ok: bool | None = None
+    detail: str | None = None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
 
 
 def _to_out(row: InstalledPlugin) -> PluginInstallOut:
@@ -219,6 +256,78 @@ async def disable_install(
     await db.commit()
     await _broadcast_reload_config(db)
     return _to_out(row)
+
+
+@router.post("/api/plugins/install/batch-state", response_model=PluginBatchStateOut)
+async def batch_install_state(
+    body: PluginBatchStateIn,
+    db: DBSession,
+    user: CurrentUser,
+) -> PluginBatchStateOut:
+    keys = list(dict.fromkeys(key.strip() for key in body.keys if key.strip()))
+    if not keys:
+        raise _bad("PLUGIN_KEYS_REQUIRED", "至少选择一个插件")
+
+    items: list[PluginBatchStateItem] = []
+    for key in keys:
+        try:
+            row = await pis.set_enabled(db, key, body.enabled)
+        except pis.PluginInstallError as exc:
+            items.append(
+                PluginBatchStateItem(
+                    key=key,
+                    ok=False,
+                    code=exc.code,
+                    message=exc.message,
+                )
+            )
+            continue
+        items.append(PluginBatchStateItem(key=key, ok=True, plugin=_to_out(row)))
+
+    succeeded = sum(1 for item in items if item.ok)
+    await audit.write(
+        db,
+        user.id,
+        "plugin.install_batch_enable" if body.enabled else "plugin.install_batch_disable",
+        target="plugins:batch",
+        detail={
+            "keys": keys,
+            "requested": len(keys),
+            "succeeded": succeeded,
+            "failed": len(items) - succeeded,
+        },
+    )
+    await db.commit()
+    reloaded = await _broadcast_reload_config(db) if succeeded else 0
+    return PluginBatchStateOut(
+        enabled=body.enabled,
+        succeeded=succeeded,
+        failed=len(items) - succeeded,
+        reloaded_accounts=reloaded,
+        items=items,
+    )
+
+
+@router.get(
+    "/api/plugins/install/{key}/history",
+    response_model=list[PluginInstallHistoryOut],
+)
+async def get_installed_plugin_history(
+    key: str,
+    db: DBSession,
+    _user: CurrentUser,
+    limit: int = 50,
+) -> list[PluginInstallHistoryOut]:
+    safe_limit = max(1, min(int(limit), 200))
+    rows = (
+        await db.execute(
+            select(PluginInstallHistory)
+            .where(PluginInstallHistory.plugin_key == key)
+            .order_by(PluginInstallHistory.created_at.desc(), PluginInstallHistory.id.desc())
+            .limit(safe_limit)
+        )
+    ).scalars().all()
+    return [PluginInstallHistoryOut.model_validate(row) for row in rows]
 
 
 @router.delete("/api/plugins/install/{key}", status_code=204)

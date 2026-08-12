@@ -58,6 +58,33 @@ def test_parse_exposed_tools_read_only_and_limit() -> None:
     assert any("写语义" in w for w in warnings)
 
 
+def test_parse_exposed_tools_rejects_invalid_draft7_schema() -> None:
+    warnings: list[str] = []
+
+    tools = parse_exposed_tools(
+        "schema_demo",
+        {
+            "capabilities": {"agent_tools": {"enabled": True}},
+            "agent_tools": [
+                {
+                    "name": "lookup",
+                    "description": "查询",
+                    "read_only": True,
+                    "expose": ["system_agent"],
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"value": {"type": "not-a-json-schema-type"}},
+                    },
+                }
+            ],
+        },
+        warnings=warnings,
+    )
+
+    assert tools == []
+    assert any("Draft-07 JSON Schema" in warning for warning in warnings)
+
+
 def test_apply_exposed_registers_dynamic_domain() -> None:
     reg = ToolRegistry()
     # seed a builtin so registry is valid

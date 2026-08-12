@@ -27,7 +27,14 @@ import {
 import { listAccounts } from "@/api/accounts";
 import { getFeatureMatrix } from "@/api/features";
 import { listSystemAgentRuns, type SystemAgentRun } from "@/api/systemAgent";
-import { getEventTrace, getMessageFunel, getSystemSettings, listRuntimeLogs, listSystemConsoleLogs } from "@/api/system";
+import {
+  getEventTrace,
+  getMessageFunel,
+  getRuntimeLogStats,
+  getSystemSettings,
+  listRuntimeLogs,
+  listSystemConsoleLogs,
+} from "@/api/system";
 import type {
   EventActionItem,
   EventProbeReport,
@@ -238,6 +245,7 @@ export function Logs() {
     plugin_key: pluginKey || undefined,
     keyword: debouncedKeyword || undefined,
     since: range.since,
+    until: range.until,
     limit: runtimeLimit,
   };
   const consoleQuery = {
@@ -264,6 +272,15 @@ export function Logs() {
     refetchInterval: autoRefresh ? 5_000 : false,
     enabled: view === "runtime",
   });
+  const runtimeStatsQ = useQuery({
+    queryKey: ["logs", "runtime-stats", runtimeQuery],
+    queryFn: () => {
+      const { limit: _limit, ...filters } = runtimeQuery;
+      return getRuntimeLogStats(filters);
+    },
+    refetchInterval: autoRefresh ? 5_000 : false,
+    enabled: view === "runtime",
+  });
   const systemConsoleQ = useQuery({
     queryKey: ["logs", "system-console", consoleQuery],
     queryFn: () => listSystemConsoleLogs(consoleQuery),
@@ -284,7 +301,14 @@ export function Logs() {
   });
   const selectedMessage = (messagesQ.data ?? []).find((item) => item.trace_id === selectedTraceId);
   const counts = countVerdicts(messagesQ.data ?? []);
-  const runtimeStats = countRuntimeLogs(runtimeLogsQ.data ?? []);
+  const loadedRuntimeStats = countRuntimeLogs(runtimeLogsQ.data ?? []);
+  const runtimeStats = runtimeStatsQ.data ?? {
+    total: runtimeLogsQ.data?.length ?? 0,
+    ...loadedRuntimeStats,
+    by_account: [],
+    by_source: [],
+    cached: false,
+  };
   const agentStats = countAgentRuns(agentRunsQ.data ?? []);
   const pluginOptions = matrixQ.data?.features.map((item) => item.key) ?? [];
   const activeTitle = view === "messages"
@@ -393,7 +417,7 @@ export function Logs() {
             ) : view === "console" ? (
               <SignalPill tone={systemConsoleQ.data?.ok === false ? "warn" : "success"} label="控制台" value={`${systemConsoleQ.data?.lines.length ?? 0} 行`} />
             ) : (
-              <SignalPill tone={runtimeStats.error || runtimeStats.warn ? "warn" : "success"} label="事件" value={`${runtimeLogsQ.data?.length ?? 0} 条`} />
+              <SignalPill tone={runtimeStats.error || runtimeStats.warn ? "warn" : "success"} label="事件" value={`${runtimeStats.total} 条`} />
             )}
           </>
         )}
@@ -789,6 +813,7 @@ export function Logs() {
           timezone={timezone}
           keyword={keyword}
           stats={runtimeStats}
+          statsLoading={runtimeStatsQ.isLoading}
         />
       )}
     </PageShell>
@@ -1234,13 +1259,21 @@ function RuntimeEventStream({
   timezone,
   keyword,
   stats,
+  statsLoading,
 }: {
   logs: RuntimeLogItem[];
   loading: boolean;
   error?: unknown;
   timezone?: string;
   keyword: string;
-  stats: ReturnType<typeof countRuntimeLogs>;
+  stats: {
+    total: number;
+    debug: number;
+    info: number;
+    warn: number;
+    error: number;
+  };
+  statsLoading: boolean;
 }) {
   return (
     <Card>
@@ -1248,7 +1281,7 @@ function RuntimeEventStream({
         <SectionHeader
           icon={Terminal}
           title="运行事件"
-          description="TelePilot 写入数据库的结构化运行事件，点开单行可查看完整详情 JSON。"
+          description={`完整筛选范围共 ${statsLoading ? "…" : stats.total} 条；下方最多显示当前加载的记录，CSV 也只导出当前加载结果。`}
           meta={(
             <div className="flex flex-wrap gap-1.5">
               <SignalPill tone="neutral" label="调试" value={String(stats.debug)} />

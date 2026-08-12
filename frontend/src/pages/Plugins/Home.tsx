@@ -21,10 +21,14 @@ import {
 import { listAccountFeatures } from "@/api/accounts";
 import { getFeatureMatrix } from "@/api/features";
 import { listPluginLLMUsageSummary } from "@/api/llmUsage";
-import { disableInstall, enableInstall, listInstalledPackages } from "@/api/plugins";
+import {
+  batchSetInstallState,
+  listInstalledPackages,
+  listPluginInstallHistory,
+} from "@/api/plugins";
 import { getSystemSettings } from "@/api/system";
 import type { AccountFeatureItem, FeatureInfo } from "@/api/types";
-import type { PluginInstallOut } from "@/api/plugins";
+import type { PluginInstallHistoryItem, PluginInstallOut } from "@/api/plugins";
 import type { PluginLLMUsageSummaryItem } from "@/api/llmUsage";
 import { PageShell } from "@/components/layout/PageScaffold";
 import { Spinner } from "@/components/ui/misc";
@@ -44,9 +48,16 @@ import {
 } from "@/components/ui/card";
 import { Select } from "@/components/ui/select";
 import { Input } from "@/components/ui/input";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { pluginUsageGuideWarning, splitPluginWarnings } from "@/lib/plugin-config-contract";
 import { isPlatformFeature } from "@/lib/plugin-modes";
-import { cn } from "@/lib/utils";
+import { cn, formatDateTime } from "@/lib/utils";
 import {
   compactUsageText,
   pluginContractRiskWarnings,
@@ -205,6 +216,7 @@ export function PluginsHome() {
   const [pluginSearch, setPluginSearch] = useState("");
   const [pluginStatus, setPluginStatus] = useState<PluginStatusFilter>("all");
   const [selectedPluginKeys, setSelectedPluginKeys] = useState<Set<string>>(() => new Set());
+  const [historyPluginKey, setHistoryPluginKey] = useState<string | null>(null);
   const guideActive = searchParams.get("guide") === "1";
   const matrixQ = useQuery({
     queryKey: ["matrix"],
@@ -221,6 +233,11 @@ export function PluginsHome() {
   const pluginUsageQ = useQuery({
     queryKey: ["llm", "plugin-usage-summary"],
     queryFn: () => listPluginLLMUsageSummary({ limit: 200 }),
+  });
+  const pluginHistoryQ = useQuery({
+    queryKey: ["plugins", "install-history", historyPluginKey],
+    queryFn: () => listPluginInstallHistory(historyPluginKey || ""),
+    enabled: Boolean(historyPluginKey),
   });
 
   const accounts = matrixQ.data?.accounts ?? [];
@@ -337,29 +354,24 @@ export function PluginsHome() {
     });
   }, [selectableKeys]);
   const batchInstallMutation = useMutation({
-    mutationFn: async ({ keys, enabled }: { keys: string[]; enabled: boolean }) => {
-      const failed: string[] = [];
-      for (const key of keys) {
-        try {
-          if (enabled) await enableInstall(key);
-          else await disableInstall(key);
-        } catch {
-          failed.push(key);
-        }
-      }
-      return { total: keys.length, failed, enabled };
-    },
-    onSuccess: async ({ total, failed, enabled }) => {
+    mutationFn: ({ keys, enabled }: { keys: string[]; enabled: boolean }) =>
+      batchSetInstallState(keys, enabled),
+    onSuccess: async (result) => {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["plugins", "installed-packages"] }),
         queryClient.invalidateQueries({ queryKey: ["matrix"] }),
         queryClient.invalidateQueries({ queryKey: ["account", selectedAid, "features"] }),
       ]);
       setSelectedPluginKeys(new Set());
-      if (failed.length) {
-        toast.error(`${enabled ? "启用" : "停用"}完成：成功 ${total - failed.length} 个，失败 ${failed.length} 个（${failed.join("、")}）`);
+      if (result.failed) {
+        const failures = result.items
+          .filter((item) => !item.ok)
+          .map((item) => `${item.key}：${item.message || item.code || "未知错误"}`);
+        toast.error(
+          `${result.enabled ? "启用" : "停用"}完成：成功 ${result.succeeded} 个，失败 ${result.failed} 个（${failures.join("；")}）`,
+        );
       } else {
-        toast.success(`已${enabled ? "启用" : "停用"} ${total} 个插件`);
+        toast.success(`已${result.enabled ? "启用" : "停用"} ${result.succeeded} 个插件`);
       }
     },
     onError: (error) => toast.error(error instanceof Error ? error.message : "批量操作失败"),
@@ -650,10 +662,20 @@ export function PluginsHome() {
                 else next.add(key);
                 return next;
               })}
+              onOpenHistory={setHistoryPluginKey}
             />
           </div>
         </CardContent>
       </Card>
+      <PluginInstallHistoryDialog
+        pluginKey={historyPluginKey}
+        history={pluginHistoryQ.data ?? []}
+        loading={pluginHistoryQ.isLoading}
+        error={pluginHistoryQ.error}
+        onOpenChange={(open) => {
+          if (!open) setHistoryPluginKey(null);
+        }}
+      />
     </PageShell>
   );
 }
@@ -840,6 +862,7 @@ function FeatureZone({
   pluginUsageByKey,
   selectedPluginKeys,
   onTogglePluginSelection,
+  onOpenHistory,
 }: {
   icon: ComponentType<{ className?: string }>;
   title: string;
@@ -853,6 +876,7 @@ function FeatureZone({
   pluginUsageByKey: Map<string, PluginLLMUsageSummaryItem>;
   selectedPluginKeys: Set<string>;
   onTogglePluginSelection: (key: string) => void;
+  onOpenHistory: (key: string) => void;
 }) {
   const nav = useNavigate();
   const [mobileExpandedKeys, setMobileExpandedKeys] = useState<Set<string>>(() => new Set());
@@ -1159,6 +1183,18 @@ function FeatureZone({
                           配置
                         </Button>
                       ) : null}
+                      {installByKey.has(f.key) ? (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          className="hidden h-8 justify-self-end px-2.5 sm:inline-flex"
+                          onClick={() => onOpenHistory(f.key)}
+                        >
+                          <History className="mr-1 h-3.5 w-3.5" />
+                          安装历史
+                        </Button>
+                      ) : null}
                     </div>
                     </div>
                   </div>
@@ -1187,6 +1223,19 @@ function FeatureZone({
                         <Pencil className="h-3.5 w-3.5" />
                       </Button>
                     ) : null}
+                    {installByKey.has(f.key) ? (
+                      <Button
+                        type="button"
+                        size="icon"
+                        variant="outline"
+                        className="h-7 w-7 shrink-0"
+                        aria-label={`查看 ${f.display_name} 安装历史`}
+                        title="安装历史"
+                        onClick={() => onOpenHistory(f.key)}
+                      >
+                        <History className="h-3.5 w-3.5" />
+                      </Button>
+                    ) : null}
                   </div>
                   <div className={cn(mobileExpanded ? "block" : "hidden", "sm:block")}><ModuleLintWarnings warnings={lintWarnings} /></div>
                 </div>
@@ -1196,5 +1245,108 @@ function FeatureZone({
         )}
       </CardContent>
     </Card>
+  );
+}
+
+const INSTALL_HISTORY_LABELS: Record<string, string> = {
+  installed: "已安装",
+  updated: "已更新",
+  enabled: "已启用",
+  disabled: "已停用",
+  uninstalled: "已卸载",
+};
+
+function pluginHistorySummary(item: PluginInstallHistoryItem): string {
+  if (item.event_type === "updated" && item.previous_version && item.version) {
+    return `${moduleVersionLabel(item.previous_version)} → ${moduleVersionLabel(item.version)}`;
+  }
+  if (item.version) return moduleVersionLabel(item.version);
+  if (item.enabled != null) return item.enabled ? "全局启用" : "全局停用";
+  return item.source_label || item.source || "状态已记录";
+}
+
+function PluginInstallHistoryDialog({
+  pluginKey,
+  history,
+  loading,
+  error,
+  onOpenChange,
+}: {
+  pluginKey: string | null;
+  history: PluginInstallHistoryItem[];
+  loading: boolean;
+  error?: unknown;
+  onOpenChange: (open: boolean) => void;
+}) {
+  return (
+    <Dialog open={Boolean(pluginKey)} onOpenChange={onOpenChange}>
+      <DialogContent className="w-[calc(100vw-2rem)] max-w-xl rounded-xl">
+        <DialogHeader>
+          <DialogTitle className="flex min-w-0 items-center gap-2 text-base">
+            <History className="h-4 w-4 shrink-0" />
+            <span className="truncate">安装历史 · {pluginKey}</span>
+          </DialogTitle>
+          <DialogDescription>
+            记录安装、更新和全局启停变化；卸载后历史仍会保留。
+          </DialogDescription>
+        </DialogHeader>
+        {loading ? (
+          <div className="flex min-h-40 items-center justify-center text-sm text-muted-foreground">
+            <Spinner className="mr-2 h-4 w-4" /> 正在读取历史
+          </div>
+        ) : error ? (
+          <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-3 text-sm text-destructive">
+            安装历史加载失败，请稍后重试。
+          </div>
+        ) : history.length === 0 ? (
+          <div className="rounded-md border bg-muted/20 px-3 py-8 text-center text-sm text-muted-foreground">
+            暂无安装历史；后续安装、更新或启停操作会从这里开始记录。
+          </div>
+        ) : (
+          <div className="max-h-[60vh] space-y-0 overflow-y-auto pr-1">
+            {history.map((item, index) => (
+              <div key={item.id} className="relative grid grid-cols-[1.25rem_minmax(0,1fr)] gap-3 pb-4">
+                {index < history.length - 1 ? (
+                  <span className="absolute bottom-0 left-[0.35rem] top-3 w-px bg-border" />
+                ) : null}
+                <span className="relative mt-1 h-3 w-3 rounded-full border-2 border-background bg-primary shadow-sm" />
+                <div className="min-w-0 rounded-md border bg-muted/20 px-3 py-2.5">
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="text-sm font-medium">
+                        {INSTALL_HISTORY_LABELS[item.event_type] || item.event_type}
+                      </div>
+                      <div className="mt-0.5 break-words font-mono text-xs text-muted-foreground">
+                        {pluginHistorySummary(item)}
+                      </div>
+                    </div>
+                    <time className="shrink-0 text-xs text-muted-foreground">
+                      {formatDateTime(item.created_at)}
+                    </time>
+                  </div>
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {item.source_label || item.source ? (
+                      <MetaBadge tone="outline">
+                        来源：{item.source_label || item.source}
+                      </MetaBadge>
+                    ) : null}
+                    {item.signature_ok != null ? (
+                      <MetaBadge tone={item.signature_ok ? "success" : "danger"}>
+                        {item.signature_ok ? "签名通过" : "签名失败"}
+                      </MetaBadge>
+                    ) : null}
+                  </div>
+                  {item.detail ? (
+                    <p className="mt-2 break-words text-xs leading-5 text-muted-foreground">
+                      {item.detail}
+                    </p>
+                  ) : null}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </DialogContent>
+    </Dialog>
   );
 }

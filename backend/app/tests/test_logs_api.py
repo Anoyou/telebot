@@ -8,6 +8,7 @@ import pytest
 from app.api import logs as logs_api
 from app.api.logs import (
     EventTraceSummary,
+    get_runtime_log_stats,
     list_event_traces,
     list_log_messages,
     list_runtime_logs,
@@ -149,6 +150,61 @@ class _CaptureDB:
         return _EmptyScalarResult()
 
 
+class _StatsResult:
+    def __init__(self, *, scalar=None, rows=None) -> None:  # noqa: ANN001
+        self._scalar = scalar
+        self._rows = list(rows or [])
+
+    def scalar_one(self):  # noqa: ANN201
+        return self._scalar
+
+    def all(self) -> list:
+        return list(self._rows)
+
+
+class _StatsDB:
+    def __init__(self) -> None:
+        self.statements: list[str] = []
+
+    async def execute(self, stmt):  # noqa: ANN001, ANN201
+        sql = str(stmt)
+        self.statements.append(sql)
+        call = len(self.statements)
+        if call == 1:
+            return _StatsResult(scalar=8)
+        if call == 2:
+            return _StatsResult(
+                rows=[
+                    ("info", 2),
+                    ("warning", 2),
+                    ("error", 1),
+                    ("custom", 3),
+                ]
+            )
+        if call == 3:
+            return _StatsResult(rows=[(1, 5), (None, 3)])
+        return _StatsResult(rows=[("plugin", 6), (None, 2)])
+
+
+class _FakeRedis:
+    def __init__(self, cached: str | None = None, *, fail: bool = False) -> None:
+        self.cached = cached
+        self.fail = fail
+        self.keys: list[str] = []
+        self.writes: list[tuple[str, int, str]] = []
+
+    async def get(self, key: str) -> str | None:
+        self.keys.append(key)
+        if self.fail:
+            raise ConnectionError("redis unavailable")
+        return self.cached
+
+    async def setex(self, key: str, ttl: int, value: str) -> None:
+        if self.fail:
+            raise ConnectionError("redis unavailable")
+        self.writes.append((key, ttl, value))
+
+
 class _ListScalarResult:
     def __init__(self, rows):
         self._rows = rows
@@ -218,6 +274,91 @@ async def test_list_runtime_logs_filters_by_keyword() -> None:
     assert "runtime_log.level" in sql
     assert "runtime_log.source" in sql
     assert "runtime_log.detail" in sql
+
+
+@pytest.mark.asyncio
+async def test_runtime_log_stats_counts_unknown_levels_without_exposing_keyword(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = _StatsDB()
+    redis = _FakeRedis()
+    monkeypatch.setattr(logs_api, "get_redis", lambda: redis)
+
+    result = await get_runtime_log_stats(
+        db=db,
+        _user=object(),
+        account_id=None,
+        level=None,
+        plugin_key=None,
+        keyword="private-search-value",
+        source=None,
+        since=None,
+        until=None,
+    )
+
+    assert result.total == 8
+    assert (result.info, result.warn, result.error) == (2, 2, 1)
+    assert result.by_account[1].key == "system"
+    assert result.by_source[1].key == "unknown"
+    assert len(db.statements) == 4
+    assert redis.writes[0][1] == 20
+    assert "private-search-value" not in redis.keys[0]
+
+
+@pytest.mark.asyncio
+async def test_runtime_log_stats_uses_cached_aggregate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cached = logs_api.RuntimeLogStatsOut(
+        total=3,
+        debug=0,
+        info=3,
+        warn=0,
+        error=0,
+    ).model_dump_json()
+    redis = _FakeRedis(cached)
+    db = _StatsDB()
+    monkeypatch.setattr(logs_api, "get_redis", lambda: redis)
+
+    result = await get_runtime_log_stats(
+        db=db,
+        _user=object(),
+        account_id=7,
+        level=None,
+        plugin_key=None,
+        keyword=None,
+        source=None,
+        since=None,
+        until=None,
+    )
+
+    assert result.total == 3
+    assert result.cached is True
+    assert db.statements == []
+
+
+@pytest.mark.asyncio
+async def test_runtime_log_stats_falls_back_when_redis_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = _StatsDB()
+    monkeypatch.setattr(logs_api, "get_redis", lambda: _FakeRedis(fail=True))
+
+    result = await get_runtime_log_stats(
+        db=db,
+        _user=object(),
+        account_id=None,
+        level=None,
+        plugin_key=None,
+        keyword=None,
+        source="plugin",
+        since=None,
+        until=None,
+    )
+
+    assert result.total == 8
+    assert result.cached is False
+    assert len(db.statements) == 4
 
 
 @pytest.mark.asyncio

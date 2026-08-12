@@ -61,6 +61,8 @@ class RuntimeLog(Base):
     __table_args__ = (
         Index("ix_runtime_log_account_ts", "account_id", "ts"),
         Index("ix_runtime_log_account_level_ts", "account_id", "level", "ts"),
+        Index("ix_runtime_log_source_ts", "source", "ts"),
+        Index("ix_runtime_log_account_source_ts", "account_id", "source", "ts"),
     )
 
 

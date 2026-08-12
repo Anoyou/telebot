@@ -18,7 +18,10 @@ function stringifyCsvValue(value: unknown): string {
 
 function escapeCsvCell(value: unknown): string {
   let text = stringifyCsvValue(value);
-  if (/^[=+\-@\t\r]/.test(text)) text = `'${text}`;
+  // 表格软件可能忽略前导空白再解释公式，覆盖常见 ASCII 与 Unicode 空白。
+  if (/^[\s\u00a0\u2000-\u200b\u2028\u2029\u202f\u205f\u3000]*[=+\-@]/u.test(text)) {
+    text = `'${text}`;
+  }
   return `"${text.replaceAll('"', '""')}"`;
 }
 

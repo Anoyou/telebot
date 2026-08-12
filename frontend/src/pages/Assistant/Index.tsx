@@ -292,8 +292,10 @@ export function AssistantIndex() {
   const sessionsQ = useQuery({
     queryKey: ["system-agent", "sessions"],
     queryFn: () => listSystemAgentSessions({ status: "active", include_bot: true, limit: 100 }),
-    staleTime: 30_000,
-    refetchInterval: assistantCollapsed ? false : 30_000,
+    // 本地操作与 Durable Run 事件会显式失效该查询；低频同步仅用于
+    // 发现 Bot / 定时任务从其他入口创建的会话。
+    staleTime: Infinity,
+    refetchInterval: assistantCollapsed ? 60_000 : 30_000,
     refetchOnWindowFocus: "always",
   });
   const meQ = useQuery({
@@ -308,7 +310,7 @@ export function AssistantIndex() {
     refetchInterval: (query) => {
       const runs = Array.isArray(query.state.data) ? query.state.data : [];
       const active = runs.some((run) => openRun(run));
-      if (assistantCollapsed) return active ? 5_000 : false;
+      if (assistantCollapsed) return active ? 5_000 : 45_000;
       return active ? 2_000 : 15_000;
     },
     refetchOnWindowFocus: "always",
@@ -319,7 +321,7 @@ export function AssistantIndex() {
     staleTime: 2_000,
     refetchInterval: (query) => {
       const queue = Array.isArray(query.state.data) ? query.state.data : [];
-      if (assistantCollapsed) return queue.length ? 5_000 : false;
+      if (assistantCollapsed) return queue.length ? 5_000 : 45_000;
       return queue.length ? 2_000 : 15_000;
     },
     refetchOnWindowFocus: "always",
