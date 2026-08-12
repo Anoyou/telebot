@@ -88,6 +88,25 @@ class TestRemotePluginSecurity:
             svc._read_plugin_metadata(plugin_dir, fallback_name="bad")
         assert ex.value.code == "PLUGIN_JSON_NOT_FOUND"
 
+    def test_install_phase_rejects_invalid_config_schema(self, tmp_path):
+        plugin_dir = tmp_path / "bad_schema"
+        plugin_dir.mkdir(parents=True)
+        (plugin_dir / "plugin.json").write_text(
+            """
+            {
+              "name": "bad_schema",
+              "version": "1.0.0",
+              "config_schema": {
+                "type": "definitely-not-a-json-schema-type"
+              }
+            }
+            """,
+            encoding="utf-8",
+        )
+
+        with pytest.raises(svc.InvalidPluginMetadata, match="config_schema"):
+            svc._read_plugin_metadata(plugin_dir, fallback_name="bad_schema")
+
     def test_metadata_lint_warns_hardcoded_command_prefix_without_executing_manifest(self, tmp_path, monkeypatch):
         """安装/更新阶段静态 lint 能提示硬编码逗号前缀，且不执行 manifest.py。"""
         import os as _os

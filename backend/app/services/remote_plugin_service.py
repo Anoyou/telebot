@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
+from jsonschema import Draft7Validator
 from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -252,6 +253,20 @@ class PluginMetadataSchema(BaseModel):
             raise ValueError("category 只能是 interactive / automation / utility")
         return value
 
+    @field_validator("config_schema")
+    @classmethod
+    def _validate_config_schema(
+        cls,
+        value: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if value is None:
+            return None
+        try:
+            Draft7Validator.check_schema(value)
+        except Exception as exc:
+            raise ValueError(f"config_schema 不是有效的 JSON Schema: {exc}") from exc
+        return value
+
     @field_validator("agent_tools")
     @classmethod
     def _validate_agent_tools(cls, value: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -266,6 +281,12 @@ class PluginMetadataSchema(BaseModel):
             parameters = raw.get("parameters")
             if not isinstance(parameters, dict) or parameters.get("type") != "object":
                 raise ValueError(f"agent_tools[{index}].parameters 必须是 type=object 的 JSON Schema")
+            try:
+                Draft7Validator.check_schema(parameters)
+            except Exception as exc:
+                raise ValueError(
+                    f"agent_tools[{index}].parameters 不是有效的 JSON Schema: {exc}"
+                ) from exc
             if "read_only" in raw and not isinstance(raw.get("read_only"), bool):
                 raise ValueError(f"agent_tools[{index}].read_only 必须是布尔值")
             if "strict" in raw and not isinstance(raw.get("strict"), bool):

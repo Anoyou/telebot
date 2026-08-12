@@ -21,6 +21,7 @@ import {
   Terminal,
   Workflow,
   XCircle,
+  Download,
 } from "lucide-react";
 
 import { listAccounts } from "@/api/accounts";
@@ -58,6 +59,7 @@ import { Select } from "@/components/ui/select";
 import { SectionHeader, SignalPill } from "@/components/ui/status";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { downloadCsv } from "@/lib/csv";
 import { cn, formatDateTime } from "@/lib/utils";
 
 type LogView = "messages" | "agent" | "console" | "runtime";
@@ -299,6 +301,80 @@ export function Logs() {
     : view === "console"
       ? "查看 Docker / stdout / stderr 级别的原始系统日志，适合排查服务启动、异常堆栈和部署输出。"
       : "查看 TelePilot 写入数据库的结构化运行事件，适合按插件、账号、等级和 JSON 详情排查。";
+  const exportCurrentView = () => {
+    const date = new Date().toISOString().slice(0, 10);
+    if (view === "messages") {
+      const rows = messagesQ.data ?? [];
+      if (!rows.length) return toast.info("当前没有可导出的消息日志");
+      downloadCsv(`telepilot-messages-${date}.csv`, rows, [
+        { header: "开始时间", value: (row) => row.started_at },
+        { header: "Trace ID", value: (row) => row.trace_id },
+        { header: "账号 ID", value: (row) => row.account_id },
+        { header: "来源", value: (row) => row.source_channel },
+        { header: "事件类型", value: (row) => row.event_type },
+        { header: "会话 ID", value: (row) => row.chat_id },
+        { header: "消息 ID", value: (row) => row.message_id },
+        { header: "发送者 ID", value: (row) => row.sender_user_id },
+        { header: "发送者", value: (row) => row.sender_name },
+        { header: "消息预览", value: (row) => row.text_preview },
+        { header: "结果", value: (row) => row.verdict },
+        { header: "原因代码", value: (row) => row.reason_code },
+        { header: "原因", value: (row) => row.reason_text },
+        { header: "下一步", value: (row) => row.next_step },
+        { header: "插件", value: (row) => row.plugin_keys },
+        { header: "耗时 ms", value: (row) => row.duration_ms },
+      ]);
+      toast.success(`已导出当前加载的 ${rows.length} 条消息日志`);
+      return;
+    }
+    if (view === "agent") {
+      const rows = agentRunsQ.data ?? [];
+      if (!rows.length) return toast.info("当前没有可导出的 Agent 运行记录");
+      downloadCsv(`telepilot-agent-runs-${date}.csv`, rows, [
+        { header: "创建时间", value: (row) => row.created_at },
+        { header: "Run ID", value: (row) => row.run_id },
+        { header: "会话 ID", value: (row) => row.session_id },
+        { header: "渠道", value: (row) => row.channel },
+        { header: "类型", value: (row) => row.kind },
+        { header: "状态", value: (row) => row.status },
+        { header: "阶段", value: (row) => row.phase },
+        { header: "耗时 ms", value: (row) => row.elapsed_ms },
+        { header: "错误代码", value: (row) => row.error_code },
+        { header: "错误信息", value: (row) => row.error_message },
+        { header: "用量", value: (row) => row.usage },
+      ]);
+      toast.success(`已导出当前加载的 ${rows.length} 条 Agent 运行记录`);
+      return;
+    }
+    if (view === "console") {
+      const lines = systemConsoleQ.data?.lines ?? [];
+      if (!lines.length) return toast.info("当前没有可导出的控制台日志");
+      const rows = lines.map((line, index) => ({
+        lineNumber: index + 1,
+        source: systemConsoleQ.data?.source || consoleService,
+        line,
+      }));
+      downloadCsv(`telepilot-console-${date}.csv`, rows, [
+        { header: "序号", value: (row) => row.lineNumber },
+        { header: "来源", value: (row) => row.source },
+        { header: "日志", value: (row) => row.line },
+      ]);
+      toast.success(`已导出当前加载的 ${rows.length} 行控制台日志`);
+      return;
+    }
+    const rows = runtimeLogsQ.data ?? [];
+    if (!rows.length) return toast.info("当前没有可导出的运行事件");
+    downloadCsv(`telepilot-runtime-${date}.csv`, rows, [
+      { header: "时间", value: (row) => row.created_at },
+      { header: "ID", value: (row) => row.id },
+      { header: "账号 ID", value: (row) => row.account_id },
+      { header: "等级", value: (row) => row.level },
+      { header: "来源", value: (row) => row.source },
+      { header: "消息", value: (row) => row.message },
+      { header: "详情", value: (row) => row.detail },
+    ]);
+    toast.success(`已导出当前加载的 ${rows.length} 条运行事件`);
+  };
 
   return (
     <PageShell>
@@ -322,20 +398,26 @@ export function Logs() {
           </>
         )}
         actions={(
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={() => {
-              if (view === "messages") messagesQ.refetch();
-              else if (view === "agent") agentRunsQ.refetch();
-              else if (view === "console") systemConsoleQ.refetch();
-              else runtimeLogsQ.refetch();
-            }}
-          >
-            <RefreshCw className="mr-1.5 h-4 w-4" />
-            刷新
-          </Button>
+          <>
+            <Button type="button" variant="outline" size="sm" onClick={exportCurrentView}>
+              <Download className="mr-1.5 h-4 w-4" />
+              导出当前结果
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                if (view === "messages") messagesQ.refetch();
+                else if (view === "agent") agentRunsQ.refetch();
+                else if (view === "console") systemConsoleQ.refetch();
+                else runtimeLogsQ.refetch();
+              }}
+            >
+              <RefreshCw className="mr-1.5 h-4 w-4" />
+              刷新
+            </Button>
+          </>
         )}
       />
 

@@ -1,6 +1,6 @@
 import { type ComponentType, useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
   AlertTriangle,
@@ -12,6 +12,7 @@ import {
   Package2,
   Package,
   Pencil,
+  Search,
   Settings2,
   Sparkles,
   Zap,
@@ -20,7 +21,7 @@ import {
 import { listAccountFeatures } from "@/api/accounts";
 import { getFeatureMatrix } from "@/api/features";
 import { listPluginLLMUsageSummary } from "@/api/llmUsage";
-import { listInstalledPackages } from "@/api/plugins";
+import { disableInstall, enableInstall, listInstalledPackages } from "@/api/plugins";
 import { getSystemSettings } from "@/api/system";
 import type { AccountFeatureItem, FeatureInfo } from "@/api/types";
 import type { PluginInstallOut } from "@/api/plugins";
@@ -42,6 +43,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Select } from "@/components/ui/select";
+import { Input } from "@/components/ui/input";
 import { pluginUsageGuideWarning, splitPluginWarnings } from "@/lib/plugin-config-contract";
 import { isPlatformFeature } from "@/lib/plugin-modes";
 import { cn } from "@/lib/utils";
@@ -64,6 +66,7 @@ import { PluginWorkspaceHeader } from "./WorkspaceHeader";
 
 type ModuleCategory = "direct_passthrough" | "interactive" | "automation" | "utility";
 type ModuleCategoryFilter = "all" | ModuleCategory;
+type PluginStatusFilter = "all" | "enabled" | "disabled" | "failed";
 const CATEGORY_META: Record<ModuleCategory, { title: string; hint: string; icon: ComponentType<{ className?: string }> }> = {
   direct_passthrough: {
     title: "裸直通",
@@ -193,11 +196,15 @@ function formatCompactNumber(value: number) {
 
 export function PluginsHome() {
   const nav = useNavigate();
+  const queryClient = useQueryClient();
   const [searchParams] = useSearchParams();
   const [selectedAid, setSelectedAid] = useState<number | null>(null);
   const [guideExpanded, setGuideExpanded] = useState(false);
   const [aiPanelExpanded, setAiPanelExpanded] = useState(false);
   const [selectedCategory, setSelectedCategory] = useState<ModuleCategoryFilter>("all");
+  const [pluginSearch, setPluginSearch] = useState("");
+  const [pluginStatus, setPluginStatus] = useState<PluginStatusFilter>("all");
+  const [selectedPluginKeys, setSelectedPluginKeys] = useState<Set<string>>(() => new Set());
   const guideActive = searchParams.get("guide") === "1";
   const matrixQ = useQuery({
     queryKey: ["matrix"],
@@ -295,6 +302,75 @@ export function PluginsHome() {
   const visibleCategoryFeatures = selectedCategory === "all"
     ? pluginFeatures
     : grouped[selectedCategory];
+  const filteredFeatures = useMemo(() => {
+    const keyword = pluginSearch.trim().toLocaleLowerCase();
+    return visibleCategoryFeatures.filter((feature) => {
+      const install = installByKey.get(feature.key);
+      const accountStatus = selectedAccount?.features?.[feature.key] ?? "disabled";
+      if (pluginStatus === "enabled" && install?.enabled !== true) return false;
+      if (pluginStatus === "disabled" && install?.enabled !== false) return false;
+      if (pluginStatus === "failed" && accountStatus !== "failed") return false;
+      if (!keyword) return true;
+      return [
+        feature.key,
+        feature.display_name,
+        feature.usage,
+        feature.category,
+        feature.source_label,
+      ].some((value) => String(value || "").toLocaleLowerCase().includes(keyword));
+    });
+  }, [
+    installByKey,
+    pluginSearch,
+    pluginStatus,
+    selectedAccount?.features,
+    visibleCategoryFeatures,
+  ]);
+  const selectableKeys = useMemo(
+    () => filteredFeatures.filter((feature) => installByKey.has(feature.key)).map((feature) => feature.key),
+    [filteredFeatures, installByKey],
+  );
+  useEffect(() => {
+    setSelectedPluginKeys((current) => {
+      const next = new Set(Array.from(current).filter((key) => selectableKeys.includes(key)));
+      return next.size === current.size ? current : next;
+    });
+  }, [selectableKeys]);
+  const batchInstallMutation = useMutation({
+    mutationFn: async ({ keys, enabled }: { keys: string[]; enabled: boolean }) => {
+      const failed: string[] = [];
+      for (const key of keys) {
+        try {
+          if (enabled) await enableInstall(key);
+          else await disableInstall(key);
+        } catch {
+          failed.push(key);
+        }
+      }
+      return { total: keys.length, failed, enabled };
+    },
+    onSuccess: async ({ total, failed, enabled }) => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["plugins", "installed-packages"] }),
+        queryClient.invalidateQueries({ queryKey: ["matrix"] }),
+        queryClient.invalidateQueries({ queryKey: ["account", selectedAid, "features"] }),
+      ]);
+      setSelectedPluginKeys(new Set());
+      if (failed.length) {
+        toast.error(`${enabled ? "启用" : "停用"}完成：成功 ${total - failed.length} 个，失败 ${failed.length} 个（${failed.join("、")}）`);
+      } else {
+        toast.success(`已${enabled ? "启用" : "停用"} ${total} 个插件`);
+      }
+    },
+    onError: (error) => toast.error(error instanceof Error ? error.message : "批量操作失败"),
+  });
+  const runBatchInstallAction = (enabled: boolean) => {
+    const keys = Array.from(selectedPluginKeys);
+    if (!keys.length) return toast.info("请先选择插件");
+    const action = enabled ? "全局启用" : "全局停用";
+    if (!window.confirm(`${action}所选 ${keys.length} 个插件？账号级配置不会被覆盖。`)) return;
+    batchInstallMutation.mutate({ keys, enabled });
+  };
   const visibleCategoryMeta = selectedCategory === "all"
     ? { title: "全部已安装插件", hint: "默认展示当前已安装的全部插件，可从分类栏进一步筛选。", icon: Package2 }
     : CATEGORY_META[selectedCategory];
@@ -466,6 +542,59 @@ export function PluginsHome() {
               </Button>
             </div>
           ) : null}
+          <div className="grid gap-2 rounded-lg border bg-muted/20 p-3 sm:grid-cols-[minmax(0,1fr)_160px_auto] sm:items-end">
+            <label className="space-y-1.5 text-sm">
+              <span className="text-muted-foreground">全局搜索</span>
+              <span className="relative block">
+                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  value={pluginSearch}
+                  onChange={(event) => setPluginSearch(event.target.value)}
+                  placeholder="搜索名称、key、用途或分类"
+                  className="pl-9"
+                />
+              </span>
+            </label>
+            <label className="space-y-1.5 text-sm">
+              <span className="text-muted-foreground">状态</span>
+              <Select value={pluginStatus} onChange={(event) => setPluginStatus(event.target.value as PluginStatusFilter)}>
+                <option value="all">全部状态</option>
+                <option value="enabled">全局已启用</option>
+                <option value="disabled">全局已停用</option>
+                <option value="failed">当前账号异常</option>
+              </Select>
+            </label>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={!selectableKeys.length || batchInstallMutation.isPending}
+                onClick={() => setSelectedPluginKeys((current) => (
+                  current.size === selectableKeys.length ? new Set() : new Set(selectableKeys)
+                ))}
+              >
+                {selectedPluginKeys.size === selectableKeys.length && selectableKeys.length ? "取消全选" : "选择当前结果"}
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                disabled={!selectedPluginKeys.size || batchInstallMutation.isPending}
+                onClick={() => runBatchInstallAction(true)}
+              >
+                全局启用（{selectedPluginKeys.size}）
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={!selectedPluginKeys.size || batchInstallMutation.isPending}
+                onClick={() => runBatchInstallAction(false)}
+              >
+                全局停用
+              </Button>
+            </div>
+          </div>
           <div
             data-plugin-category-layout
             className="grid min-w-0 gap-4 lg:grid-cols-[8.5rem_minmax(0,1fr)] lg:items-start"
@@ -507,13 +636,20 @@ export function PluginsHome() {
               icon={visibleCategoryMeta.icon}
               title={visibleCategoryMeta.title}
               hint={visibleCategoryMeta.hint}
-              features={visibleCategoryFeatures}
+              features={filteredFeatures}
               selectedAccountId={selectedAccount?.id}
               selectedFeatures={selectedAccount?.features ?? {}}
               selectedFeatureEnabled={selectedAccount?.feature_enabled ?? {}}
               accountFeatureByKey={accountFeatureByKey}
               installByKey={installByKey}
               pluginUsageByKey={pluginUsageByKey}
+              selectedPluginKeys={selectedPluginKeys}
+              onTogglePluginSelection={(key) => setSelectedPluginKeys((current) => {
+                const next = new Set(current);
+                if (next.has(key)) next.delete(key);
+                else next.add(key);
+                return next;
+              })}
             />
           </div>
         </CardContent>
@@ -702,6 +838,8 @@ function FeatureZone({
   accountFeatureByKey,
   installByKey,
   pluginUsageByKey,
+  selectedPluginKeys,
+  onTogglePluginSelection,
 }: {
   icon: ComponentType<{ className?: string }>;
   title: string;
@@ -713,6 +851,8 @@ function FeatureZone({
   accountFeatureByKey: Map<string, AccountFeatureItem>;
   installByKey: Map<string, PluginInstallOut>;
   pluginUsageByKey: Map<string, PluginLLMUsageSummaryItem>;
+  selectedPluginKeys: Set<string>;
+  onTogglePluginSelection: (key: string) => void;
 }) {
   const nav = useNavigate();
   const [mobileExpandedKeys, setMobileExpandedKeys] = useState<Set<string>>(() => new Set());
@@ -819,6 +959,20 @@ function FeatureZone({
                           : "bg-yellow-400",
                     )}
                   />
+                  {installByKey.has(f.key) ? (
+                    <label
+                      className="absolute left-2 top-2.5 z-10 flex h-6 w-6 cursor-pointer items-center justify-center rounded border bg-background/90"
+                      title="选择用于全局批量启停"
+                    >
+                      <input
+                        type="checkbox"
+                        className="h-4 w-4 accent-primary"
+                        checked={selectedPluginKeys.has(f.key)}
+                        onChange={() => onTogglePluginSelection(f.key)}
+                        aria-label={`选择插件 ${f.display_name}`}
+                      />
+                    </label>
+                  ) : null}
                   <MetaBadge
                     mono
                     tone="outline"
@@ -830,7 +984,7 @@ function FeatureZone({
                   </MetaBadge>
                   <div className="min-w-0">
                     <div className="flex min-w-0 flex-col gap-1.5 sm:flex-row sm:items-start sm:justify-between sm:gap-2">
-                      <div className="min-w-0 pr-14 sm:pr-0">
+                      <div className={cn("min-w-0 pr-14 sm:pr-0", installByKey.has(f.key) && "pl-8")}>
                         <div className="flex min-w-0 items-start gap-1">
                           <button
                             type="button"

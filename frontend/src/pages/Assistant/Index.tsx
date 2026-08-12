@@ -292,7 +292,8 @@ export function AssistantIndex() {
   const sessionsQ = useQuery({
     queryKey: ["system-agent", "sessions"],
     queryFn: () => listSystemAgentSessions({ status: "active", include_bot: true, limit: 100 }),
-    refetchInterval: assistantCollapsed ? false : 3_000,
+    staleTime: 30_000,
+    refetchInterval: assistantCollapsed ? false : 30_000,
     refetchOnWindowFocus: "always",
   });
   const meQ = useQuery({
@@ -303,13 +304,24 @@ export function AssistantIndex() {
   const runsQ = useQuery({
     queryKey: ["system-agent", "runs", "task-center"],
     queryFn: () => listSystemAgentRuns({ limit: 100, include_bot: true }),
-    refetchInterval: assistantCollapsed ? 5_000 : 2_000,
+    staleTime: 2_000,
+    refetchInterval: (query) => {
+      const runs = Array.isArray(query.state.data) ? query.state.data : [];
+      const active = runs.some((run) => openRun(run));
+      if (assistantCollapsed) return active ? 5_000 : false;
+      return active ? 2_000 : 15_000;
+    },
     refetchOnWindowFocus: "always",
   });
   const queueQ = useQuery({
     queryKey: ["system-agent", "queue"],
     queryFn: () => listSystemAgentQueue({ include_bot: true }),
-    refetchInterval: assistantCollapsed ? 5_000 : 2_000,
+    staleTime: 2_000,
+    refetchInterval: (query) => {
+      const queue = Array.isArray(query.state.data) ? query.state.data : [];
+      if (assistantCollapsed) return queue.length ? 5_000 : false;
+      return queue.length ? 2_000 : 15_000;
+    },
     refetchOnWindowFocus: "always",
   });
   const sessionOptions = useMemo(
@@ -373,7 +385,8 @@ export function AssistantIndex() {
     queryKey: ["system-agent", "messages", activeId],
     queryFn: () => listSystemAgentMessages(activeId!, { limit: 100 }),
     enabled: !!activeId,
-    refetchInterval: assistantCollapsed || streaming ? false : 3_000,
+    staleTime: hasOpenRun ? 2_000 : 30_000,
+    refetchInterval: assistantCollapsed || streaming ? false : hasOpenRun ? 3_000 : false,
     refetchOnWindowFocus: "always",
   });
   const pendingActionsQ = useQuery({
@@ -381,12 +394,14 @@ export function AssistantIndex() {
     queryFn: () =>
       listSystemAgentActions({ session_id: activeId!, status: "pending", limit: 50 }),
     enabled: !!activeId && !viewingBotSession,
-    refetchInterval: assistantCollapsed && !streaming ? false : 15_000,
+    staleTime: hasOpenRun ? 5_000 : 30_000,
+    refetchInterval: assistantCollapsed || streaming ? false : hasOpenRun ? 5_000 : false,
   });
   const waitingEventsQ = useQuery({
     queryKey: ["system-agent", "run-events", currentRun?.id],
     queryFn: () => listSystemAgentRunEvents(currentRun!.id, 0, 500),
     enabled: currentRun?.status === "waiting_approval",
+    staleTime: Infinity,
     refetchOnMount: "always",
   });
   const waitingApproval = useMemo(() => {

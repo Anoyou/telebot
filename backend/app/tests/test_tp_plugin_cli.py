@@ -164,6 +164,21 @@ def test_check_flags_unknown_events(tmp_path: Path) -> None:
     assert "weird_key" in report.unknown_filter_keys
 
 
+def test_check_reuses_platform_config_schema_validation(tmp_path: Path) -> None:
+    name = "demo_bad_schema"
+    plugin_dir = tmp_path / name
+    tp.scaffold_plugin(name, "command", plugin_dir)
+
+    pj_path = plugin_dir / "plugin.json"
+    data = json.loads(pj_path.read_text(encoding="utf-8"))
+    data["config_schema"] = {"type": "not-a-valid-json-schema-type"}
+    pj_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    report = tp.check_plugin(plugin_dir)
+    assert not report.ok
+    assert any("config_schema" in error for error in report.errors)
+
+
 def test_check_reports_missing_delete_permission(tmp_path: Path, capsys) -> None:
     name = "demo_missing_delete"
     plugin_dir = tmp_path / name
