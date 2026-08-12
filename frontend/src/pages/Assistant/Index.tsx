@@ -292,10 +292,10 @@ export function AssistantIndex() {
   const sessionsQ = useQuery({
     queryKey: ["system-agent", "sessions"],
     queryFn: () => listSystemAgentSessions({ status: "active", include_bot: true, limit: 100 }),
-    // 本地操作与 Durable Run 事件会显式失效该查询；低频同步仅用于
-    // 发现 Bot / 定时任务从其他入口创建的会话。
+    // 本地操作与 Durable Run 事件会显式失效该查询；会话列表打开时
+    // 短周期同步其它设备的新会话，其余状态保持低频，避免长会话反复刷新。
     staleTime: Infinity,
-    refetchInterval: assistantCollapsed ? 60_000 : 30_000,
+    refetchInterval: drawerOpen ? 3_000 : assistantCollapsed ? 60_000 : 30_000,
     refetchOnWindowFocus: "always",
   });
   const meQ = useQuery({
