@@ -64,11 +64,11 @@ TelePilot 的目标架构用一棵树描述。**改造原则：能力皆可组�
    - `apply(preset_key, operator)`：先把当前各开关状态快照存 SystemSetting（`profile_rollback_snapshot`），再落开关、触发收敛、写审计。
    - `restore(operator)`：按快照精确还原。
    - `dry_run(preset_key)`：返回 diff 列表（将改哪些开关、从什么到什么）。
-3. **值守目标态（结果规格，v1.1 修订已拍板）**：`kill_switch=false`，userbot 保持在线；**暂停对全部叶子的事件投递**（直通 / userbot 通道 / 交互 bot 通道三路一律不投）并冻结插件定时任务——从源头掐断一切插件出站（含 `telegram_native_raw` 叶：不投递即不执行，无需逐条封 facade）；平台自身观测落库、日志、告警通知（notify）照常；资金动作零执行由 **T3 枝闸**保证（值守把自己注册为 T3 判定的 deny 原因，故本 WP 依赖 T3 先行）；ai / webhooks / interaction_bot 枝停，dispatch_debug 留。
+3. **值守目标态（结果规格，v1.1 修订已拍板）**：`kill_switch=false`，userbot 保持在线；**暂停对全部叶子的事件投递**（直通 / userbot 通道 / 交互 bot 通道三路一律不投）并冻结插件定时任务——从源头掐断一切插件出站（含 `telegram_native_raw` 叶：不投递即不执行，无需逐条封 facade）；平台自身观测落库、日志、告警通知（notify）照常；资金动作零执行由 **T3 枝闸**保证（值守把自己注册为 T3 判定的 deny 原因，故本 WP 依赖 T3 先行）；ai / webhooks / interaction_bot 枝停，dispatch_debug 留。**v1.1a 裁定（枝关闭优先）**：interaction_bot 按现有模块语义完全停止（polling manager 停；Telegram 侧未取更新由 Bot API 保留、恢复后续取），**不新增"停用但采集"的第三态**；值守期间的实时观测承诺只覆盖树干的眼睛（userbot 来源的直通与命令两路）；交互 bot 盲区必须在进入审计与工作台值守状态卡片中明示。
 4. API：`POST /api/platform/profile/apply|restore|dry-run`、`GET /api/platform/profile`（当前状态与预设精确匹配则显示预设名，否则显示"自定义"）。
 5. 前端：平台能力页加"运行模式"卡片——当前模式、值守一键按钮（确认弹窗内展示 dry-run diff）、恢复按钮。
 
-**验收**：集成测试证明值守下三种嫁接方式的入站消息均被平台观测落库但**零投递到插件、零出站、零 payout**（payout 拒绝断言引用 T3 闸的错误码）；声明 `telegram_native_raw` 的叶在值守下不被调用；恢复后快照逐项还原、投递与定时任务恢复；进入/退出各一条审计（含操作者）；收敛超时有明确失败态而非假成功。
+**验收（v1.1a）**：集成测试证明值守下 userbot 来源两路（直通 / 命令）入站均被平台观测落库但**零投递到插件、零出站、零 payout**（payout 拒绝断言引用 T3 闸的错误码）；交互 bot 通道改为模拟入口验证——update 若抵达 `_handle_interaction_update()`，值守下只观测落库不投递（纵深防御），并断言 manager 已随枝停止；声明 `telegram_native_raw` 的叶在值守下不被调用；恢复后快照逐项还原、投递/定时任务/interaction_bot 采集恢复；进入/退出各一条审计（含操作者，进入审计记录"interaction_bot 采集已停"）；收敛超时有明确失败态而非假成功。
 
 ### WP-T2 接线规范（协议先行，运行时缓行）——预估 2~3 天，可与 T1 并行
 
