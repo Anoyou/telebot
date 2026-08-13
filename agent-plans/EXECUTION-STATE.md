@@ -7,7 +7,7 @@
 ## 当前计划：树形组合化改造 v1.1（agent-plans/2026-08-14-tree-composability-plan.md）
 
 - [x] WP-T2 接线规范 — done `104ddddb`
-- [ ] WP-T3 钱的保险丝 — pending（v1.1 先行，下一单）
+- [x] WP-T3 钱的保险丝 — done `61c87613`
 - [ ] WP-T1 值守预设 — pending（v1.1 裁定：依赖 T3，原 in_progress 会话已转 T3）
 - [ ] WP-T4 声明补齐+按叶点枝+看树视图 — pending
 - [~] WP-T5 AI 写操作工具 — 挂起（扳机：首个真实写工具需求）
