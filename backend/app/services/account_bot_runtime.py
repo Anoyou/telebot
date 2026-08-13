@@ -61,6 +61,7 @@ from . import (
     command_service,
     feature_service,
     remote_plugin_service,
+    runtime_profile_service,
 )
 from .action_tap import (
     ACTION_EVENT_STATUS_FAILED,
@@ -2549,12 +2550,31 @@ async def _handle_update(aid: int, token: str, update: dict[str, Any]) -> None:
 
 
 async def _handle_interaction_update(aid: int, token: str, update: dict[str, Any]) -> None:
-    # 平台能力关闭后，即使遗留 polling task 仍在，也不再处理新更新。
-    if not await _interaction_bot_capability_enabled():
-        return
-
     incoming = _extract_incoming(aid, token, update)
     if incoming is None:
+        return
+    # manager 正常会随枝停止；这里是纵深防御：若遗留 update 抵达，仅强制落 Trace。
+    if runtime_profile_service.is_safe_watch_active_cached(fail_closed=False):
+        trace = await _start_router_trace(
+            incoming, channel="interaction_bot", reason="runtime_profile_safe_watch"
+        )
+        await record_span(
+            trace,
+            "route",
+            TRACE_STATUS_SKIPPED,
+            component="runtime_profile",
+            reason_code="runtime_profile_safe_watch",
+            message="值守模式下 interaction_bot update 仅观测落库，不投递。",
+        )
+        await finish_trace(
+            trace,
+            TRACE_STATUS_SKIPPED,
+            reason_code="runtime_profile_safe_watch",
+        )
+        return
+
+    # 平台能力关闭后，即使遗留 polling task 仍在，也不再处理新更新。
+    if not await _interaction_bot_capability_enabled():
         return
     flags = await _event_framework_flags()
     if (incoming.inline_query_id or incoming.chosen_inline_result_id) and not flags.get("inline_updates_enabled", True):

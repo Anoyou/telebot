@@ -20,7 +20,13 @@ from app.db.models.account_bot import AccountBot
 from app.db.models.log import RuntimeLog
 from app.db.models.system import SystemSetting
 from app.schemas.account_bot import AccountBotConfigUpdate, AccountBotInteractionConfig, AccountBotTestRequest
-from app.services import account_bot_runtime, account_bot_service, audit, platform_capabilities
+from app.services import (
+    account_bot_runtime,
+    account_bot_service,
+    audit,
+    platform_capabilities,
+    runtime_profile_service,
+)
 from app.services.interaction import contracts as interaction_contracts
 from app.services.interaction import userbot_actions
 from app.services.interaction.delivery import (
@@ -119,6 +125,58 @@ class _MemoryRedis:
         for member in members:
             deleted += 1 if bucket.pop(member, None) is not None else 0
         return deleted
+
+
+@pytest.mark.asyncio
+async def test_safe_watch_interaction_update_is_trace_only_depth_guard(monkeypatch) -> None:
+    runtime_profile_service._cache_state(
+        {
+            "active_profile": "safe_watch",
+            "status": "active",
+            "last_error": None,
+            "operator_id": 1,
+            "updated_at": None,
+            "resume_nonce": None,
+        }
+    )
+    trace = SimpleNamespace(trace_id="evt_interaction_safe_watch")
+    start_trace = AsyncMock(return_value=trace)
+    record_span = AsyncMock()
+    finish_trace = AsyncMock()
+    capability = AsyncMock(return_value=True)
+    send = AsyncMock()
+    monkeypatch.setattr(account_bot_runtime, "_start_router_trace", start_trace)
+    monkeypatch.setattr(account_bot_runtime, "record_span", record_span)
+    monkeypatch.setattr(account_bot_runtime, "finish_trace", finish_trace)
+    monkeypatch.setattr(account_bot_runtime, "_interaction_bot_capability_enabled", capability)
+    monkeypatch.setattr(account_bot_runtime, "_send", send)
+    try:
+        await account_bot_runtime._handle_interaction_update(
+            7,
+            "token",
+            {
+                "update_id": 1,
+                "message": {
+                    "message_id": 2,
+                    "chat": {"id": 100, "type": "private"},
+                    "from": {"id": 200, "first_name": "User"},
+                    "text": "/start",
+                },
+            },
+        )
+    finally:
+        runtime_profile_service._reset_for_tests()
+
+    start_trace.assert_awaited_once()
+    capability.assert_not_awaited()
+    send.assert_not_awaited()
+    assert record_span.await_args.args[1] == "route"
+    assert record_span.await_args.kwargs["reason_code"] == "runtime_profile_safe_watch"
+    finish_trace.assert_awaited_once_with(
+        trace,
+        account_bot_runtime.TRACE_STATUS_SKIPPED,
+        reason_code="runtime_profile_safe_watch",
+    )
 
 
 def _allow_interaction_claim(monkeypatch) -> AsyncMock:

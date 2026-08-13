@@ -30,6 +30,7 @@ from .api import notify_bots as notify_bots_api
 from .api import platform_capabilities as platform_capabilities_api
 from .api import proxies as proxies_api
 from .api import rate_limit as rate_limit_api
+from .api import runtime_profiles as runtime_profiles_api
 from .api import sudo as sudo_api
 from .api import system_agent as system_agent_api
 from .api import webhooks as webhooks_api
@@ -42,6 +43,7 @@ from .services import (
     platform_capabilities,
     plugin_config_action_jobs,
     remote_plugin_service,
+    runtime_profile_service,
 )
 from .services.login_service import cleanup_expired_loop
 from .services.system_agent.actions import cleanup_expired_action_secrets_loop
@@ -112,6 +114,10 @@ async def _restore_system_agent_runs(manager=None):
 async def _start_interaction_bot_component() -> object:
     """缓存就绪后才允许启动 Interaction Bot；DB 恢复后可由重试器收敛。"""
 
+    profile = await runtime_profile_service.refresh_state_from_db()
+    if profile.get("active_profile") == "safe_watch":
+        await platform_capabilities.mark_runtime_ready_if_starting("interaction_bot")
+        return 0
     snapshot = platform_capabilities.get_snapshot()
     if not snapshot.cache_ready:
         await platform_capabilities.bootstrap_from_db()
@@ -227,6 +233,9 @@ async def lifespan(app: FastAPI):
         await platform_capabilities.bootstrap_from_db()
     except Exception:  # noqa: BLE001
         logging.exception("预加载平台能力缓存失败；公开入口将 fail-closed 直至缓存就绪")
+
+    # profile 是应急状态，必须先于 supervisor/interaction manager 恢复资金 deny。
+    await runtime_profile_service.startup_restore()
 
     # 启动期加载客户端身份 UA 版本覆盖（system_setting）。失败不阻塞启动。
     try:
@@ -389,6 +398,7 @@ async def lifespan(app: FastAPI):
             await event_trace.stop_trace_writer()
         except Exception:  # noqa: BLE001
             logging.exception("停止 Trace 后台写入器失败")
+        await runtime_profile_service.shutdown()
         for component in _RUNTIME_COMPONENTS:
             _RUNTIME_COMPONENTS[component] = None
         _RUNTIME_COMPONENT_ERRORS.clear()
@@ -542,6 +552,7 @@ app.include_router(ledger_api.router)  # WP5：资金台账接口空桩
 app.include_router(webhooks_api.router)  # WP7：入站 Webhook 接口空桩
 app.include_router(system_agent_api.router)  # System Agent：自然语言系统助手
 app.include_router(platform_capabilities_api.router)  # 平台能力热插拔
+app.include_router(runtime_profiles_api.router)  # 值守运行预设
 
 
 # ── 健康检查 ─────────────────────────────────────────────────────

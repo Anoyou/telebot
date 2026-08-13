@@ -77,3 +77,51 @@ async def test_restore_system_agent_runs_keeps_explicit_manager_on_failure() -> 
         await main._restore_system_agent_runs(manager)
 
     manager.ensure_ready.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_safe_watch_stops_interaction_manager_branch_and_marks_ready(monkeypatch) -> None:
+    monkeypatch.setattr(
+        main.runtime_profile_service,
+        "refresh_state_from_db",
+        AsyncMock(return_value={"active_profile": "safe_watch", "status": "active"}),
+    )
+    start_manager = AsyncMock()
+    mark_ready = AsyncMock()
+    monkeypatch.setattr(
+        main.interaction_bot_runtime, "start_interaction_bot_manager", start_manager
+    )
+    monkeypatch.setattr(
+        main.platform_capabilities, "mark_runtime_ready_if_starting", mark_ready
+    )
+
+    result = await main._start_interaction_bot_component()
+
+    assert result == 0
+    start_manager.assert_not_awaited()
+    mark_ready.assert_awaited_once_with("interaction_bot")
+
+
+@pytest.mark.asyncio
+async def test_production_profile_starts_interaction_manager(monkeypatch) -> None:
+    monkeypatch.setattr(
+        main.runtime_profile_service,
+        "refresh_state_from_db",
+        AsyncMock(return_value={"active_profile": None, "status": "idle"}),
+    )
+    monkeypatch.setattr(
+        main.platform_capabilities,
+        "get_snapshot",
+        lambda: type("Snapshot", (), {"cache_ready": True})(),
+    )
+    monkeypatch.setattr(
+        main.platform_capabilities, "is_module_enabled_cached", lambda *_args, **_kwargs: True
+    )
+    manager = object()
+    start_manager = AsyncMock(return_value=manager)
+    monkeypatch.setattr(
+        main.interaction_bot_runtime, "start_interaction_bot_manager", start_manager
+    )
+
+    assert await main._start_interaction_bot_component() is manager
+    start_manager.assert_awaited_once_with()

@@ -2312,6 +2312,74 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/platform/profile": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Runtime Profile */
+        get: operations["get_runtime_profile_api_platform_profile_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/platform/profile/apply": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Apply Runtime Profile */
+        post: operations["apply_runtime_profile_api_platform_profile_apply_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/platform/profile/dry-run": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Dry Run Runtime Profile */
+        post: operations["dry_run_runtime_profile_api_platform_profile_dry_run_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/platform/profile/restore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Restore Runtime Profile */
+        post: operations["restore_runtime_profile_api_platform_profile_restore_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/plugin-config-action-jobs/{job_id}": {
         parameters: {
             query?: never;
@@ -9395,6 +9463,73 @@ export interface components {
             total: number;
             /** Warn */
             warn: number;
+        };
+        /** RuntimeProfileApplyIn */
+        RuntimeProfileApplyIn: {
+            /**
+             * Preset
+             * @constant
+             */
+            preset: "safe_watch";
+        };
+        /** RuntimeProfileDiffItem */
+        RuntimeProfileDiffItem: {
+            /** From Enabled */
+            from_enabled: boolean;
+            /**
+             * Key
+             * @enum {string}
+             */
+            key: "ai" | "interaction_bot" | "webhooks" | "ledger" | "dispatch_debug";
+            /** To Enabled */
+            to_enabled: boolean;
+        };
+        /** RuntimeProfileDryRunIn */
+        RuntimeProfileDryRunIn: {
+            /**
+             * Preset
+             * @enum {string}
+             */
+            preset: "production" | "safe_watch";
+        };
+        /** RuntimeProfileDryRunOut */
+        RuntimeProfileDryRunOut: {
+            /** Blind Spot */
+            blind_spot?: string | null;
+            /** Diff */
+            diff?: components["schemas"]["RuntimeProfileDiffItem"][];
+            /**
+             * Preset
+             * @enum {string}
+             */
+            preset: "production" | "safe_watch";
+        };
+        /** RuntimeProfileStatusOut */
+        RuntimeProfileStatusOut: {
+            /** Active Profile */
+            active_profile?: "safe_watch" | null;
+            /** Blind Spot */
+            blind_spot?: string | null;
+            /**
+             * Current Profile
+             * @enum {string}
+             */
+            current_profile: "production" | "safe_watch" | "custom";
+            /** Last Error */
+            last_error?: string | null;
+            /** Modules */
+            modules: {
+                [key: string]: boolean;
+            };
+            /** Operator Id */
+            operator_id?: number | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "idle" | "applying" | "active" | "restoring" | "failed";
+            /** Updated At */
+            updated_at?: string | null;
         };
         /**
          * StrictRequest
@@ -18870,6 +19005,237 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["NotifyBotTestResponse"];
+                };
+            };
+            /** @description 认证失败 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description CSRF 校验失败或权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get_runtime_profile_api_platform_profile_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: {
+                auth_token?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RuntimeProfileStatusOut"];
+                };
+            };
+            /** @description 认证失败 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    apply_runtime_profile_api_platform_profile_apply_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: {
+                auth_token?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RuntimeProfileApplyIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RuntimeProfileStatusOut"];
+                };
+            };
+            /** @description 认证失败 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description CSRF 校验失败或权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    dry_run_runtime_profile_api_platform_profile_dry_run_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: {
+                auth_token?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RuntimeProfileDryRunIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RuntimeProfileDryRunOut"];
+                };
+            };
+            /** @description 认证失败 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description CSRF 校验失败或权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    restore_runtime_profile_api_platform_profile_restore_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: {
+                auth_token?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RuntimeProfileStatusOut"];
                 };
             };
             /** @description 认证失败 */

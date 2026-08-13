@@ -43,7 +43,12 @@ from ..db.models.payout_compensation import (
 from ..db.models.system import SystemSetting
 from ..logging_redaction import configure_dependency_log_levels, install_sensitive_log_filter
 from ..redis_client import get_redis
-from ..services import payout_compensation, platform_capabilities, recent_message_anchor
+from ..services import (
+    payout_compensation,
+    platform_capabilities,
+    recent_message_anchor,
+    runtime_profile_service,
+)
 from ..services.action_tap import emit_compensated_payout_event
 from ..services.ai_feature import is_ai_enabled
 from ..services.event_trace import (
@@ -100,6 +105,7 @@ from .ipc import (
     make_event,
     rpc_result_key,
 )
+from .leaf_delivery_gate import LeafDeliveryGate
 from .ratelimit.humanize import simulate_read, simulate_typing
 from .scheduler_runtime import PlatformScheduler
 from .tg_client import build_client
@@ -497,6 +503,16 @@ async def _bootstrap_platform_capabilities(account_id: int, redis: Any) -> bool:
     return True
 
 
+async def _initialize_leaf_delivery_gate() -> LeafDeliveryGate:
+    """按持久 profile 初始化叶子闸，并同步当前 worker 的 T3 deny。"""
+
+    safe_watch_active = await runtime_profile_service.read_worker_pause_state()
+    gate = LeafDeliveryGate()
+    if safe_watch_active:
+        gate.pause("safe_watch")
+    return gate
+
+
 async def run_worker(account_id: int) -> None:
     """worker 主协程；返回即代表退出（supervisor 决定是否重启）。"""
     redis = get_redis()
@@ -544,9 +560,9 @@ async def run_worker(account_id: int) -> None:
         return
 
     # paused.is_set() == True  → 正常运行
-    # paused.is_set() == False → 主动动作被暂停（被动接收照常）
-    paused = asyncio.Event()
-    paused.set()
+    # paused.is_set() == False → 叶子投递与定时任务暂停；树干观测继续。
+    # profile 读取失败按 safe_watch 处理，使崩溃重启与新账号 worker 启动即闭锁。
+    paused = await _initialize_leaf_delivery_gate()
 
     try:
         client = build_client(account, proxy, device_profile)
@@ -567,7 +583,7 @@ async def run_worker(account_id: int) -> None:
     make_command_handler(client, account_id)
 
     # 初始化命令派发上下文（含模板 + LLM provider 字典；由 IPC reload_commands 热更新）
-    await _refresh_command_context(account_id)
+    await _refresh_command_context(account_id, paused)
     await refresh_trace_settings()
 
     # ⚠ 顺序：必须先 connect，再加载插件。
@@ -640,12 +656,19 @@ async def run_worker(account_id: int) -> None:
             "info",
             f"已上线: {me.first_name or me.username or me.id}",
         )
-        await _publish(redis, account_id, EVT_STATUS, status="active")
+        await _publish(
+            redis,
+            account_id,
+            EVT_STATUS,
+            status="active" if paused.is_set() else "paused",
+        )
 
         # 后台协程：监听 IPC 指令通道与全局通道
         ipc_task = asyncio.create_task(_listen_cmd(redis, client, account_id, paused, platform_scheduler))
         global_task = asyncio.create_task(_listen_global(redis, account_id, paused))
-        reconcile_task = asyncio.create_task(_periodic_config_reconcile(redis, account_id))
+        reconcile_task = asyncio.create_task(
+            _periodic_config_reconcile(redis, account_id, paused)
+        )
         session_expire_task = asyncio.create_task(_periodic_userbot_session_expire_scan(redis, account_id))
         payout_compensation_task = asyncio.create_task(
             _periodic_payout_compensation_scan(redis, client, account_id, paused)
@@ -731,7 +754,7 @@ async def _listen_cmd(
     redis,
     client,
     account_id: int,
-    paused: asyncio.Event,
+    paused: LeafDeliveryGate,
     platform_scheduler: PlatformScheduler | None = None,
 ) -> None:
     """监听 ``worker_cmd:{aid}`` 频道，处理 pause/resume/stop/ping/reload/*。
@@ -769,13 +792,37 @@ async def _listen_cmd(
                         await rpc_executor.submit(cmd)
                         continue
                     if cmd.type == CMD_PAUSE:
-                        paused.clear()
-                        await _publish(redis, account_id, EVT_STATUS, status="paused")
-                        await _log(redis, account_id, "info", "已暂停")
+                        reason = (
+                            "safe_watch"
+                            if cmd.payload.get("source") == "runtime_profile"
+                            else "runtime_control"
+                        )
+                        ack_ok = await paused.pause_and_wait(
+                            reason, timeout=runtime_profile_service.PROFILE_CONVERGENCE_TIMEOUT_SECONDS
+                        )
+                        if ack_ok:
+                            await _publish(redis, account_id, EVT_STATUS, status="paused")
+                            await _log(redis, account_id, "info", "已暂停")
+                        else:
+                            ack_error = "leaf delivery convergence timeout"
                     elif cmd.type == CMD_RESUME:
-                        paused.set()
-                        await _publish(redis, account_id, EVT_STATUS, status="active")
-                        await _log(redis, account_id, "info", "已恢复")
+                        if cmd.payload.get("source") == "runtime_profile":
+                            nonce = str(cmd.payload.get("resume_nonce") or "")
+                            if await runtime_profile_service.validate_worker_resume_nonce(nonce):
+                                paused.resume("safe_watch")
+                            else:
+                                ack_ok = False
+                                ack_error = "runtime profile resume token rejected"
+                        else:
+                            paused.resume("runtime_control")
+                        if ack_ok:
+                            await _publish(
+                                redis,
+                                account_id,
+                                EVT_STATUS,
+                                status="active" if paused.is_set() else "paused",
+                            )
+                            await _log(redis, account_id, "info", "已恢复")
                     elif cmd.type == CMD_STOP:
                         await _log(redis, account_id, "info", "收到 stop 指令")
                         await rpc_executor.stop()
@@ -814,7 +861,7 @@ async def _listen_cmd(
                             from .plugins.loader import reload_account_config  # type: ignore
 
                             await reload_account_config(account_id, cmd.payload)
-                            await _refresh_command_context(account_id)
+                            await _refresh_command_context(account_id, paused)
                         except Exception as e:  # noqa: BLE001
                             ack_ok = False
                             ack_error = f"{type(e).__name__}: {e}"
@@ -838,7 +885,7 @@ async def _listen_cmd(
                     elif cmd.type == CMD_RELOAD_COMMANDS:
                         # Sprint2 #2：账号启用/禁用模板、LLM provider 增删后通知 worker 热加载
                         try:
-                            await _refresh_command_context(account_id)
+                            await _refresh_command_context(account_id, paused)
                         except Exception as e:  # noqa: BLE001
                             ack_ok = False
                             ack_error = f"{type(e).__name__}: {e}"
@@ -2383,7 +2430,9 @@ async def _ack_cmd(
         pass
 
 
-async def _periodic_config_reconcile(redis, account_id: int) -> None:
+async def _periodic_config_reconcile(
+    redis, account_id: int, paused: LeafDeliveryGate
+) -> None:
     """周期性从 DB 重拉可变配置，给 Redis pub/sub 控制面做丢消息兜底。
 
     这不替代实时 IPC；它保证 reload_config / reload_commands / reload_ignored
@@ -2392,7 +2441,18 @@ async def _periodic_config_reconcile(redis, account_id: int) -> None:
     while True:
         await asyncio.sleep(_CONFIG_RECONCILE_SECONDS)
         try:
-            await _refresh_command_context(account_id)
+            profile_state = await runtime_profile_service.refresh_state_from_db()
+            if profile_state.get("active_profile") == "safe_watch":
+                # restoring 仍默认闭锁；只有已复核 nonce 的 CMD_RESUME 能临时放行。
+                if profile_state.get("status") != "restoring":
+                    paused.pause("safe_watch")
+            else:
+                paused.resume("safe_watch")
+        except Exception:  # noqa: BLE001
+            paused.pause("safe_watch")
+            await _log(redis, account_id, "warn", "periodic profile reconcile 失败，已按值守闭锁")
+        try:
+            await _refresh_command_context(account_id, paused)
         except Exception as e:  # noqa: BLE001
             await _log(redis, account_id, "warn", f"periodic reload_commands 失败: {type(e).__name__}: {e}")
         try:
@@ -2453,7 +2513,7 @@ async def _listen_global(redis, account_id: int, paused: asyncio.Event) -> None:
                         # 当前会刷新写入 worker-local CommandContext 的系统设置。
                         # 风控相关 reload 由 ratelimit 模块自己监听，不在这里处理
                         try:
-                            await _refresh_command_context(account_id)
+                            await _refresh_command_context(account_id, paused)
                             await refresh_trace_settings()
                         except Exception as e:  # noqa: BLE001
                             await _log(
@@ -2597,7 +2657,9 @@ def _provider_runtime_payload(row: LLMProvider, proxy_url: str | None) -> dict[s
     return payload
 
 
-async def _refresh_command_context(account_id: int) -> None:
+async def _refresh_command_context(
+    account_id: int, leaf_delivery_gate: LeafDeliveryGate | None = None
+) -> None:
     """从 DB 拉本账号已启用的命令模板 + 全部 LLM provider，写入 worker-local ctx。
 
     用作以下时机：
@@ -2828,6 +2890,7 @@ async def _refresh_command_context(account_id: int) -> None:
             self_tg_user_id=self_tg_user_id,
             command_echo_guard_previous_messages=command_echo_guard_previous_messages,
             scheduler_command_whitelist=scheduler_command_whitelist,
+            leaf_delivery_gate=leaf_delivery_gate,
         )
     )
 

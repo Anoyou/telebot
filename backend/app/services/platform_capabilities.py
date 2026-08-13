@@ -443,6 +443,7 @@ async def set_module_enabled(
     user_id: int | None = None,
     notify_workers: bool = True,
     apply_local: bool = True,
+    write_audit: bool = True,
 ) -> dict[str, Any]:
     """写入目标状态并执行热切换。
 
@@ -498,28 +499,29 @@ async def set_module_enabled(
             else dict(_LAST_WORKER_CONVERGENCE)
         )
 
-        try:
-            from . import audit as audit_svc
+        if write_audit:
+            try:
+                from . import audit as audit_svc
 
-            await audit_svc.write(
-                db,
-                user_id,
-                "set_platform_capability",
-                target=module_key,
-                detail={
-                    "module": module_key,
-                    "enabled": next_enabled,
-                    "generation": next_gen,
-                    "worker_convergence": {
-                        "acked": worker_conv.get("acked"),
-                        "offline_or_timeout": worker_conv.get("offline_or_timeout"),
-                        "total_accounts": worker_conv.get("total_accounts"),
+                await audit_svc.write(
+                    db,
+                    user_id,
+                    "set_platform_capability",
+                    target=module_key,
+                    detail={
+                        "module": module_key,
+                        "enabled": next_enabled,
+                        "generation": next_gen,
+                        "worker_convergence": {
+                            "acked": worker_conv.get("acked"),
+                            "offline_or_timeout": worker_conv.get("offline_or_timeout"),
+                            "total_accounts": worker_conv.get("total_accounts"),
+                        },
                     },
-                },
-            )
-            await db.commit()
-        except Exception:  # noqa: BLE001
-            log.exception("写入平台能力审计失败 module=%s", module_key)
+                )
+                await db.commit()
+            except Exception:  # noqa: BLE001
+                log.exception("写入平台能力审计失败 module=%s", module_key)
 
         return {
             "module_key": module_key,
@@ -566,6 +568,28 @@ async def _apply_local_transition(module_key: ModuleKey, enabled: bool) -> None:
         msg = f"{type(exc).__name__}: {exc}"[:300]
         log.exception("平台能力本地切换失败 module=%s enabled=%s", module_key, enabled)
         _set_runtime(module_key, "failed", error=msg)
+
+
+async def reconcile_local_module(module_key: ModuleKey) -> None:
+    """按当前 desired 收敛一个主进程本地模块。"""
+
+    if module_key not in MODULE_DEFS:
+        raise KeyError(f"unknown module: {module_key}")
+    await _apply_local_transition(
+        module_key, is_module_enabled_cached(module_key, fail_closed=True)
+    )
+    if _RUNTIME.get(module_key) == "failed":
+        raise RuntimeError(_LAST_ERROR.get(module_key) or f"{module_key} 本地收敛失败")
+
+
+async def stop_local_module(module_key: ModuleKey) -> None:
+    """应急回滚使用：停止本进程模块，不改变持久 desired。"""
+
+    if module_key not in MODULE_DEFS:
+        raise KeyError(f"unknown module: {module_key}")
+    await _apply_local_transition(module_key, False)
+    if _RUNTIME.get(module_key) == "failed":
+        raise RuntimeError(_LAST_ERROR.get(module_key) or f"{module_key} 本地停止失败")
 
 
 async def _start_module(module_key: ModuleKey) -> None:
@@ -1206,12 +1230,14 @@ __all__ = [
     "normalize_capability_setting",
     "read_module_desired",
     "register_ledger_action_deny",
+    "reconcile_local_module",
     "reconcile_runtime_after_startup",
     "refresh_cache_from_db",
     "require_module_enabled",
     "require_ledger_actions_enabled",
     "set_ai_enabled_compat",
     "set_module_enabled",
+    "stop_local_module",
     "subscription_blocked_reason",
     "_reset_for_tests",
 ]

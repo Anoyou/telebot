@@ -17,6 +17,8 @@ import type {
   ResourceDashboard,
   RateLimitRuleConfig,
   RestartResult,
+  RuntimeProfileDryRunOut,
+  RuntimeProfileStatusOut,
   StrictRequest,
   RuntimeLogItem,
   SystemConsoleLogsResponse,
@@ -213,6 +215,39 @@ export async function patchPlatformCapability(
   const { data } = await api.patch<PlatformCapabilityPatchResult>(
     `/api/system/capabilities/${moduleKey}`,
     { enabled },
+  );
+  return data;
+}
+
+// ===================== 运行预设 =====================
+export async function getRuntimeProfile(): Promise<RuntimeProfileStatusOut> {
+  const { data } = await api.get<RuntimeProfileStatusOut>("/api/platform/profile");
+  return data;
+}
+
+export async function dryRunRuntimeProfile(
+  preset: "production" | "safe_watch",
+): Promise<RuntimeProfileDryRunOut> {
+  const { data } = await api.post<RuntimeProfileDryRunOut>(
+    "/api/platform/profile/dry-run",
+    { preset },
+  );
+  return data;
+}
+
+export async function applyRuntimeProfile(
+  preset: "safe_watch",
+): Promise<RuntimeProfileStatusOut> {
+  const { data } = await api.post<RuntimeProfileStatusOut>(
+    "/api/platform/profile/apply",
+    { preset },
+  );
+  return data;
+}
+
+export async function restoreRuntimeProfile(): Promise<RuntimeProfileStatusOut> {
+  const { data } = await api.post<RuntimeProfileStatusOut>(
+    "/api/platform/profile/restore",
   );
   return data;
 }

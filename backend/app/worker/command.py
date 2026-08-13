@@ -143,6 +143,7 @@ class CommandContext:
     self_tg_user_id: int | None = None
     command_echo_guard_previous_messages: int = 8
     scheduler_command_whitelist: list[str] = None  # type: ignore[assignment]
+    leaf_delivery_gate: Any = None
 
     def __post_init__(self) -> None:
         if self.aliases is None:
@@ -2095,17 +2096,49 @@ async def dispatch_plugin_command(
     return False
 
 
-def _command_dispatch_target(cmd: str, args_raw: str) -> tuple[str, str | None]:
+def _resolve_command_alias(
+    cmd: str,
+    args_raw: str,
+    *,
+    seen: frozenset[str] = frozenset(),
+) -> tuple[str, str] | None:
+    if _ctx is None or not _ctx.aliases:
+        return None
+    full_rest = f"{cmd} {args_raw}".strip() if args_raw else cmd
+    for alias in sorted(_ctx.aliases.keys(), key=len, reverse=True):
+        if full_rest != alias and not full_rest.startswith(alias + " "):
+            continue
+        if alias in seen or len(seen) >= 16:
+            return None
+        target = str(_ctx.aliases[alias] or "").strip()
+        remaining = full_rest[len(alias):].strip()
+        new_text = f"{target} {remaining}".strip() if remaining else target
+        parts = new_text.split(None, 1)
+        if not parts:
+            return None
+        return parts[0], parts[1].strip() if len(parts) > 1 else ""
+    return None
+
+
+def _command_dispatch_target(
+    cmd: str,
+    args_raw: str,
+    *,
+    seen_aliases: frozenset[str] = frozenset(),
+) -> tuple[str, str | None]:
     if cmd in _PLUGIN_COMMANDS:
         return "plugin_command", _PLUGIN_COMMANDS[cmd].owner_plugin_key or None
     primary = _BUILTIN_ALIAS_TO_PRIMARY.get(cmd)
     if primary and _BUILTIN.get(primary) is not None:
         return "builtin", None
-    if _ctx is not None and _ctx.aliases:
-        full_rest = f"{cmd} {args_raw}".strip() if args_raw else cmd
-        for alias in sorted(_ctx.aliases.keys(), key=len, reverse=True):
-            if full_rest == alias or full_rest.startswith(alias + " "):
-                return "alias", None
+    alias_target = _resolve_command_alias(cmd, args_raw, seen=seen_aliases)
+    if alias_target is not None:
+        alias_key = f"{cmd} {args_raw}".strip()
+        if alias_key in seen_aliases:
+            return "unknown", None
+        return _command_dispatch_target(
+            *alias_target, seen_aliases=seen_aliases | {alias_key}
+        )
     if _ctx is not None and _ctx.templates.get(cmd) is not None:
         tpl = _ctx.templates[cmd]
         if str(tpl.get("type") or "").strip() == "run_plugin":
@@ -2191,7 +2224,12 @@ async def _dispatch_command(
     target_type, plugin_key = _command_dispatch_target(cmd, args_raw)
     trace = None
     final_status = TRACE_STATUS_SKIPPED if target_type == "unknown" else TRACE_STATUS_OK
-    if await _command_trace_enabled():
+    gate = _ctx.leaf_delivery_gate if _ctx is not None else None
+    is_plugin_leaf = target_type in {"plugin_command", "template_run_plugin"}
+    paused_plugin_leaf = bool(
+        is_plugin_leaf and gate is not None and not gate.is_set()
+    )
+    if paused_plugin_leaf or await _command_trace_enabled():
         event_payload = normalize_userbot_event(
             account_id,
             event,
@@ -2247,6 +2285,25 @@ async def _dispatch_command(
             scope="owner_only",
             event_bus_decisions=_command_decisions_detail(command_decisions),
         )
+    if paused_plugin_leaf:
+        await record_span(
+            trace,
+            "route",
+            TRACE_STATUS_SKIPPED,
+            component="runtime_profile",
+            reason_code="runtime_profile_safe_watch",
+            message="值守模式已观测命令入站，但暂停插件叶子投递。",
+            command=cmd,
+            target_type=target_type,
+            plugin_key=plugin_key,
+        )
+        await finish_trace(
+            trace,
+            TRACE_STATUS_SKIPPED,
+            reason_code="runtime_profile_safe_watch",
+        )
+        return
+
     try:
         traced_client, traced_event = _trace_command_io(
             client,
@@ -2256,14 +2313,27 @@ async def _dispatch_command(
             plugin_key=plugin_key,
             account_id=account_id,
         )
-        await _dispatch_command_inner(
-            traced_client,
-            traced_event,
-            cmd,
-            args_raw,
-            account_id=account_id,
-            help_prefix=help_prefix,
-        )
+        if is_plugin_leaf and gate is not None and hasattr(gate, "delivery"):
+            async with gate.delivery() as entered:
+                if not entered:
+                    final_status = TRACE_STATUS_SKIPPED
+                    await record_span(
+                        trace,
+                        "route",
+                        TRACE_STATUS_SKIPPED,
+                        component="runtime_profile",
+                        reason_code="runtime_profile_safe_watch",
+                    )
+                    return
+                await _dispatch_command_inner(
+                    traced_client, traced_event, cmd, args_raw,
+                    account_id=account_id, help_prefix=help_prefix,
+                )
+        else:
+            await _dispatch_command_inner(
+                traced_client, traced_event, cmd, args_raw,
+                account_id=account_id, help_prefix=help_prefix,
+            )
     except Exception as exc:  # noqa: BLE001
         final_status = TRACE_STATUS_FAILED
         await record_span(
@@ -2376,6 +2446,7 @@ async def _dispatch_command_inner(
     *,
     account_id: int,
     help_prefix: str,
+    seen_aliases: frozenset[str] = frozenset(),
 ) -> None:
     args = args_raw.split() if args_raw else []
     # 1. 内置命令优先
@@ -2393,46 +2464,15 @@ async def _dispatch_command_inner(
         return
 
     # 2. 别名解析（贪心最长匹配）
-    if _ctx is not None and _ctx.aliases:
-        # 尝试从 "cmd arg1 arg2..." 中匹配最长的别名
-        full_rest = f"{cmd} {args_raw}".strip() if args_raw else cmd
-        matched_alias: str | None = None
-        for alias in sorted(_ctx.aliases.keys(), key=len, reverse=True):
-            if full_rest == alias or full_rest.startswith(alias + " "):
-                matched_alias = alias
-                break
-        if matched_alias is not None:
-            target = _ctx.aliases[matched_alias]
-            remaining = full_rest[len(matched_alias):].strip()
-            # 重新拼接：target + remaining args
-            new_text = f"{target} {remaining}".strip() if remaining else target
-            new_parts = new_text.split(None, 1)
-            new_cmd = new_parts[0] if new_parts else ""
-            new_args_raw = new_parts[1] if len(new_parts) > 1 else ""
-            new_args = new_args_raw.split() if new_args_raw else []
-            # 重新派发到 builtin
-            primary2 = _BUILTIN_ALIAS_TO_PRIMARY.get(new_cmd)
-            item2 = _BUILTIN.get(primary2) if primary2 else None
-            if item2 is not None:
-                try:
-                    await item2.handler(client, event, new_args, account_id)
-                except Exception as e:  # noqa: BLE001
-                    try:
-                        await event.edit(f"✗ 执行失败：{_safe_exception_text(e)}")
-                    except Exception:
-                        pass
-                return
-            # 重新派发到模板
-            tpl2 = _ctx.templates.get(new_cmd)
-            if tpl2 is not None:
-                try:
-                    await _run_template(client, event, new_args, tpl2, account_id)
-                except Exception as e:  # noqa: BLE001
-                    try:
-                        await event.edit(f"✗ 执行失败：{_safe_exception_text(e)}")
-                    except Exception:
-                        pass
-                return
+    alias_target = _resolve_command_alias(cmd, args_raw, seen=seen_aliases)
+    if alias_target is not None:
+        alias_key = f"{cmd} {args_raw}".strip()
+        if alias_key not in seen_aliases:
+            await _dispatch_command_inner(
+                client, event, *alias_target, account_id=account_id,
+                help_prefix=help_prefix, seen_aliases=seen_aliases | {alias_key},
+            )
+            return
 
     # 3. 模板命令（按 name 查 worker-local ctx）
     if _ctx is not None:
@@ -2447,7 +2487,19 @@ async def _dispatch_command_inner(
                     pass
             return
 
-    # 4. 未知命令
+    # 4. 插件命令（别名可递归落到这里）
+    pcmd = _PLUGIN_COMMANDS.get(cmd)
+    if pcmd is not None:
+        try:
+            await pcmd.handler(client, event, args, account_id)
+        except Exception as e:  # noqa: BLE001
+            try:
+                await event.edit(f"✗ 执行失败：{_safe_exception_text(e)}")
+            except Exception:
+                pass
+        return
+
+    # 5. 未知命令
     try:
         await event.edit(f"未知命令：{cmd}（{help_prefix}help 查看可用列表）")
     except Exception:

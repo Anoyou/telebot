@@ -15,6 +15,7 @@ from app.worker import runtime as worker_runtime
 from app.worker import scheduler_runtime
 from app.worker.command import CommandContext, set_command_context
 from app.worker.ipc import CMD_EXECUTE_RULE, IPCMessage
+from app.worker.leaf_delivery_gate import LeafDeliveryGate
 from app.worker.plugins.update_barrier import begin_plugin_update
 from app.worker.scheduler_runtime import PlatformScheduler, SchedulerRuleExecutor, _croniter_next
 
@@ -136,6 +137,77 @@ async def test_unregister_owner_prevents_runtime_job(monkeypatch) -> None:
     assert removed == 1
     callback.assert_not_awaited()
     assert facade.list_jobs() == []
+
+
+@pytest.mark.asyncio
+async def test_safe_watch_freezes_runtime_job_metadata_and_resumes(monkeypatch) -> None:
+    monkeypatch.setattr("app.worker.scheduler_runtime._get_system_tz", AsyncMock(return_value=None))
+    gate = LeafDeliveryGate()
+    gate.pause("safe_watch")
+    runtime = PlatformScheduler(
+        account_id=42, client=AsyncMock(), redis=AsyncMock(), paused=gate, log_writer=_noop_log
+    )
+    callback = AsyncMock()
+    runtime.for_plugin("demo", generation=1).register(
+        "heartbeat", {"kind": "interval", "interval_sec": 60}, callback
+    )
+
+    await runtime.tick_once()
+    job = runtime.list_runtime_jobs()[0]
+    callback.assert_not_awaited()
+    assert job["fire_count"] == 0
+    assert "last_result" not in job["config"]
+    assert "next_fire" not in job["config"]
+
+    gate.resume("safe_watch")
+    await runtime.tick_once()
+    callback.assert_awaited_once()
+    assert runtime.list_runtime_jobs()[0]["fire_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_safe_watch_manual_rule_is_blocked_before_context_creation(monkeypatch) -> None:
+    gate = LeafDeliveryGate()
+    gate.pause("safe_watch")
+    runtime = PlatformScheduler(
+        account_id=42, client=AsyncMock(), redis=AsyncMock(), paused=gate, log_writer=_noop_log
+    )
+    make_context = AsyncMock()
+    monkeypatch.setattr(runtime, "_make_scheduler_context", make_context)
+
+    result = await runtime.execute_rule(9)
+
+    assert result.ok is False
+    assert result.error == "值守模式已暂停定时任务投递"
+    make_context.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_pause_ack_waits_for_inflight_scheduler_callback(monkeypatch) -> None:
+    monkeypatch.setattr("app.worker.scheduler_runtime._get_system_tz", AsyncMock(return_value=None))
+    gate = LeafDeliveryGate()
+    runtime = PlatformScheduler(
+        account_id=42, client=AsyncMock(), redis=AsyncMock(), paused=gate, log_writer=_noop_log
+    )
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def callback(_job) -> None:
+        started.set()
+        await release.wait()
+
+    runtime.for_plugin("demo", generation=1).register(
+        "heartbeat", {"kind": "interval", "interval_sec": 60}, callback
+    )
+    tick = asyncio.create_task(runtime.tick_runtime_jobs())
+    await started.wait()
+    pausing = asyncio.create_task(gate.pause_and_wait("safe_watch", timeout=1))
+    await asyncio.sleep(0)
+    assert pausing.done() is False
+    release.set()
+
+    assert await pausing is True
+    await tick
 
 
 @pytest.mark.asyncio

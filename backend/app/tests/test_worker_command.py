@@ -23,8 +23,10 @@ from app.worker.command import (
     should_skip_outgoing_command_echo,
 )
 from app.worker.ipc import (
+    CMD_PAUSE,
     CMD_PING,
     CMD_RELOAD_CONFIG,
+    CMD_RESUME,
     CMD_RUN_INTERACTION_ACTION,
     CMD_RUN_INTERACTION_ENTRY,
     CMD_STOP,
@@ -34,6 +36,7 @@ from app.worker.ipc import (
     event_channel,
     make_cmd,
 )
+from app.worker.leaf_delivery_gate import LeafDeliveryGate
 
 
 class _FakeCmdPubSub:
@@ -319,6 +322,101 @@ async def test_paused_worker_rejects_interaction_payout_rpc() -> None:
         assert rpc_msg.payload["ok"] is False
         assert "pause" in rpc_msg.payload["error"]
         client.send_message.assert_not_awaited()
+    finally:
+        await redis.send_cmd(make_cmd(CMD_STOP))
+        await asyncio.wait_for(listener, timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_runtime_profile_pause_ack_waits_for_inflight_and_rejects_unsafe_resume(
+    monkeypatch,
+) -> None:
+    from app.worker import runtime as runtime_mod
+
+    redis = _FakeCmdRedis()
+    client = AsyncMock()
+    gate = LeafDeliveryGate()
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _inflight_leaf() -> None:
+        async with gate.delivery() as allowed:
+            assert allowed is True
+            entered.set()
+            await release.wait()
+
+    delivery = asyncio.create_task(_inflight_leaf())
+    await entered.wait()
+    listener = asyncio.create_task(runtime_mod._listen_cmd(redis, client, 105, gate))
+    try:
+        await redis.send_cmd(
+            make_cmd(
+                CMD_PAUSE,
+                reply_to="profile-pause-ack",
+                cmd_id="profile-pause-1",
+                source="runtime_profile",
+            )
+        )
+        await asyncio.sleep(0.02)
+        assert not any(channel == "profile-pause-ack" for channel, _ in redis.published)
+
+        release.set()
+        await delivery
+        _, pause_ack = await _wait_for_publish(
+            redis,
+            lambda ch, item: (
+                ch == "profile-pause-ack"
+                and item.type == EVT_ACK
+                and item.payload.get("cmd_id") == "profile-pause-1"
+            ),
+        )
+        assert pause_ack.payload["ok"] is True
+        assert gate.pause_reasons == frozenset({"safe_watch"})
+
+        await redis.send_cmd(
+            make_cmd(
+                CMD_RESUME,
+                reply_to="normal-resume-ack",
+                cmd_id="normal-resume-1",
+            )
+        )
+        _, normal_ack = await _wait_for_publish(
+            redis,
+            lambda ch, item: (
+                ch == "normal-resume-ack"
+                and item.type == EVT_ACK
+                and item.payload.get("cmd_id") == "normal-resume-1"
+            ),
+        )
+        assert normal_ack.payload["ok"] is True
+        assert gate.is_set() is False
+
+        validate_nonce = AsyncMock(return_value=False)
+        monkeypatch.setattr(
+            runtime_mod.runtime_profile_service,
+            "validate_worker_resume_nonce",
+            validate_nonce,
+        )
+        await redis.send_cmd(
+            make_cmd(
+                CMD_RESUME,
+                reply_to="profile-resume-ack",
+                cmd_id="profile-resume-1",
+                source="runtime_profile",
+                resume_nonce="wrong",
+            )
+        )
+        _, profile_ack = await _wait_for_publish(
+            redis,
+            lambda ch, item: (
+                ch == "profile-resume-ack"
+                and item.type == EVT_ACK
+                and item.payload.get("cmd_id") == "profile-resume-1"
+            ),
+        )
+        assert profile_ack.payload["ok"] is False
+        assert profile_ack.payload["error"] == "runtime profile resume token rejected"
+        assert gate.is_set() is False
     finally:
         await redis.send_cmd(make_cmd(CMD_STOP))
         await asyncio.wait_for(listener, timeout=1)
@@ -1023,6 +1121,83 @@ async def test_dispatch_plugin_command_creates_event_bus_decision(monkeypatch):
     assert record_action.await_args.args[1]["type"] == "edit_message"
     assert record_action.await_args.args[1]["plugin_key"] == "demo_plugin"
     finish_trace.assert_awaited_once_with(trace, "ok")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("cmd", "args_raw", "aliases", "templates"),
+    [
+        ("safe_leaf", "alpha", {}, {}),
+        ("别名", "alpha", {"别名": "safe_leaf"}, {}),
+        ("模板别名", "", {"模板别名": "插件模板"}, {"插件模板": {"type": "run_plugin", "plugin_key": "demo_plugin"}}),
+    ],
+)
+async def test_safe_watch_pauses_plugin_commands_and_aliases_without_outbound(
+    monkeypatch, cmd, args_raw, aliases, templates,
+) -> None:
+    from app.worker import command as wcmd
+
+    gate = LeafDeliveryGate()
+    gate.pause("safe_watch")
+    handler = AsyncMock()
+    run_template = AsyncMock()
+    trace = event_trace.TraceContext(trace_id="evt_safe_watch_cmd", account_id=1, event_type="command")
+    monkeypatch.setattr(wcmd, "start_trace", AsyncMock(return_value=trace))
+    record_span = AsyncMock()
+    monkeypatch.setattr(wcmd, "record_span", record_span)
+    finish_trace = AsyncMock()
+    monkeypatch.setattr(wcmd, "finish_trace", finish_trace)
+    monkeypatch.setattr(wcmd, "_run_template", run_template)
+    previous = wcmd._ctx
+    wcmd.register_plugin_command("safe_leaf", handler, owner_plugin_key="demo_plugin", generation=1)
+    wcmd._ctx = CommandContext(
+        account_id=1, templates=templates, providers={}, aliases=aliases,
+        leaf_delivery_gate=gate,
+    )
+    client = AsyncMock()
+    event = AsyncMock()
+    event.raw_text = f",{cmd} {args_raw}".strip()
+    event.message = SimpleNamespace(id=1, chat_id=10, sender_id=20, text=event.raw_text)
+    try:
+        await wcmd._dispatch_command(client, event, cmd, args_raw, account_id=1, help_prefix=",")
+    finally:
+        wcmd.unregister_plugin_command("safe_leaf", owner_plugin_key="demo_plugin")
+        wcmd._ctx = previous
+
+    handler.assert_not_awaited()
+    run_template.assert_not_awaited()
+    event.edit.assert_not_awaited()
+    event.respond.assert_not_awaited()
+    client.send_message.assert_not_awaited()
+    assert any(
+        call.args[1] == "route"
+        and call.kwargs.get("reason_code") == "runtime_profile_safe_watch"
+        for call in record_span.await_args_list
+    )
+    finish_trace.assert_awaited_once_with(
+        trace, "skipped", reason_code="runtime_profile_safe_watch"
+    )
+
+
+@pytest.mark.asyncio
+async def test_safe_watch_keeps_builtin_management_command_reply_available() -> None:
+    from app.worker import command as wcmd
+
+    gate = LeafDeliveryGate()
+    gate.pause("safe_watch")
+    previous = wcmd._ctx
+    wcmd._ctx = CommandContext(
+        account_id=1, templates={}, providers={}, leaf_delivery_gate=gate
+    )
+    event = AsyncMock()
+    event.raw_text = ",ping"
+    event.message = SimpleNamespace(id=1, chat_id=10, sender_id=20, text=",ping")
+    try:
+        await wcmd._dispatch_command(AsyncMock(), event, "ping", "", account_id=1, help_prefix=",")
+    finally:
+        wcmd._ctx = previous
+
+    event.edit.assert_awaited_once_with("pong")
 
 
 @pytest.mark.asyncio

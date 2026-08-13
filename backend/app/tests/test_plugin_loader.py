@@ -27,6 +27,7 @@ from app.db.models.feature import (
 )
 from app.services import platform_capabilities
 from app.services.interaction.dedupe import interaction_message_claim_key
+from app.worker.leaf_delivery_gate import LeafDeliveryGate
 from app.worker.plugins import loader as loader_mod
 from app.worker.plugins.base import Plugin, PluginContext
 from app.worker.plugins.events import TelePilotEvent
@@ -3995,6 +3996,135 @@ async def test_direct_passthrough_consumes_raw_event_before_event_bus(monkeypatc
     finally:
         loader_mod._STATES.pop(14, None)
         _REGISTRY.pop("_test_direct_enabled", None)
+
+
+@pytest.mark.asyncio
+async def test_safe_watch_observes_userbot_inbound_before_gate_without_any_plugin_leaf(
+    monkeypatch,
+) -> None:
+    from app.worker.plugins.base import _REGISTRY, register
+
+    calls: list[str] = []
+
+    @register
+    class _SafeWatchCoveragePlugin(Plugin):
+        key = "_test_safe_watch_coverage"
+        display_name = "值守覆盖测试"
+        message_channels = {"incoming"}
+        owner_only = False
+
+        async def on_direct_message(self, ctx: PluginContext, event: Any) -> bool:
+            calls.append("direct")
+            await ctx.client.send_message(event.chat_id, "direct reply")
+            return True
+
+        async def on_event(self, ctx: PluginContext, payload: dict[str, Any]) -> list[dict[str, Any]]:
+            calls.append("event_bus_native_raw")
+            assert payload.get("native_raw") is not None
+            return [{"type": "send_message", "text": "event reply"}]
+
+        async def on_message(self, ctx: PluginContext, event: Any) -> None:
+            calls.append("legacy")
+
+    _SafeWatchCoveragePlugin._manifest = Manifest(
+        key="_test_safe_watch_coverage",
+        display_name="值守覆盖测试",
+        event_subscriptions=[
+            {
+                "source": ["userbot"],
+                "events": ["message"],
+                "scope": "all_allowed_chats",
+            }
+        ],
+        capabilities={
+            "telegram_direct_passthrough": {
+                "enabled": True,
+                "reason": "覆盖值守直通闸",
+                "sources": ["userbot"],
+                "directions": ["incoming"],
+            },
+            "telegram_native_raw": {
+                "enabled": True,
+                "sources": ["userbot"],
+            },
+        },
+    )
+
+    class _Event:
+        raw_text = "safe watch inbound"
+        text = "safe watch inbound"
+        chat_id = -1001
+        sender_id = 42
+        id = 191
+        is_private = False
+        is_group = True
+        is_channel = False
+
+        async def get_chat(self):
+            return None
+
+    fake_db = _FakeDB(
+        accounts={19: _FakeAcc(id=19)},
+        humanize={19: None},
+        afs=[
+            _FakeAF(
+                account_id=19,
+                feature_key="_test_safe_watch_coverage",
+                enabled=True,
+                config={"direct_passthrough": {"enabled": True}},
+            )
+        ],
+        rules=[],
+    )
+    monkeypatch.setattr(loader_mod, "AsyncSessionLocal", lambda: _fake_session_factory(fake_db))
+    monkeypatch.setattr(loader_mod, "_load_log_incoming_messages_setting", AsyncMock(return_value=False))
+    trace = SimpleNamespace(trace_id="evt_safe_watch_userbot")
+    start_trace = AsyncMock(return_value=trace)
+    record_span = AsyncMock()
+    finish_trace = AsyncMock()
+    emit_inbound = AsyncMock()
+    action_tap = AsyncMock()
+    monkeypatch.setattr(loader_mod, "start_trace", start_trace)
+    monkeypatch.setattr(loader_mod, "record_span", record_span)
+    monkeypatch.setattr(loader_mod, "finish_trace", finish_trace)
+    monkeypatch.setattr(loader_mod, "emit_inbound_event", emit_inbound)
+    monkeypatch.setattr(loader_mod, "_emit_userbot_action_tap", action_tap)
+    monkeypatch.setattr(loader_mod, "update_plugin_runtime_status", AsyncMock())
+
+    captured: list[Any] = []
+
+    def _on(_filter):
+        def _wrap(fn):
+            captured.append(fn)
+            return fn
+
+        return _wrap
+
+    client = MagicMock()
+    client.on = _on
+    client.send_message = AsyncMock()
+    gate = LeafDeliveryGate()
+    gate.pause("safe_watch")
+    try:
+        await load_plugins_for_account(client, account_id=19, paused=gate, redis=_FakeRedis())
+        await captured[-1](_Event())
+
+        assert calls == []
+        emit_inbound.assert_not_awaited()
+        action_tap.assert_not_awaited()
+        client.send_message.assert_not_awaited()
+        start_trace.assert_awaited_once()
+        assert [call.args[1] for call in record_span.await_args_list] == ["receive", "route"]
+        assert record_span.await_args_list[-1].kwargs["reason_code"] == "runtime_profile_safe_watch"
+        finish_trace.assert_awaited_once_with(
+            trace,
+            loader_mod.TRACE_STATUS_SKIPPED,
+            direction="incoming",
+            reason_code="runtime_profile_safe_watch",
+        )
+    finally:
+        loader_mod._STATES.pop(19, None)
+        _REGISTRY.pop("_test_safe_watch_coverage", None)
 
 
 @pytest.mark.asyncio

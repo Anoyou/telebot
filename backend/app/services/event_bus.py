@@ -88,6 +88,7 @@ EVENT_REASON_CODES = {
     "rate_limited",
     "rich_message_requires_interaction_bot",
     "rich_message_reply_markup_unsupported",
+    "runtime_profile_safe_watch",
     "invalid_rich_message",
     "callback_query",
     "callback_query_expired",

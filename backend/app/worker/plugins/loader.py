@@ -795,6 +795,43 @@ async def _start_userbot_message_trace(
     )
 
 
+async def _record_safe_watch_userbot_inbound(
+    state: _AccountState,
+    event: Any,
+    *,
+    event_label: str,
+) -> None:
+    """值守下只写平台 Trace；不得触发 action tap、通知或任何叶子。"""
+
+    event_payload = normalize_userbot_event(state.account_id, event)
+    trace = await start_trace(event_payload)
+    try:
+        event.trace_id = trace.trace_id
+    except Exception:  # noqa: BLE001
+        pass
+    await record_span(
+        trace,
+        "receive",
+        TRACE_STATUS_OK,
+        component="userbot_message",
+        direction=event_label,
+    )
+    await record_span(
+        trace,
+        "route",
+        TRACE_STATUS_SKIPPED,
+        component="runtime_profile",
+        reason_code="runtime_profile_safe_watch",
+        message="值守模式已观测入站，但暂停全部叶子投递。",
+    )
+    await finish_trace(
+        trace,
+        TRACE_STATUS_SKIPPED,
+        direction=event_label,
+        reason_code="runtime_profile_safe_watch",
+    )
+
+
 async def _dispatch_userbot_event_bus_matches(
     state: _AccountState,
     dispatch: _UserbotEventBusDispatch,
@@ -7192,8 +7229,15 @@ async def load_plugins_for_account(
 
         @client.on(event_builder(**kwargs))
         async def _dispatch(event):  # noqa: ANN001
-            if state.paused is not None and not state.paused.is_set():
-                return
+            if state.paused is not None:
+                tracker = getattr(state.paused, "track_current_task", None)
+                entered = tracker() if callable(tracker) else state.paused.is_set()
+                if not entered:
+                    if direction == "incoming":
+                        await _record_safe_watch_userbot_inbound(
+                            state, event, event_label=event_label
+                        )
+                    return
             trace = None
 
             direct_consumed = await _dispatch_userbot_direct_passthrough(

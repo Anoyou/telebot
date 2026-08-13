@@ -1034,6 +1034,34 @@ export interface PlatformCapabilityPatchResult {
   message?: string | null;
 }
 
+export type RuntimeProfileStatus =
+  | "idle"
+  | "applying"
+  | "active"
+  | "restoring"
+  | "failed";
+
+export interface RuntimeProfileStatusOut {
+  active_profile: "safe_watch" | null;
+  current_profile: "production" | "safe_watch" | "custom";
+  status: RuntimeProfileStatus;
+  last_error?: string | null;
+  operator_id?: number | null;
+  updated_at?: string | null;
+  modules: Record<PlatformModuleKey, boolean>;
+  blind_spot?: string | null;
+}
+
+export interface RuntimeProfileDryRunOut {
+  preset: "production" | "safe_watch";
+  diff: Array<{
+    key: PlatformModuleKey;
+    from_enabled: boolean;
+    to_enabled: boolean;
+  }>;
+  blind_spot?: string | null;
+}
+
 // ===================== 系统设置 =====================
 export interface SystemSettings {
   command_prefix: string;

@@ -13,6 +13,7 @@ import asyncio
 import inspect
 import logging
 from collections.abc import Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -78,6 +79,16 @@ class SchedulerExecutionResult:
 
 ScheduleCallback = Callable[[ScheduledJob], Awaitable[None] | None]
 LogWriter = Callable[..., Awaitable[None]]
+
+
+@asynccontextmanager
+async def _leaf_delivery(paused: Any):
+    delivery = getattr(paused, "delivery", None)
+    if callable(delivery):
+        async with delivery() as entered:
+            yield entered
+        return
+    yield bool(paused.is_set())
 
 
 class SchedulerCommandBlockedError(RuntimeError):
@@ -1197,29 +1208,34 @@ class PlatformScheduler:
     async def tick_once(self) -> None:
         """执行一轮平台调度：先跑 GUI 规则，再跑插件运行期任务。"""
 
+        if not self.paused.is_set():
+            return
         await self.tick_persisted_rules()
         await self.tick_runtime_jobs()
 
     async def tick_persisted_rules(self) -> None:
         """执行 GUI 配置的 scheduler 规则。"""
 
-        ctx = await self._make_scheduler_context()
-        if ctx is None:
-            return
-        async with AsyncSessionLocal() as db:
-            rules = (
-                await db.execute(
-                    select(Rule)
-                    .where(
-                        Rule.account_id == self.account_id,
-                        Rule.feature_key == FEATURE_SCHEDULER,
-                        Rule.enabled.is_(True),
+        async with _leaf_delivery(self.paused) as entered:
+            if not entered:
+                return
+            ctx = await self._make_scheduler_context()
+            if ctx is None:
+                return
+            async with AsyncSessionLocal() as db:
+                rules = (
+                    await db.execute(
+                        select(Rule)
+                        .where(
+                            Rule.account_id == self.account_id,
+                            Rule.feature_key == FEATURE_SCHEDULER,
+                            Rule.enabled.is_(True),
+                        )
+                        .order_by(Rule.priority.desc(), Rule.id.asc())
                     )
-                    .order_by(Rule.priority.desc(), Rule.id.asc())
-                )
-            ).scalars().all()
-        ctx.rules = list(rules)
-        await self._executor.tick_rules_once(ctx)
+                ).scalars().all()
+            ctx.rules = list(rules)
+            await self._executor.tick_rules_once(ctx)
 
     async def tick_runtime_jobs(self) -> None:
         """执行插件通过 ``ctx.scheduler`` 注册的运行期任务。"""
@@ -1229,6 +1245,8 @@ class PlatformScheduler:
         now = datetime.now(UTC)
         tz = await _get_system_tz()
         for key, job in list(self._jobs.items()):
+            if not self.paused.is_set():
+                return
             if plugin_update_in_progress(settings.plugins_installed_path, job.owner, self.account_id):
                 continue
             cfg = job.config
@@ -1245,48 +1263,57 @@ class PlatformScheduler:
             if not due:
                 continue
 
-            fired_at = datetime.now(UTC)
-            payload = ScheduledJob(
-                account_id=self.account_id,
-                owner=job.owner,
-                job_id=job.job_id,
-                config=dict(cfg),
-                fired_at=fired_at,
-                fire_count=job.fire_count + 1,
-            )
-            try:
-                maybe_awaitable = job.callback(payload)
-                if inspect.isawaitable(maybe_awaitable):
-                    await maybe_awaitable
-            except Exception as exc:  # noqa: BLE001
-                job.last_error = f"{type(exc).__name__}: {exc}"
-                cfg["last_result"] = "error"
-                cfg["last_error"] = job.last_error
-                await self._emit_log(
-                    "error",
-                    (
-                        f"插件 {job.owner} 的定时任务 {job.job_id} 执行失败："
-                        f"{type(exc).__name__}: {exc}"
-                    ),
-                    source="plugin",
-                    plugin_key=job.owner,
-                    scheduler_job_id=job.job_id,
+            async with _leaf_delivery(self.paused) as entered:
+                if not entered:
+                    return
+                fired_at = datetime.now(UTC)
+                payload = ScheduledJob(
+                    account_id=self.account_id,
+                    owner=job.owner,
+                    job_id=job.job_id,
+                    config=dict(cfg),
+                    fired_at=fired_at,
+                    fire_count=job.fire_count + 1,
                 )
-                continue
+                try:
+                    maybe_awaitable = job.callback(payload)
+                    if inspect.isawaitable(maybe_awaitable):
+                        await maybe_awaitable
+                except Exception as exc:  # noqa: BLE001
+                    job.last_error = f"{type(exc).__name__}: {exc}"
+                    cfg["last_result"] = "error"
+                    cfg["last_error"] = job.last_error
+                    await self._emit_log(
+                        "error",
+                        (
+                            f"插件 {job.owner} 的定时任务 {job.job_id} 执行失败："
+                            f"{type(exc).__name__}: {exc}"
+                        ),
+                        source="plugin",
+                        plugin_key=job.owner,
+                        scheduler_job_id=job.job_id,
+                    )
+                    continue
 
-            job.fire_count += 1
-            job.last_error = None
-            cfg["last_fire"] = _to_iso(fired_at)
-            cfg["last_result"] = "ok"
-            cfg["last_error"] = None
-            self._executor.advance_after_fire(cfg, fired_at, tz)
-            job.config = cfg
-            if key not in self._jobs:
-                continue
+                job.fire_count += 1
+                job.last_error = None
+                cfg["last_fire"] = _to_iso(fired_at)
+                cfg["last_result"] = "ok"
+                cfg["last_error"] = None
+                self._executor.advance_after_fire(cfg, fired_at, tz)
+                job.config = cfg
+                if key not in self._jobs:
+                    continue
 
     async def execute_rule(self, rule_id: int) -> SchedulerExecutionResult:
         """手动执行一条 GUI scheduler 规则。"""
 
+        async with _leaf_delivery(self.paused) as entered:
+            if not entered:
+                return SchedulerExecutionResult(False, "值守模式已暂停定时任务投递")
+            return await self._execute_rule_unpaused(rule_id)
+
+    async def _execute_rule_unpaused(self, rule_id: int) -> SchedulerExecutionResult:
         ctx = await self._make_scheduler_context()
         if ctx is None:
             return SchedulerExecutionResult(False, "定时任务调度器尚未初始化")
