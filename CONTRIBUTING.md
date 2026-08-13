@@ -150,6 +150,8 @@ Router 负责鉴权、输入校验、错误映射和响应结构，业务逻辑�
 
 数据库写入要明确事务边界。System Agent 工具的 handler 不自行 commit，写工具先生成 Action 预览，确认后由统一执行器提交。
 
+新增任何注册面必须遵循[能力接线协议](docs/architecture/capability-protocol.md)，明确稳定命名、依赖、生命周期、注册所有权、generation 失效与 fail-closed 语义。
+
 ### 数据库迁移
 
 当前迁移保持单线四位编号。创建迁移前先检查 head：
