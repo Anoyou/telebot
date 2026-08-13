@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -72,6 +73,8 @@ SETTING_KEY_TO_MODULE: dict[str, ModuleKey] = {
 
 ALL_MODULE_KEYS: tuple[ModuleKey, ...] = tuple(MODULE_DEFS.keys())
 DEFAULT_ENABLED = True
+LEDGER_ACTIONS_FAILED_CLOSED_ERROR_CODE = "ledger_actions_failed_closed"
+LEDGER_ACTIONS_FAILED_CLOSED_AUDIT_STATUS = "FAILED_CLOSED"
 
 # 进程内只读快照：公开入口（如 webhook）只读缓存，失败时 fail-closed。
 _CACHE_READY = False
@@ -91,6 +94,127 @@ _LAST_WORKER_CONVERGENCE: dict[str, Any] = {
     "last_broadcast_at": None,
     "notes": [],
 }
+_LEDGER_DENY_LOCK = threading.RLock()
+_LEDGER_DENY_GENERATION = 0
+_LEDGER_DENY_NEXT_TOKEN = 1
+_LEDGER_DENY_REGISTRATIONS: dict[int, tuple[str, str]] = {}
+
+
+@dataclass(slots=True)
+class LedgerActionDenyRegistration:
+    """一个 owner 持有的资金动作拒绝注册；``dispose`` 可重复调用。"""
+
+    owner: str
+    reason: str
+    generation: int
+    _token: int
+    _disposed: bool = False
+
+    def dispose(self) -> None:
+        """仅清理本句柄登记的条目，不影响其他 owner 或同 owner 的其他注册。"""
+
+        global _LEDGER_DENY_GENERATION
+        if self._disposed:
+            return
+        with _LEDGER_DENY_LOCK:
+            if self._disposed:
+                return
+            removed = _LEDGER_DENY_REGISTRATIONS.pop(self._token, None)
+            self._disposed = True
+            if removed is not None:
+                _LEDGER_DENY_GENERATION += 1
+
+    def __enter__(self) -> LedgerActionDenyRegistration:
+        return self
+
+    def __exit__(self, *_exc: Any) -> None:
+        self.dispose()
+
+
+class LedgerActionsFailedClosed(RuntimeError):
+    """资金动作保险丝断开时抛出的稳定异常。"""
+
+    error_code = LEDGER_ACTIONS_FAILED_CLOSED_ERROR_CODE
+    audit_status = LEDGER_ACTIONS_FAILED_CLOSED_AUDIT_STATUS
+
+    def __init__(self, reasons: tuple[str, ...] | None = None) -> None:
+        self.reasons = reasons if reasons is not None else ledger_action_block_reasons()
+        reason_text = ", ".join(self.reasons) if self.reasons else "unknown"
+        super().__init__(f"ledger actions denied (fail-closed): {reason_text}")
+
+
+def register_ledger_action_deny(reason: str, *, owner: str) -> LedgerActionDenyRegistration:
+    """注册一个进程内资金动作拒绝原因，并把清理所有权交给调用方。"""
+
+    global _LEDGER_DENY_GENERATION, _LEDGER_DENY_NEXT_TOKEN
+    normalized_owner = str(owner or "").strip()
+    normalized_reason = str(reason or "").strip()
+    if not normalized_owner:
+        raise ValueError("ledger action deny owner must not be empty")
+    if not normalized_reason:
+        raise ValueError("ledger action deny reason must not be empty")
+    with _LEDGER_DENY_LOCK:
+        token = _LEDGER_DENY_NEXT_TOKEN
+        _LEDGER_DENY_NEXT_TOKEN += 1
+        _LEDGER_DENY_REGISTRATIONS[token] = (normalized_owner, normalized_reason)
+        _LEDGER_DENY_GENERATION += 1
+        generation = _LEDGER_DENY_GENERATION
+    return LedgerActionDenyRegistration(
+        owner=normalized_owner,
+        reason=normalized_reason,
+        generation=generation,
+        _token=token,
+    )
+
+
+def ledger_action_deny_reasons() -> tuple[str, ...]:
+    """返回稳定排序的拒绝原因快照，不暴露可变注册表。"""
+
+    with _LEDGER_DENY_LOCK:
+        return tuple(sorted({reason for _owner, reason in _LEDGER_DENY_REGISTRATIONS.values()}))
+
+
+def ledger_action_deny_registrations() -> tuple[tuple[str, str], ...]:
+    """返回 ``(owner, reason)`` 快照，供诊断和所有权核查。"""
+
+    with _LEDGER_DENY_LOCK:
+        return tuple(sorted(_LEDGER_DENY_REGISTRATIONS.values()))
+
+
+def get_ledger_action_deny_generation() -> int:
+    with _LEDGER_DENY_LOCK:
+        return _LEDGER_DENY_GENERATION
+
+
+def ledger_action_block_reasons() -> tuple[str, ...]:
+    """返回当前资金动作不可执行的原因；任何读取异常都按断闸处理。"""
+
+    reasons: list[str] = []
+    try:
+        snap = get_snapshot()
+        if not snap.cache_ready:
+            reasons.append("capability_cache_not_ready")
+        elif snap.desired.get("ledger") is not True:
+            reasons.append("ledger_not_desired")
+        elif snap.runtime.get("ledger") != "ready":
+            runtime_state = snap.runtime.get("ledger")
+            reasons.append(f"ledger_runtime_{runtime_state or 'unknown'}")
+    except Exception:  # noqa: BLE001
+        reasons.append("capability_state_unavailable")
+    reasons.extend(ledger_action_deny_reasons())
+    return tuple(dict.fromkeys(reasons))
+
+
+def ledger_actions_enabled() -> bool:
+    """仅在 ledger ready 且无 deny 注册时放行资金动作。"""
+
+    return not ledger_action_block_reasons()
+
+
+def require_ledger_actions_enabled() -> None:
+    reasons = ledger_action_block_reasons()
+    if reasons:
+        raise LedgerActionsFailedClosed(reasons)
 
 
 @dataclass(frozen=True)
@@ -1026,7 +1150,7 @@ def evaluate_plugin_runtime_availability(
 
 # 测试辅助：重置进程内状态
 def _reset_for_tests() -> None:
-    global _CACHE_READY
+    global _CACHE_READY, _LEDGER_DENY_GENERATION, _LEDGER_DENY_NEXT_TOKEN
     _CACHE_READY = False
     for key in ALL_MODULE_KEYS:
         _DESIRED[key] = DEFAULT_ENABLED
@@ -1046,31 +1170,46 @@ def _reset_for_tests() -> None:
             "notes": [],
         }
     )
+    with _LEDGER_DENY_LOCK:
+        _LEDGER_DENY_REGISTRATIONS.clear()
+        _LEDGER_DENY_GENERATION = 0
+        _LEDGER_DENY_NEXT_TOKEN = 1
 
 
 __all__ = [
     "ALL_MODULE_KEYS",
     "MODULE_DEFS",
     "CapabilitySnapshot",
+    "LEDGER_ACTIONS_FAILED_CLOSED_AUDIT_STATUS",
+    "LEDGER_ACTIONS_FAILED_CLOSED_ERROR_CODE",
+    "LedgerActionDenyRegistration",
+    "LedgerActionsFailedClosed",
     "bootstrap_from_db",
     "build_status_payload",
     "channel_module_key",
     "evaluate_plugin_runtime_availability",
     "filter_runtime_event_subscriptions",
     "get_module_generation_cached",
+    "get_ledger_action_deny_generation",
     "get_snapshot",
     "is_ai_enabled_cached",
     "is_event_source_delivery_enabled",
     "is_module_enabled",
     "is_module_enabled_cached",
+    "ledger_action_block_reasons",
+    "ledger_action_deny_reasons",
+    "ledger_action_deny_registrations",
+    "ledger_actions_enabled",
     "mark_runtime_ready_if_starting",
     "module_key_for_setting",
     "module_setting_key",
     "normalize_capability_setting",
     "read_module_desired",
+    "register_ledger_action_deny",
     "reconcile_runtime_after_startup",
     "refresh_cache_from_db",
     "require_module_enabled",
+    "require_ledger_actions_enabled",
     "set_ai_enabled_compat",
     "set_module_enabled",
     "subscription_blocked_reason",

@@ -14,7 +14,7 @@ from io import BytesIO
 from typing import Any
 
 from ...redis_client import get_redis
-from .. import payout_compensation, userbot_rich_message
+from .. import payout_compensation, platform_capabilities, userbot_rich_message
 from ..payout_limit import PayoutLimitExceeded
 from .action_core import CANONICAL_ACTION_TYPES, ActionKind, classify_action
 from .delivery import save_action_reply_target
@@ -76,6 +76,8 @@ async def execute_userbot_interaction_action(
     action_type = normalize_userbot_payload_action_type(payload)
     if not action_type:
         raise ValueError("缺少 action_type")
+    if action_type == "payout":
+        platform_capabilities.require_ledger_actions_enabled()
 
     # Classify for unsupported / control actions that E3 should not execute.
     kind = classify_action({"type": action_type, "send_via": payload.get("send_via")})

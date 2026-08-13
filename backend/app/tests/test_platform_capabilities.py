@@ -42,6 +42,117 @@ def _reset_caps():
     caps._reset_for_tests()
 
 
+def _set_ledger_ready() -> None:
+    caps._CACHE_READY = True
+    caps._DESIRED["ledger"] = True
+    caps._RUNTIME["ledger"] = "ready"
+
+
+def test_ledger_actions_fail_closed_until_capability_cache_is_ready() -> None:
+    assert caps.ledger_actions_enabled() is False
+    assert caps.ledger_action_block_reasons() == ("capability_cache_not_ready",)
+
+
+def test_ledger_actions_require_desired_and_ready_runtime() -> None:
+    _set_ledger_ready()
+    assert caps.ledger_actions_enabled() is True
+    assert caps.ledger_action_block_reasons() == ()
+
+    caps._DESIRED["ledger"] = False
+    assert caps.ledger_actions_enabled() is False
+    assert caps.ledger_action_block_reasons() == ("ledger_not_desired",)
+
+
+@pytest.mark.parametrize(
+    ("runtime_state", "reason"),
+    [
+        ("starting", "ledger_runtime_starting"),
+        ("quiescing", "ledger_runtime_quiescing"),
+        ("stopped", "ledger_runtime_stopped"),
+        ("failed", "ledger_runtime_failed"),
+        (None, "ledger_runtime_unknown"),
+        ("unexpected", "ledger_runtime_unexpected"),
+    ],
+)
+def test_ledger_actions_reject_every_non_ready_or_unknown_runtime(
+    runtime_state: str | None,
+    reason: str,
+) -> None:
+    _set_ledger_ready()
+    if runtime_state is None:
+        caps._RUNTIME.pop("ledger", None)
+    else:
+        caps._RUNTIME["ledger"] = runtime_state  # type: ignore[assignment]
+
+    assert caps.ledger_actions_enabled() is False
+    assert caps.ledger_action_block_reasons() == (reason,)
+
+
+def test_ledger_actions_fail_closed_when_snapshot_read_raises(monkeypatch) -> None:
+    _set_ledger_ready()
+    monkeypatch.setattr(caps, "get_snapshot", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+
+    assert caps.ledger_actions_enabled() is False
+    assert caps.ledger_action_block_reasons() == ("capability_state_unavailable",)
+
+
+def test_ledger_action_deny_registration_tracks_owner_and_cleans_only_itself() -> None:
+    _set_ledger_ready()
+    initial_generation = caps.get_ledger_action_deny_generation()
+    first = caps.register_ledger_action_deny("on_call_active", owner="wp_t1:on_call")
+    second = caps.register_ledger_action_deny("maintenance", owner="ops:maintenance")
+
+    assert first.generation == initial_generation + 1
+    assert second.generation == initial_generation + 2
+    assert caps.ledger_action_deny_registrations() == (
+        ("ops:maintenance", "maintenance"),
+        ("wp_t1:on_call", "on_call_active"),
+    )
+    assert caps.ledger_action_deny_reasons() == ("maintenance", "on_call_active")
+    assert caps.ledger_actions_enabled() is False
+
+    first.dispose()
+    assert caps.get_ledger_action_deny_generation() == initial_generation + 3
+    assert caps.ledger_action_deny_registrations() == (("ops:maintenance", "maintenance"),)
+
+    first.dispose()
+    assert caps.get_ledger_action_deny_generation() == initial_generation + 3
+    second.dispose()
+    assert caps.get_ledger_action_deny_generation() == initial_generation + 4
+    assert caps.ledger_action_deny_registrations() == ()
+    assert caps.ledger_actions_enabled() is True
+
+
+@pytest.mark.parametrize(
+    ("owner", "reason"),
+    [("", "maintenance"), ("   ", "maintenance"), ("ops", ""), ("ops", "   " )],
+)
+def test_ledger_action_deny_registration_requires_owner_and_reason(owner: str, reason: str) -> None:
+    with pytest.raises(ValueError):
+        caps.register_ledger_action_deny(reason, owner=owner)
+
+
+def test_ledger_actions_reject_quiescing_window_even_when_desired_stays_true() -> None:
+    _set_ledger_ready()
+    caps._set_runtime("ledger", "quiescing")
+
+    assert caps.get_snapshot().desired["ledger"] is True
+    assert caps.ledger_actions_enabled() is False
+    assert caps.ledger_action_block_reasons() == ("ledger_runtime_quiescing",)
+
+
+def test_ledger_actions_restart_from_starting_then_recover_after_ready() -> None:
+    _set_ledger_ready()
+    assert caps.ledger_actions_enabled() is True
+
+    caps._apply_startup_runtime()
+    assert caps.get_snapshot().runtime["ledger"] == "starting"
+    assert caps.ledger_actions_enabled() is False
+
+    caps._set_runtime("ledger", "ready")
+    assert caps.ledger_actions_enabled() is True
+
+
 @pytest.mark.asyncio
 async def test_normalize_missing_generation_defaults_to_zero() -> None:
     assert caps.normalize_capability_setting({"enabled": True}) == {

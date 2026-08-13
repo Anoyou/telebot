@@ -24,7 +24,7 @@ from ..db.models.payout_compensation import (
     PAYOUT_COMPENSATION_STATUS_PENDING,
     PayoutCompensation,
 )
-from . import audit
+from . import audit, platform_capabilities
 from .action_tap import emit_compensated_payout_event
 
 LEDGER_DIRECTION_IN = "in"
@@ -298,6 +298,17 @@ async def mark_compensation_manual_paid(
 
     事务由调用方提交；函数会 flush 以便测试和 API 能立即观察到变更。
     """
+    ledger_deny_reasons = platform_capabilities.ledger_action_block_reasons()
+    if ledger_deny_reasons:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": platform_capabilities.LEDGER_ACTIONS_FAILED_CLOSED_ERROR_CODE,
+                "message": "资金动作被保险丝拒绝",
+                "audit_status": platform_capabilities.LEDGER_ACTIONS_FAILED_CLOSED_AUDIT_STATUS,
+                "deny_reasons": list(ledger_deny_reasons),
+            },
+        )
 
     now = datetime.now(UTC)
     current_status = await db.scalar(

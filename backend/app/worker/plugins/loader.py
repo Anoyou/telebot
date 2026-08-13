@@ -72,6 +72,7 @@ from ...services import (
     interaction_bot_service,
     payout_compensation,
     payout_limit,
+    platform_capabilities,
     recent_message_anchor,
     userbot_rich_message,
 )
@@ -2916,6 +2917,8 @@ def _userbot_action_log_detail(result: dict[str, Any]) -> dict[str, Any]:
             "reply_anchor_missing",
             "flood_wait_seconds",
             "peer_flood",
+            "audit_status",
+            "deny_reasons",
         )
         if key in result
     }
@@ -3266,6 +3269,21 @@ async def _apply_userbot_click_callback_button_action(
 
 async def _apply_userbot_payout_action(state: _AccountState, event: Any, action: dict[str, Any]) -> bool:
     target_chat_id = _action_chat_id(action, event)
+    ledger_deny_reasons = platform_capabilities.ledger_action_block_reasons()
+    if ledger_deny_reasons:
+        error = str(platform_capabilities.LedgerActionsFailedClosed(ledger_deny_reasons))
+        await _record_userbot_action_failure(
+            state,
+            action,
+            error_code=platform_capabilities.LEDGER_ACTIONS_FAILED_CLOSED_ERROR_CODE,
+            error=error,
+            target_chat_id=target_chat_id,
+            extra={
+                "audit_status": platform_capabilities.LEDGER_ACTIONS_FAILED_CLOSED_AUDIT_STATUS,
+                "deny_reasons": list(ledger_deny_reasons),
+            },
+        )
+        return False
     amount = _payout_amount(action)
     if amount is None:
         await _record_userbot_action_failure(

@@ -43,7 +43,7 @@ from ..db.models.payout_compensation import (
 from ..db.models.system import SystemSetting
 from ..logging_redaction import configure_dependency_log_levels, install_sensitive_log_filter
 from ..redis_client import get_redis
-from ..services import payout_compensation, recent_message_anchor
+from ..services import payout_compensation, platform_capabilities, recent_message_anchor
 from ..services.action_tap import emit_compensated_payout_event
 from ..services.ai_feature import is_ai_enabled
 from ..services.event_trace import (
@@ -1497,13 +1497,18 @@ async def _handle_run_interaction_action_command(
             result_ok = True
     except Exception as e:  # noqa: BLE001
         result_error = f"{type(e).__name__}: {e}"
-        if isinstance(e, PayoutLimitExceeded):
+        if isinstance(e, platform_capabilities.LedgerActionsFailedClosed):
+            error_code = platform_capabilities.LEDGER_ACTIONS_FAILED_CLOSED_ERROR_CODE
+        elif isinstance(e, PayoutLimitExceeded):
             error_code = "payout_limit_exceeded"
         else:
             error_code = _interaction_action_error_code(result_error)
         result_payload = _interaction_action_failure_result(
             payload, error=result_error, error_code=error_code
         )
+        if isinstance(e, platform_capabilities.LedgerActionsFailedClosed):
+            result_payload["audit_status"] = e.audit_status
+            result_payload["deny_reasons"] = list(e.reasons)
         # FloodWait/PeerFlood：喂给限速引擎自动降级（engine 可能为 None），detail 带上 wait 秒数。
         # 引擎钩子内部虽有 try/except，这里再兜一层以免打断下方 IPC 回包。
         if isinstance(e, FloodWaitError):
@@ -1584,6 +1589,8 @@ def _interaction_action_log_detail(result: dict[str, Any]) -> dict[str, Any]:
             "reply_anchor_missing",
             "flood_wait_seconds",
             "peer_flood",
+            "audit_status",
+            "deny_reasons",
         )
         if key in result
     }
@@ -1655,7 +1662,11 @@ async def _periodic_payout_compensation_scan(
     while True:
         config = await _load_payout_compensation_config()
         try:
-            if paused.is_set() and bool(config.get("enabled", True)):
+            if (
+                paused.is_set()
+                and bool(config.get("enabled", True))
+                and platform_capabilities.ledger_actions_enabled()
+            ):
                 await _scan_payout_compensations_once(
                     redis,
                     client,
@@ -1677,6 +1688,8 @@ async def _scan_payout_compensations_once(
     *,
     config: dict[str, Any] | None = None,
 ) -> int:
+    if not platform_capabilities.ledger_actions_enabled():
+        return 0
     config = payout_compensation.normalize_config(config or payout_compensation.DEFAULT_CONFIG)
     if not bool(config.get("enabled", True)):
         return 0

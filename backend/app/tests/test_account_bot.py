@@ -163,6 +163,8 @@ def _enable_platform_capabilities_for_interaction_tests() -> None:
 
     platform_capabilities._reset_for_tests()
     platform_capabilities._CACHE_READY = True
+    platform_capabilities._DESIRED["ledger"] = True
+    platform_capabilities._RUNTIME["ledger"] = "ready"
     yield
     platform_capabilities._reset_for_tests()
 
@@ -5290,6 +5292,54 @@ async def test_shared_userbot_payout_saves_target_before_completing_ledger(monke
     )
 
     assert order == ["save", "complete"]
+
+
+@pytest.mark.asyncio
+async def test_shared_userbot_payout_fails_closed_before_reply_lookup_or_side_effects(monkeypatch) -> None:
+    redis = _MemoryRedis()
+    client = SimpleNamespace(send_message=AsyncMock())
+    acquire_rate_limit = AsyncMock()
+    check_payout_limit = AsyncMock()
+    find_recent_message_id = AsyncMock()
+    claim = AsyncMock()
+    monkeypatch.setattr(userbot_actions.payout_compensation, "claim_payout_delivery", claim)
+    platform_capabilities._RUNTIME["ledger"] = "quiescing"
+
+    with pytest.raises(platform_capabilities.LedgerActionsFailedClosed) as exc_info:
+        await userbot_actions.execute_userbot_interaction_action(
+            client,
+            {
+                "action_type": "payout",
+                "chat_id": -100123,
+                "amount": 101,
+                "text": "+101",
+                "reply_to_user_id": 8629045843,
+                "payout_key": "payout-fuse-test",
+            },
+            account_id=1,
+            redis=redis,
+            acquire_rate_limit=acquire_rate_limit,
+            check_payout_limit=check_payout_limit,
+            find_recent_message_id=find_recent_message_id,
+            render_button_fallback=lambda text, reply_markup: text,
+            recent_search_limit=lambda value: 200,
+            reply_anchor_missing_text=lambda payload, user_id: "",
+            parse_mode_of=lambda payload: "plain",
+            telethon_parse_mode=lambda parse_mode: None,
+            is_settlement_send=lambda payload: True,
+            simulate_humanize=AsyncMock(),
+            read_saved_message_id=AsyncMock(),
+            is_message_not_modified=lambda exc: False,
+        )
+
+    assert exc_info.value.error_code == "ledger_actions_failed_closed"
+    assert exc_info.value.audit_status == "FAILED_CLOSED"
+    assert exc_info.value.reasons == ("ledger_runtime_quiescing",)
+    find_recent_message_id.assert_not_awaited()
+    client.send_message.assert_not_awaited()
+    acquire_rate_limit.assert_not_awaited()
+    check_payout_limit.assert_not_awaited()
+    claim.assert_not_awaited()
 
 
 @pytest.mark.asyncio

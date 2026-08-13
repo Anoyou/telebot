@@ -17,7 +17,7 @@ from app.db.models.action_event import (
     ACTION_EVENT_STATUS_OK,
     ActionEvent,
 )
-from app.services import action_tap
+from app.services import action_tap, platform_capabilities
 from app.services.interaction import delivery as delivery_mod
 from app.services.interaction.delivery import InteractionDeliveryExecutor
 from app.worker.plugins import loader as loader_mod
@@ -31,6 +31,18 @@ class _FakeRedis:
     async def publish(self, channel: str, payload: str) -> int:
         self.published.append((channel, payload))
         return 1
+
+
+@pytest.fixture(autouse=True)
+def _enable_ledger_actions_for_action_tap_tests() -> None:
+    """存量 payout 用例显式模拟资金能力已完成启动收敛。"""
+
+    platform_capabilities._reset_for_tests()
+    platform_capabilities._CACHE_READY = True
+    platform_capabilities._DESIRED["ledger"] = True
+    platform_capabilities._RUNTIME["ledger"] = "ready"
+    yield
+    platform_capabilities._reset_for_tests()
 
 
 @pytest.fixture

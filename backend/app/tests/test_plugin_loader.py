@@ -25,6 +25,7 @@ from telethon.tl.types import PeerUser
 from app.db.models.feature import (
     FEATURE_FORWARD,
 )
+from app.services import platform_capabilities
 from app.services.interaction.dedupe import interaction_message_claim_key
 from app.worker.plugins import loader as loader_mod
 from app.worker.plugins.base import Plugin, PluginContext
@@ -40,6 +41,16 @@ from app.worker.plugins.loader import (
 )
 from app.worker.plugins.manifest import Manifest
 from app.worker.ratelimit.humanize import HumanizeOpts
+
+
+@pytest.fixture(autouse=True)
+def _enable_ledger_actions_for_loader_tests() -> None:
+    platform_capabilities._reset_for_tests()
+    platform_capabilities._CACHE_READY = True
+    platform_capabilities._DESIRED["ledger"] = True
+    platform_capabilities._RUNTIME["ledger"] = "ready"
+    yield
+    platform_capabilities._reset_for_tests()
 
 
 def _write_installed_plugin_json(plugin_dir, plugin_key: str, **extra) -> None:
@@ -2455,6 +2466,58 @@ async def test_userbot_payout_action_rejected_when_over_limit(monkeypatch) -> No
     assert record_action.await_args.args[2] == loader_mod.TRACE_STATUS_FAILED
     assert record_action.await_args.kwargs["error_code"] == "payout_limit_exceeded"
     assert "单笔" in record_action.await_args.kwargs["error"]
+
+
+@pytest.mark.asyncio
+async def test_userbot_payout_action_fails_closed_before_dry_run_or_side_effects(monkeypatch) -> None:
+    state = loader_mod._AccountState(account_id=70)
+    state.redis = _FakeRedis()
+    state.client = SimpleNamespace(send_message=AsyncMock())
+    state.engine = SimpleNamespace(acquire=AsyncMock())
+    record_action = AsyncMock()
+    emit_action_tap = AsyncMock()
+    check_and_consume = AsyncMock()
+    claim = AsyncMock()
+    enqueue = AsyncMock()
+    monkeypatch.setattr(loader_mod, "record_action", record_action)
+    monkeypatch.setattr(loader_mod, "_emit_userbot_action_tap", emit_action_tap)
+    monkeypatch.setattr(loader_mod.payout_limit, "check_and_consume", check_and_consume)
+    monkeypatch.setattr(loader_mod.payout_compensation, "claim_payout_delivery", claim)
+    monkeypatch.setattr(loader_mod.payout_compensation, "enqueue_payout_compensation", enqueue)
+    platform_capabilities._RUNTIME["ledger"] = "quiescing"
+
+    ok = await loader_mod._apply_userbot_payout_action(
+        state,
+        SimpleNamespace(chat_id=-100777),
+        {
+            "type": "payout",
+            "amount": 8,
+            "chat_id": -100777,
+            "context": {"trace_id": "evt_fuse", "dry_run": True},
+        },
+    )
+
+    assert ok is False
+    state.client.send_message.assert_not_awaited()
+    state.engine.acquire.assert_not_awaited()
+    check_and_consume.assert_not_awaited()
+    claim.assert_not_awaited()
+    enqueue.assert_not_awaited()
+    assert record_action.await_args.args[2] == loader_mod.TRACE_STATUS_FAILED
+    assert (
+        record_action.await_args.kwargs["error_code"]
+        == platform_capabilities.LEDGER_ACTIONS_FAILED_CLOSED_ERROR_CODE
+    )
+    assert record_action.await_args.kwargs["result"]["audit_status"] == "FAILED_CLOSED"
+    assert record_action.await_args.kwargs["result"]["deny_reasons"] == [
+        "ledger_runtime_quiescing"
+    ]
+    assert emit_action_tap.await_args.kwargs["result"]["deny_reasons"] == [
+        "ledger_runtime_quiescing"
+    ]
+    log_payload = json.loads(state.redis.list_pushes[-1][1])
+    assert log_payload["detail"]["audit_status"] == "FAILED_CLOSED"
+    assert log_payload["detail"]["deny_reasons"] == ["ledger_runtime_quiescing"]
 
 
 @pytest.mark.asyncio

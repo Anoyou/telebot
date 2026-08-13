@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ...redis_client import get_redis
-from .. import account_bot_service
+from .. import account_bot_service, platform_capabilities
 from .. import payout_compensation as payout_compensation_service
 from ..action_tap import (
     ACTION_EVENT_STATUS_DRY_RUN,
@@ -195,6 +195,39 @@ class InteractionDeliveryExecutor:
             return False
 
         async def _on_payout(action: dict[str, Any]) -> bool:
+            ledger_deny_reasons = platform_capabilities.ledger_action_block_reasons()
+            if ledger_deny_reasons:
+                error = str(platform_capabilities.LedgerActionsFailedClosed(ledger_deny_reasons))
+                result = {
+                    "audit_status": platform_capabilities.LEDGER_ACTIONS_FAILED_CLOSED_AUDIT_STATUS,
+                    "deny_reasons": list(ledger_deny_reasons),
+                }
+                await record_action(
+                    action.get("context"),
+                    action,
+                    TRACE_STATUS_FAILED,
+                    error_code=platform_capabilities.LEDGER_ACTIONS_FAILED_CLOSED_ERROR_CODE,
+                    error=error,
+                    result=result,
+                )
+                await self._emit_action_tap(
+                    action,
+                    ACTION_EVENT_STATUS_FAILED,
+                    channel="userbot_reply",
+                    error_code=platform_capabilities.LEDGER_ACTIONS_FAILED_CLOSED_ERROR_CODE,
+                    error=error,
+                    result=result,
+                )
+                await self.write_log(
+                    self.incoming,
+                    "warn",
+                    "interaction payout denied by ledger action fuse",
+                    reason_code=platform_capabilities.LEDGER_ACTIONS_FAILED_CLOSED_ERROR_CODE,
+                    audit_status=platform_capabilities.LEDGER_ACTIONS_FAILED_CLOSED_AUDIT_STATUS,
+                    deny_reasons=list(ledger_deny_reasons),
+                    **self.log_context(self.incoming),
+                )
+                return False
             await self._record_settlement(action)
             await self._apply_payout(
                 action,

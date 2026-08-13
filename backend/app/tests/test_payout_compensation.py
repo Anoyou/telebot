@@ -23,7 +23,7 @@ from app.db.models.payout_compensation import (
     PAYOUT_COMPENSATION_STATUS_SENT,
     PayoutCompensation,
 )
-from app.services import account_bot_runtime
+from app.services import account_bot_runtime, platform_capabilities
 from app.services import payout_compensation as payout_compensation_service
 from app.services.interaction.delivery import InteractionDeliveryExecutor
 from app.worker import runtime as worker_runtime
@@ -47,6 +47,18 @@ class _FakeRedis:
             return False
         self.values[str(key)] = value
         return True
+
+
+@pytest.fixture(autouse=True)
+def _enable_ledger_actions_for_existing_payout_tests() -> None:
+    """存量 payout 用例显式模拟能力缓存已收敛，不能依赖缺省放行。"""
+
+    platform_capabilities._reset_for_tests()
+    platform_capabilities._CACHE_READY = True
+    platform_capabilities._DESIRED["ledger"] = True
+    platform_capabilities._RUNTIME["ledger"] = "ready"
+    yield
+    platform_capabilities._reset_for_tests()
 
 
 @pytest.mark.parametrize(
@@ -424,6 +436,189 @@ async def test_delivery_failed_payout_enqueues_and_records_detail(monkeypatch) -
     assert record_action.await_args.kwargs["payout_key"] == enqueue_kwargs["payload"]["payout_key"]
     assert record_action.await_args.kwargs["result"]["compensation_queued"] is True
     assert record_action.await_args.kwargs["result"]["payout_key"] == enqueue_kwargs["payload"]["payout_key"]
+
+
+@pytest.mark.asyncio
+async def test_delivery_payout_fails_closed_before_settlement_worker_or_compensation(monkeypatch) -> None:
+    incoming = account_bot_runtime.Incoming(
+        account_id=1,
+        token="123:token",
+        update_id=10,
+        user_id=20,
+        chat_id=-100,
+        message_id=30,
+        text="",
+        trace_id="evt_payout_fuse",
+    )
+    run_worker_action = AsyncMock()
+    record_action = AsyncMock()
+    enqueue = AsyncMock()
+    write_log = AsyncMock()
+    record_settlement = AsyncMock()
+    emit_action_tap = AsyncMock()
+    monkeypatch.setattr("app.services.interaction.delivery.record_action", record_action)
+    monkeypatch.setattr(payout_compensation_service, "enqueue_payout_compensation", enqueue)
+    monkeypatch.setattr(InteractionDeliveryExecutor, "_record_settlement", record_settlement)
+    monkeypatch.setattr(InteractionDeliveryExecutor, "_emit_action_tap", emit_action_tap)
+    platform_capabilities._RUNTIME["ledger"] = "quiescing"
+    executor = InteractionDeliveryExecutor(
+        incoming=incoming,
+        write_log=write_log,
+        run_worker_action=run_worker_action,
+        log_context=account_bot_runtime._interaction_log_context,
+        trace_context=account_bot_runtime._interaction_trace_context,
+    )
+
+    await executor.apply(
+        [
+            {
+                "type": "payout",
+                "amount": 66,
+                "settlement": {"amount": 66},
+                "context": {"trace_id": "evt_payout_fuse"},
+            }
+        ]
+    )
+
+    record_settlement.assert_not_awaited()
+    run_worker_action.assert_not_awaited()
+    enqueue.assert_not_awaited()
+    assert record_action.await_args.args[2] == "failed"
+    assert (
+        record_action.await_args.kwargs["error_code"]
+        == platform_capabilities.LEDGER_ACTIONS_FAILED_CLOSED_ERROR_CODE
+    )
+    assert record_action.await_args.kwargs["result"] == {
+        "audit_status": "FAILED_CLOSED",
+        "deny_reasons": ["ledger_runtime_quiescing"],
+    }
+    assert emit_action_tap.await_args.kwargs["error_code"] == "ledger_actions_failed_closed"
+    assert emit_action_tap.await_args.kwargs["result"]["deny_reasons"] == [
+        "ledger_runtime_quiescing"
+    ]
+    assert write_log.await_args.kwargs["reason_code"] == "ledger_actions_failed_closed"
+    assert write_log.await_args.kwargs["audit_status"] == "FAILED_CLOSED"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("runtime_state", "expected_scans"),
+    [("ready", 1), ("quiescing", 0)],
+)
+async def test_periodic_payout_scan_respects_ledger_fuse(
+    monkeypatch,
+    runtime_state: str,
+    expected_scans: int,
+) -> None:
+    scan = AsyncMock()
+    monkeypatch.setattr(worker_runtime, "_load_payout_compensation_config", AsyncMock(return_value=_scan_config()))
+    monkeypatch.setattr(worker_runtime, "_scan_payout_compensations_once", scan)
+    monkeypatch.setattr(
+        worker_runtime.asyncio,
+        "sleep",
+        AsyncMock(side_effect=asyncio.CancelledError),
+    )
+    platform_capabilities._RUNTIME["ledger"] = runtime_state
+    paused = asyncio.Event()
+    paused.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await worker_runtime._periodic_payout_compensation_scan(
+            _FakeRedis(),
+            _ReplayClient(),
+            7,
+            paused,
+        )
+
+    assert scan.await_count == expected_scans
+
+
+@pytest.mark.asyncio
+async def test_one_shot_payout_scan_fails_closed_before_due_query_and_preserves_pending(
+    payout_session_factory,
+    monkeypatch,
+) -> None:
+    row = await _insert_compensation_row(
+        payout_session_factory,
+        payout_key="pay_fuse_pending",
+        trace_id="evt_fuse_pending",
+    )
+    due = AsyncMock()
+    client = _ReplayClient()
+    monkeypatch.setattr(worker_runtime, "_due_payout_compensation_ids", due)
+    platform_capabilities._RUNTIME["ledger"] = "quiescing"
+
+    processed = await worker_runtime._scan_payout_compensations_once(
+        _FakeRedis(),
+        client,
+        7,
+        config=_scan_config(),
+    )
+
+    assert processed == 0
+    due.assert_not_awaited()
+    saved = await _get_compensation_row(payout_session_factory, row.id)
+    assert saved.status == PAYOUT_COMPENSATION_STATUS_PENDING
+    assert saved.retry_count == row.retry_count
+    assert client.sent == []
+
+
+@pytest.mark.asyncio
+async def test_pending_payout_settles_exactly_once_after_ledger_fuse_recovers(
+    payout_session_factory,
+    monkeypatch,
+) -> None:
+    row = await _insert_compensation_row(
+        payout_session_factory,
+        payout_key="pay_resume_once",
+        trace_id="evt_resume_once",
+    )
+    redis = _FakeRedis()
+    client = _ReplayClient(send_ids=[880])
+    monkeypatch.setattr(worker_runtime, "_check_payout_limit", AsyncMock(return_value=(True, None)))
+    monkeypatch.setattr(worker_runtime, "record_action", AsyncMock())
+    platform_capabilities._RUNTIME["ledger"] = "quiescing"
+
+    assert (
+        await worker_runtime._scan_payout_compensations_once(
+            redis, client, 7, config=_scan_config()
+        )
+        == 0
+    )
+    blocked = await _get_compensation_row(payout_session_factory, row.id)
+    assert blocked.status == PAYOUT_COMPENSATION_STATUS_PENDING
+    assert client.sent == []
+
+    platform_capabilities._RUNTIME["ledger"] = "ready"
+    assert (
+        await worker_runtime._scan_payout_compensations_once(
+            redis, client, 7, config=_scan_config()
+        )
+        == 1
+    )
+    assert (
+        await worker_runtime._scan_payout_compensations_once(
+            redis, client, 7, config=_scan_config()
+        )
+        == 0
+    )
+
+    saved = await _get_compensation_row(payout_session_factory, row.id)
+    assert saved.status == PAYOUT_COMPENSATION_STATUS_SENT
+    assert saved.sent_message_id == 880
+    assert len(client.sent) == 1
+    async with payout_session_factory() as db:
+        events = list(
+            (
+                await db.execute(
+                    select(ActionEvent).where(ActionEvent.payout_key == "pay_resume_once")
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert len(events) == 1
+    assert events[0].status == ACTION_EVENT_STATUS_COMPENSATED
 
 
 @pytest.mark.asyncio

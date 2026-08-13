@@ -35,7 +35,7 @@ from telethon.tl.types import (
     ReplyInlineMarkup,
 )
 
-from app.services import account_bot_runtime, account_bot_service, userbot_rich_message
+from app.services import account_bot_runtime, account_bot_service, platform_capabilities, userbot_rich_message
 from app.services import payout_limit as payout_limit_mod
 from app.services.event_trace import TRACE_STATUS_FAILED, TRACE_STATUS_OK, TRACE_STATUS_SKIPPED
 from app.services.interaction import delivery as delivery_mod
@@ -47,6 +47,16 @@ from app.worker.plugins import loader as loader_mod
 CHAT = -100
 B64 = base64.b64encode(b"parity-media").decode("ascii")
 SESSION_KEY = "tp:isession:parity:1"
+
+
+@pytest.fixture(autouse=True)
+def _enable_ledger_actions_for_parity_tests() -> None:
+    platform_capabilities._reset_for_tests()
+    platform_capabilities._CACHE_READY = True
+    platform_capabilities._DESIRED["ledger"] = True
+    platform_capabilities._RUNTIME["ledger"] = "ready"
+    yield
+    platform_capabilities._reset_for_tests()
 # 更新会话成功需要预置一条“userbot 观测到的”活跃会话。
 SEED_SESSION: dict[str, Any] = {
     "account_id": 1,
@@ -530,13 +540,18 @@ def _make_run_worker_action(client: _FakeClient, engine: Any, mem: _MemRedis):
             return True, None, result_payload
         except Exception as exc:  # noqa: BLE001
             error = f"{type(exc).__name__}: {exc}"
-            if isinstance(exc, PayoutLimitExceeded):
+            if isinstance(exc, platform_capabilities.LedgerActionsFailedClosed):
+                error_code = platform_capabilities.LEDGER_ACTIONS_FAILED_CLOSED_ERROR_CODE
+            elif isinstance(exc, PayoutLimitExceeded):
                 error_code = "payout_limit_exceeded"
             else:
                 error_code = worker_runtime._interaction_action_error_code(error)  # noqa: SLF001
             result_payload = worker_runtime._interaction_action_failure_result(  # noqa: SLF001
                 payload, error=error, error_code=error_code
             )
+            if isinstance(exc, platform_capabilities.LedgerActionsFailedClosed):
+                result_payload["audit_status"] = exc.audit_status
+                result_payload["deny_reasons"] = list(exc.reasons)
             return False, error, result_payload
 
     return run

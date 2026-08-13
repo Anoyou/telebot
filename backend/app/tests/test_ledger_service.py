@@ -22,7 +22,17 @@ from app.db.models.payout_compensation import (
     PAYOUT_COMPENSATION_STATUS_PENDING,
     PayoutCompensation,
 )
-from app.services import ledger_service
+from app.services import ledger_service, platform_capabilities
+
+
+@pytest.fixture(autouse=True)
+def _enable_ledger_actions_for_ledger_write_tests() -> None:
+    platform_capabilities._reset_for_tests()
+    platform_capabilities._CACHE_READY = True
+    platform_capabilities._DESIRED["ledger"] = True
+    platform_capabilities._RUNTIME["ledger"] = "ready"
+    yield
+    platform_capabilities._reset_for_tests()
 
 
 @pytest.fixture
@@ -466,6 +476,43 @@ async def test_manual_paid_compensation_writes_audit_and_closes_row(
     assert events[0].status == ACTION_EVENT_STATUS_COMPENSATED
     assert events[0].action_type == "payout"
     assert events[0].params_summary.get("payout_key") == "pay_manual"
+
+
+@pytest.mark.asyncio
+async def test_manual_paid_compensation_fails_closed_without_mutating_row(
+    ledger_session_factory,
+    monkeypatch,
+) -> None:
+    from fastapi import HTTPException
+
+    row = await _insert_compensation(ledger_session_factory, payout_key="pay_manual_fuse")
+    audit_write = AsyncMock()
+    monkeypatch.setattr(ledger_service.audit, "write", audit_write)
+    platform_capabilities._RUNTIME["ledger"] = "quiescing"
+
+    async with ledger_session_factory() as db:
+        with pytest.raises(HTTPException) as exc_info:
+            await ledger_service.mark_compensation_manual_paid(
+                db,
+                row.id,
+                user_id=42,
+                note="线下已补",
+            )
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail == {
+        "code": "ledger_actions_failed_closed",
+        "message": "资金动作被保险丝拒绝",
+        "audit_status": "FAILED_CLOSED",
+        "deny_reasons": ["ledger_runtime_quiescing"],
+    }
+    audit_write.assert_not_awaited()
+    async with ledger_session_factory() as db:
+        current = await db.get(PayoutCompensation, row.id)
+        assert current is not None
+        assert current.status == PAYOUT_COMPENSATION_STATUS_PENDING
+        events = list((await db.execute(select(ActionEvent))).scalars().all())
+    assert events == []
 
 
 @pytest.mark.asyncio

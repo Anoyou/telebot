@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from app.services import event_trace
+from app.services import event_trace, platform_capabilities
 from app.worker.command import (
     _BUILTIN,
     CommandContext,
@@ -93,6 +93,18 @@ async def _wait_for_publish(redis: _FakeCmdRedis, predicate, *, timeout: float =
                 return channel, msg
         await asyncio.sleep(0.01)
     raise AssertionError("timed out waiting for redis publish")
+
+
+@pytest.fixture(autouse=True)
+def _enable_ledger_actions_for_worker_command_tests() -> None:
+    """存量 worker payout 用例显式模拟能力缓存与 ledger runtime 已 ready。"""
+
+    platform_capabilities._reset_for_tests()
+    platform_capabilities._CACHE_READY = True
+    platform_capabilities._DESIRED["ledger"] = True
+    platform_capabilities._RUNTIME["ledger"] = "ready"
+    yield
+    platform_capabilities._reset_for_tests()
 
 
 @pytest.mark.asyncio
@@ -865,6 +877,60 @@ async def test_run_interaction_action_command_can_suppress_reply_anchor_notice()
     log_payload = json.loads(redis.logs[-1][1])
     assert log_payload["detail"]["error_code"] == "reply_anchor_missing"
     assert log_payload["detail"]["reply_anchor_missing"] is True
+
+
+@pytest.mark.asyncio
+async def test_run_interaction_action_command_maps_ledger_fuse_failure() -> None:
+    from app.worker import runtime as runtime_mod
+
+    class _Client:
+        def __init__(self) -> None:
+            self.sent: list[dict[str, object]] = []
+
+        async def send_message(self, chat_id, text, **kwargs):  # noqa: ANN001, ANN003
+            self.sent.append({"chat_id": chat_id, "text": text, **kwargs})
+            return SimpleNamespace(id=900)
+
+    platform_capabilities._reset_for_tests()
+    platform_capabilities._CACHE_READY = True
+    platform_capabilities._DESIRED["ledger"] = True
+    platform_capabilities._RUNTIME["ledger"] = "quiescing"
+    redis = _FakeCmdRedis()
+    client = _Client()
+    try:
+        await runtime_mod._handle_run_interaction_action_command(
+            redis,
+            client,
+            55,
+            IPCMessage(
+                CMD_RUN_INTERACTION_ACTION,
+                {
+                    "payload": {
+                        "action_type": "payout",
+                        "chat_id": -100333,
+                        "amount": 25,
+                    }
+                },
+            ),
+            "rpc-action",
+        )
+    finally:
+        platform_capabilities._reset_for_tests()
+
+    _channel, msg = await _wait_for_publish(
+        redis,
+        lambda channel, msg: channel == "rpc-action" and msg.type == CMD_RUN_INTERACTION_ACTION,
+    )
+    assert msg.payload["ok"] is False
+    result = msg.payload["result"]
+    assert result["error_code"] == "ledger_actions_failed_closed"
+    assert result["audit_status"] == "FAILED_CLOSED"
+    assert result["deny_reasons"] == ["ledger_runtime_quiescing"]
+    assert client.sent == []
+    log_payload = json.loads(redis.logs[-1][1])
+    assert log_payload["detail"]["error_code"] == "ledger_actions_failed_closed"
+    assert log_payload["detail"]["audit_status"] == "FAILED_CLOSED"
+    assert log_payload["detail"]["deny_reasons"] == ["ledger_runtime_quiescing"]
 
 
 @pytest.mark.asyncio
