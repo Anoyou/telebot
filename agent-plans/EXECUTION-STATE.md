@@ -4,11 +4,11 @@
 > 纪律：每 WP 完成即更新本文件；新会话恢复从本文件开始。
 > 状态：`pending` → `in_progress` → `done`（附 commit 哈希）/ `blocked` / `partial`（附缺口）
 
-## 当前计划：树形组合化改造 v1（agent-plans/2026-08-14-tree-composability-plan.md）
+## 当前计划：树形组合化改造 v1.1（agent-plans/2026-08-14-tree-composability-plan.md）
 
-- [ ] WP-T1 值守预设 — in_progress
-- [ ] WP-T2 接线规范 — pending
-- [ ] WP-T3 钱的保险丝 — pending
+- [x] WP-T2 接线规范 — done `104ddddb`
+- [ ] WP-T3 钱的保险丝 — pending（v1.1 先行，下一单）
+- [ ] WP-T1 值守预设 — pending（v1.1 裁定：依赖 T3，原 in_progress 会话已转 T3）
 - [ ] WP-T4 声明补齐+按叶点枝+看树视图 — pending
 - [~] WP-T5 AI 写操作工具 — 挂起（扳机：首个真实写工具需求）
 
