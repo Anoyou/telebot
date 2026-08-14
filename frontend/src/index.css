@@ -1521,3 +1521,97 @@
     transition-duration: 1ms !important;
   }
 }
+
+/* ===== 看树视图（侧生树）：干-枝-叶连接线 ===== */
+.ptree-spine {
+  --ptree-limb-y: 0.875rem; /* 枝干横线对齐枝节点首行中心 */
+  --ptree-tick-y: 0.8125rem; /* 叶行小横线对齐叶首行中心 */
+  position: relative;
+  padding-left: 1.25rem;
+}
+
+.ptree-spine::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: -0.375rem;
+  bottom: 0;
+  width: 2px;
+  border-radius: 1px;
+  background: linear-gradient(
+    to bottom,
+    hsl(var(--muted-foreground) / 0.5),
+    hsl(var(--muted-foreground) / 0.18)
+  );
+}
+
+.ptree-limb {
+  position: relative;
+}
+
+.ptree-limb::before {
+  content: "";
+  position: absolute;
+  left: -1.25rem;
+  top: var(--ptree-limb-y);
+  width: 1.05rem;
+  height: 2px;
+  background: hsl(var(--muted-foreground) / 0.35);
+}
+
+.ptree-limb--alive::before {
+  background: hsl(var(--success) / 0.55);
+}
+
+.ptree-limb--dead::before {
+  background: repeating-linear-gradient(
+    to right,
+    hsl(var(--muted-foreground) / 0.4) 0 4px,
+    transparent 4px 7px
+  );
+}
+
+.ptree-limb--flush::before {
+  top: 0.5rem;
+}
+
+.ptree-twigs {
+  position: relative;
+  margin-left: 0.9rem;
+  padding-left: 1.1rem;
+}
+
+.ptree-twig {
+  position: relative;
+}
+
+.ptree-twig::before {
+  content: "";
+  position: absolute;
+  left: -1.1rem;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: hsl(var(--border));
+}
+
+.ptree-twig::after {
+  content: "";
+  position: absolute;
+  left: -1.1rem;
+  top: var(--ptree-tick-y);
+  width: 0.8rem;
+  height: 1px;
+  background: hsl(var(--border));
+}
+
+.ptree-twig:last-child::before {
+  bottom: auto;
+  height: var(--ptree-tick-y);
+}
+
+.ptree-twigs--alive .ptree-twig::before,
+.ptree-twigs--alive .ptree-twig::after {
+  background: hsl(var(--success) / 0.32);
+}
+

@@ -57,6 +57,7 @@ import type { PlatformModuleKey, RuntimeProfileDryRunOut } from "@/api/types";
 import { listAccounts } from "@/api/accounts";
 import { getErrMsg, api } from "@/lib/api";
 import { moduleLabel, runtimeStateLabel } from "@/lib/navigation";
+import { PlatformTreeView } from "./PlatformTreeView";
 import { NotifyBots } from "./NotifyBots";
 import { DeviceProfileManager } from "./DeviceProfileManager";
 import { ProxyManager } from "./ProxyManager";
@@ -808,98 +809,9 @@ export function SettingsIndex() {
                 </div>
               ) : treeQ.isError ? (
                 <p className="text-xs text-destructive">看树数据读取失败：{getErrMsg(treeQ.error)}</p>
-              ) : (
-                <>
-                  <div className="grid gap-2 text-xs sm:grid-cols-3">
-                    <div className="rounded-md border bg-muted/20 p-3">
-                      <div className="text-muted-foreground">Userbot</div>
-                      <div className="mt-1 font-medium">
-                        {treeQ.data
-                          ? `${treeQ.data.trunk.userbot.alive}/${treeQ.data.trunk.userbot.total} worker 存活`
-                          : "暂无数据"}
-                      </div>
-                    </div>
-                    <div className="rounded-md border bg-muted/20 p-3">
-                      <div className="text-muted-foreground">总闸</div>
-                      <div className="mt-1 font-medium">
-                        {treeQ.data?.trunk.kill_switch ? "已拉闸" : "正常"}
-                      </div>
-                    </div>
-                    <div className="rounded-md border bg-muted/20 p-3">
-                      <div className="text-muted-foreground">运行预设</div>
-                      <div className="mt-1 font-medium">
-                        {treeQ.data?.trunk.current_profile === "safe_watch"
-                          ? "值守"
-                          : treeQ.data?.trunk.current_profile === "custom"
-                            ? "自定义"
-                            : "生产"}
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-5">
-                    {treeQ.data
-                      ? Object.entries(treeQ.data.branches).map(([key, branch]) => (
-                          <div key={key} className="rounded-md border bg-muted/20 p-3 text-xs">
-                            <div className="flex items-center justify-between gap-2">
-                              <span className="font-medium">{moduleLabel(key)}</span>
-                              <SignalPill
-                                tone={branch.desired ? "success" : "neutral"}
-                                label="枝"
-                                value={branch.desired ? runtimeStateLabel(branch.state) : "已关闭"}
-                              />
-                            </div>
-                            <p className="mt-2 break-words text-muted-foreground">
-                              {branch.demanded_by.length > 0
-                                ? `需求：${branch.demanded_by.join("、")}`
-                                : branch.can_turn_off
-                                  ? "无叶需要 · 可关"
-                                  : "无叶需要"}
-                            </p>
-                            {branch.forced_off ? (
-                              <p className="mt-1 text-destructive">管理员强制关闭</p>
-                            ) : null}
-                          </div>
-                        ))
-                      : null}
-                  </div>
-
-                  <div className="space-y-2">
-                    {treeQ.data?.leaves.length ? (
-                      treeQ.data.leaves.map((leaf) => (
-                        <div
-                          key={leaf.key}
-                          className="flex flex-col gap-2 rounded-md border border-border/70 p-3 text-xs sm:flex-row sm:items-start sm:justify-between"
-                        >
-                          <div className="min-w-0">
-                            <div className="flex flex-wrap items-center gap-2">
-                              <span className="font-medium">{leaf.key}</span>
-                              <span className="rounded bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground">
-                                {leaf.attachment}
-                              </span>
-                              <span className={leaf.enabled ? "text-success" : "text-muted-foreground"}>
-                                {leaf.enabled ? "已启用" : "未启用"}
-                              </span>
-                            </div>
-                            <p className="mt-1 break-words text-muted-foreground">
-                              需要：{leaf.requires.length > 0 ? leaf.requires.map(moduleLabel).join("、") : "无"}
-                            </p>
-                            {leaf.warnings.map((warning) => (
-                              <p key={warning} className="mt-1 text-warning">
-                                {leaf.source_missing ? "源缺失：" : "警告："}{warning}
-                              </p>
-                            ))}
-                          </div>
-                        </div>
-                      ))
-                    ) : (
-                      <p className="rounded-md border border-dashed p-3 text-xs text-muted-foreground">
-                        当前没有已登记的插件叶。
-                      </p>
-                    )}
-                  </div>
-                </>
-              )}
+              ) : treeQ.data ? (
+                <PlatformTreeView tree={treeQ.data} />
+              ) : null}
             </CardContent>
           </Card>
 
