@@ -106,7 +106,7 @@ TelePilot 的目标架构用一棵树描述。**改造原则：能力皆可组�
 4. **看树视图**：`GET /api/platform/tree` 返回 `{trunk: {userbot 状态, kill_switch, 当前 profile}, branches: {模块: {state, demanded_by}}, leaves: [{key, 嫁接方式(直通/命令/交互), enabled, requires}]}`；工作台简单渲染（对标 dsh 的 `--dump-config`：一眼说清这台机器跑的是什么树）。
 5. 可选加分项：System Agent 已有 features 工具面的话，顺带暴露只读"看树"查询。
 
-**验收**：端到端——全新部署只启用 `sum` 型工具叶 → 看树显示台账枝灭、资金 API 拒绝（依赖 T3）；启用 `lottery_plus` → ledger+interaction_bot 自动点亮且有审计；值守激活时启用游戏插件被拒并提示原因；13 叶声明齐全、新装缺声明被 schema 拦截。
+**验收**：端到端——全新部署只启用 `sum` 型工具叶 → 看树显示台账枝灭、资金 API 拒绝（依赖 T3）；启用 `lottery_plus` → ledger+interaction_bot 自动点亮且有审计；值守激活时启用游戏插件被拒并提示原因；11 叶（forward、scheduler + 9 installed）声明齐全、新装缺声明被 schema 拦截。
 
 ### WP-T5（挂起，勿开工）AI 写操作工具开闸
 
@@ -129,7 +129,7 @@ WP-T5 挂起
 
 1. 工作台一键值守/恢复可用，审计可查，三嫁接方式零出站验证通过。
 2. ledger 枝断时三执行体资金全拒的回归测试常绿，且默认 fail-closed。
-3. 13 叶声明齐全；新装插件缺声明被拦；按叶点枝 + 看树视图上线。
+3. 11 叶声明齐全；新装插件缺声明被拦；按叶点枝 + 看树视图上线。
 4. 协议文档与 Protocol 类合入，零行为变化。
 5. CHANGELOG 逐 WP 记录；EXECUTION-STATE.md 本计划分节全部 done + commit 哈希。
 
