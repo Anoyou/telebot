@@ -127,7 +127,7 @@ my_plugin/
 | `ai` | 插件必须使用模型 Provider 或 `ctx.ai` 才能完成核心功能 |
 | `interaction_bot` | 插件必须由 Interaction Bot 接收或发送互动消息、按钮、题面 |
 | `webhooks` | 插件必须依赖公开入站 Webhook 才能接收业务事件 |
-| `ledger` | 插件需要资金台账查询、统计、导出或人工操作面 |
+| `ledger` | 插件会产生资金动作——发奖（`payout`）、自动结算、补偿或人工核销；或需要台账查询、统计、导出、人工操作面。台账枝关闭或值守时，资金动作会被 fail-closed 明确拒绝 |
 | `dispatch_debug` | 插件必须依赖 dispatch 模拟或 router debug trace 才能工作；普通插件通常不声明 |
 
 示例：

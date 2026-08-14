@@ -7,7 +7,7 @@ TelePilot 的核心定位是稳定的平台级 API 与通道。以下能力属�
 | `ai` | `ai_enabled` | 模型 Provider、AI 指令、插件 `ctx.ai` |
 | `interaction_bot` | `interaction_bot_enabled` | 交互 Bot / 测试 Bot 与 `interaction_bot` 通道 |
 | `webhooks` | `webhooks_enabled` | 公开入站 Webhook 投递 |
-| `ledger` | `ledger_enabled` | 台账查询、统计、导出与人工操作面 |
+| `ledger` | `ledger_enabled` | 台账查询、统计、导出与人工操作面；发奖、补偿重放、人工核销等资金动作随枝 fail-closed（关闭或值守时明确拒绝） |
 | `dispatch_debug` | `dispatch_debug_enabled` | 命中模拟与 router debug trace |
 
 ## 边界

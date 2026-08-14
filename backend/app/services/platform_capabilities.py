@@ -62,7 +62,7 @@ MODULE_DEFS: dict[ModuleKey, dict[str, str]] = {
     "ledger": {
         "setting_key": "ledger_enabled",
         "label": "资金台账",
-        "description": "台账查询、统计、导出与人工操作面",
+        "description": "台账查询、统计、导出与人工操作面；关闭时发奖等资金动作 fail-closed 拒绝",
     },
     "dispatch_debug": {
         "setting_key": "dispatch_debug_enabled",
