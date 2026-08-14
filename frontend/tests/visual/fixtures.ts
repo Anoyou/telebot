@@ -171,6 +171,25 @@ function jsonResponse(pathname: string): unknown | undefined {
   if (pathname === "/api/system-agent/actions") return [];
   if (pathname === "/api/system-agent/memory") return [];
   if (pathname === "/api/system/capabilities") return platformCapabilitiesFixture;
+  if (pathname === "/api/platform/profile") return {
+    active_profile: null,
+    current_profile: "production",
+    status: "idle",
+    last_error: null,
+    operator_id: null,
+    updated_at: null,
+    modules: {},
+    blind_spot: null,
+  };
+  if (pathname === "/api/platform/tree") return {
+    trunk: {
+      userbot: { workers: [], total: 0, alive: 0 },
+      kill_switch: false,
+      current_profile: "production",
+    },
+    branches: {},
+    leaves: [],
+  };
   if (pathname === "/api/feature-matrix") return { features: [] };
   if (pathname === "/api/ledger") return { items: [ledgerEntryFixture] };
   if (pathname === "/api/ledger/summary") return emptyLedgerSummary;
