@@ -10,7 +10,19 @@
 - [x] WP-T3 钱的保险丝 — done `61c87613`
 - [x] WP-T1 值守预设 — done `ee60ffed`
 - [x] WP-T4 声明补齐+按叶点枝+看树视图 — done `8f426055`
-- [~] WP-T5 AI 写操作工具 — 挂起（扳机：首个真实写工具需求）
+
+### 挂起窗口（扳机制：故意不做，条件到了才开工，非遗漏）
+
+- [~] WP-T5 AI 写操作工具 — 扳机：首个真实写工具需求；实现必须走 PreparedAction 确认流
+- [~] AI Provider 插件化 seam — 扳机：llm_router 契约硬化完成 + 出现真实第三方接入需求
+- [~] 新枝脚手架（能力模块单点定义 + codegen 波及全楼）— 扳机：首次真实"加盖"需求；首根新枝与脚手架同批施工
+- [~] 可选能力声明 optional_platform_capabilities（叶的"营养不良"降级模式）— 扳机：首个"枝暗仍可降级运行"的真实插件需求
+- [~] 更多运行预设（轻量 / 开发沙箱）— 扳机：真实部署场景出现
+
+## 当前计划：一致性核销与文档真实性审计 v1（agent-plans/2026-08-15-consistency-audit-plan.md）
+
+- [ ] WP-A 三通道一致性核销 — pending
+- [ ] WP-B 插件文档族真实性审计 — pending
 
 ## 当前计划：内置 Codex Gateway / 全链路 Agent 接入 / LLM 错误语义收口 v1
 
