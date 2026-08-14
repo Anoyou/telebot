@@ -274,6 +274,12 @@ def _permissions(profile: str) -> list[str]:
     return ["send_message", "read_chat"]
 
 
+def _platform_capabilities(profile: str) -> list[str]:
+    if profile == "session_game":
+        return ["interaction_bot", "ledger"]
+    return []
+
+
 def _plugin_json_dict(name: str, profile: str) -> dict[str, Any]:
     meta = _profile_meta(profile)
     data: dict[str, Any] = {
@@ -287,6 +293,7 @@ def _plugin_json_dict(name: str, profile: str) -> dict[str, Any]:
         "category": meta["category"],
         "interaction_profile": meta["interaction_profile"],
         "permissions": _permissions(profile),
+        "requires_platform_capabilities": _platform_capabilities(profile),
         "usage": _usage(name, profile),
         "config_schema": _config_schema(name, profile),
         "capabilities": _capabilities(profile),
@@ -337,6 +344,7 @@ MANIFEST = Manifest(
     category="{meta['category']}",
     interaction_profile="{meta['interaction_profile']}",
     permissions={_py_literal(_permissions(profile))},
+    requires_platform_capabilities={_py_literal(_platform_capabilities(profile))},
     config_schema=CONFIG_SCHEMA,
 {entries_kwarg}{cap_kwarg})
 

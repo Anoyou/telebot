@@ -57,6 +57,7 @@ my_plugin/
   "min_telepilot_version": "0.33.0",
   "category": "interactive",
   "permissions": ["send_message", "read_chat"],
+  "requires_platform_capabilities": ["interaction_bot"],
   "triggers": {
     "command": "demo"
   },
@@ -105,6 +106,7 @@ my_plugin/
 | `event_subscriptions` | 事件插件必填 | Event Bus 投递声明；纯 HTTP/AI 工具可写 `[]` |
 | `capabilities` | 是 | 高风险能力声明；没有高风险能力也建议写 `{}` |
 | `permissions` | 按需 | 安装提示和 facade 注入依据，如 `external_http`、`ai_text`、`send_message` |
+| `requires_platform_capabilities` | 是 | 插件需要的平台枝；无需求也必须显式写 `[]` |
 | `triggers.command` | 互动入口按需 | 声明 UserBot 命令开局名，不带前缀 |
 | `default_trigger_modes` | 互动入口按需 | `all` / `keyword_only`，决定命令与关键词是否同时开放 |
 | `callback_fast_ack` | callback 入口按需 | 点击按钮后先立即 ACK，再慢慢处理插件逻辑 |
@@ -113,6 +115,39 @@ my_plugin/
 | `config_schema` | 按需 | 账号级配置；有配置时也要提供 `usage` 或 `x-usage-guide` |
 
 `usage` 缺失不是普通文案缺口，而是规范警告：插件中心无法告诉安装者“谁能触发、监听什么事件、会发什么消息、如何排障”。远程插件、插件库维护插件和示例插件都必须写 `usage`；有配置页时还应在 `config_schema` 顶层补 `x-usage-guide`、`x-usage-instructions` 或 `x-usage-steps`，但这些只能增强说明，不能替代 `plugin.json.usage`。
+
+## `requires_platform_capabilities` 声明
+
+每个插件都必须在 `plugin.json` 与 `manifest.py` 的顶层显式声明 `requires_platform_capabilities`，两处值保持一致。字段只描述“插件正常工作必须依赖哪些可选平台枝”，不要把普通权限、消息来源或另一片插件叶写进来；无平台枝需求时写空数组 `[]`。
+
+允许的五个模块如下：
+
+| 模块 | 何时声明 |
+| --- | --- |
+| `ai` | 插件必须使用模型 Provider 或 `ctx.ai` 才能完成核心功能 |
+| `interaction_bot` | 插件必须由 Interaction Bot 接收或发送互动消息、按钮、题面 |
+| `webhooks` | 插件必须依赖公开入站 Webhook 才能接收业务事件 |
+| `ledger` | 插件需要资金台账查询、统计、导出或人工操作面 |
+| `dispatch_debug` | 插件必须依赖 dispatch 模拟或 router debug trace 才能工作；普通插件通常不声明 |
+
+示例：
+
+```json
+{
+  "requires_platform_capabilities": ["interaction_bot", "ledger"]
+}
+```
+
+```python
+MANIFEST = Manifest(
+    # ...
+    requires_platform_capabilities=["interaction_bot", "ledger"],
+)
+```
+
+新装或升级时，缺少该字段、写入五模块之外的值、或类型不是数组都会被 schema/安装入口拒绝；存量已安装插件缺声明时继续运行，只在插件叶和看树视图挂 warning，且不参与平台需求推导。`tp_plugin new` 会按 profile 自动生成字段：`session_game` 默认声明 `interaction_bot` 与 `ledger`，`command` / `passthrough` 默认生成 `[]`。
+
+启用插件时，平台只会自动点亮它声明且当前允许开启的枝，不会自动关闭无叶需要的枝。值守预设或管理员强制关闭属于修枝剪，优先级高于插件需求；需求不能反向顶开，被阻断时插件启用会明确失败。
 
 ## 插件生态迁移边界
 

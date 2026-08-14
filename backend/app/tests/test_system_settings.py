@@ -111,7 +111,11 @@ async def test_system_settings_ai_enabled_hotplug_roundtrip(monkeypatch) -> None
         SimpleNamespace(id=1),
     )
 
-    assert db.rows["ai_enabled"].value == {"enabled": False, "generation": 1}
+    assert db.rows["ai_enabled"].value == {
+        "enabled": False,
+        "generation": 1,
+        "forced_off": True,
+    }
     assert result["ai_enabled"] is False
     assert platform_caps.is_ai_enabled_cached(fail_closed=False) is False
     platform_caps._reset_for_tests()

@@ -14,6 +14,7 @@ from ..schemas.plugin_repo import (
 )
 from ..schemas.remote_plugin import RemotePluginOut
 from ..services import plugin_repo_service as svc
+from ..services.platform_capabilities import PluginCapabilityBlocked
 from ..services.plugin_repo_service import (
     DuplicatePluginRepo,
     PluginNotInRepo,
@@ -141,14 +142,17 @@ async def list_local_plugins(_user: CurrentUser):
 async def install_local_plugin(
     plugin_name: str,
     db: DBSession,
-    _user: CurrentUser,
+    user: CurrentUser,
     body: InstallFromRepoBody | None = None,
 ):
     """从 ``plugins/local_imports`` 导入本地插件。"""
     default_enabled = bool(body.default_enabled) if body else False
     try:
         row = await svc.install_local_plugin(
-            db, plugin_name, default_enabled=default_enabled,
+            db,
+            plugin_name,
+            default_enabled=default_enabled,
+            triggered_by_user_id=user.id,
         )
         await db.commit()
         await trigger_reload(db, row.name)
@@ -157,6 +161,8 @@ async def install_local_plugin(
         raise HTTPException(404, detail={"code": e.code, "message": e.message}) from e
     except DuplicatePluginName as e:
         raise HTTPException(409, detail={"code": e.code, "message": e.message}) from e
+    except PluginCapabilityBlocked as e:
+        raise HTTPException(409, detail={"code": e.error_code, "message": str(e)}) from e
     except (PluginRepoError, RemotePluginError) as e:
         raise HTTPException(400, detail={"code": e.code, "message": e.message}) from e
 
@@ -195,11 +201,13 @@ async def refresh_repo_plugins(repo_id: int, db: DBSession, _user: CurrentUser):
 async def update_installed_plugins_from_repo(
     repo_id: int,
     db: DBSession,
-    _user: CurrentUser,
+    user: CurrentUser,
 ):
     """更新该仓库里所有已安装且版本低于仓库版本的插件。"""
     try:
-        result = await svc.update_installed_plugins_from_repo(db, repo_id)
+        result = await svc.update_installed_plugins_from_repo(
+            db, repo_id, triggered_by_user_id=user.id
+        )
         await db.commit()
         reload_errors: list[RemotePluginError] = []
         for item in result.items:
@@ -234,7 +242,7 @@ async def install_plugin_from_repo(
     repo_id: int,
     plugin_name: str,
     db: DBSession,
-    _user: CurrentUser,
+    user: CurrentUser,
     body: InstallFromRepoBody | None = None,
 ):
     """安装仓库中指定名字的插件。
@@ -251,6 +259,7 @@ async def install_plugin_from_repo(
             plugin_name,
             default_enabled=default_enabled,
             replace_existing=replace_existing,
+            triggered_by_user_id=user.id,
         )
         await db.commit()
         await trigger_reload(db, row.name)
@@ -261,6 +270,8 @@ async def install_plugin_from_repo(
         raise HTTPException(404, detail={"code": e.code, "message": e.message}) from e
     except DuplicatePluginName as e:
         raise HTTPException(409, detail={"code": e.code, "message": e.message}) from e
+    except PluginCapabilityBlocked as e:
+        raise HTTPException(409, detail={"code": e.error_code, "message": str(e)}) from e
     except (GitOperationFailed, InvalidPluginMetadata) as e:
         raise HTTPException(400, detail={"code": e.code, "message": e.message}) from e
     except (PluginRepoError, RemotePluginError) as e:

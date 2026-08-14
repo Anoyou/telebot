@@ -358,7 +358,12 @@ async def test_account_feature_config_save_merges_patch_without_committing(
     save = AsyncMock(return_value=existing)
     monkeypatch.setattr(feature_tools.feature_service, "seed_builtin_features", AsyncMock())
     monkeypatch.setattr(feature_tools.feature_service, "set_account_feature", save)
-    ctx = ToolContext(db=db, channel="web", role="admin")  # type: ignore[arg-type]
+    ctx = ToolContext(
+        db=db,
+        channel="web",
+        role="admin",
+        web_user_id=7,
+    )  # type: ignore[arg-type]
 
     result = await feature_tools.save_account_config_execute(
         ctx,
@@ -374,6 +379,7 @@ async def test_account_feature_config_save_merges_patch_without_committing(
     assert call.kwargs["config"] == {"prompt": "new"}
     assert call.kwargs["commit"] is False
     assert call.kwargs["notify"] is False
+    assert call.kwargs["triggered_by_user_id"] == 7
 
 
 @pytest.mark.asyncio

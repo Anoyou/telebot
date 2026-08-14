@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import HTTPException
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.api import platform_capabilities as caps_api
 from app.api import rate_limit
@@ -23,6 +26,8 @@ class _FakeSettingsDB:
             for key, value in (initial or {}).items()
         }
         self.commits = 0
+        self.flushes = 0
+        self.info: dict[str, Any] = {}
 
     async def get(self, model, key):  # noqa: ANN001
         assert model is SystemSetting
@@ -33,6 +38,9 @@ class _FakeSettingsDB:
 
     async def commit(self) -> None:
         self.commits += 1
+
+    async def flush(self) -> None:
+        self.flushes += 1
 
 
 @pytest.fixture(autouse=True)
@@ -46,6 +54,24 @@ def _set_ledger_ready() -> None:
     caps._CACHE_READY = True
     caps._DESIRED["ledger"] = True
     caps._RUNTIME["ledger"] = "ready"
+
+
+async def _wait_for_capability_finalizers() -> None:
+    while caps._CAPABILITY_FINALIZER_TASKS:
+        await asyncio.gather(*tuple(caps._CAPABILITY_FINALIZER_TASKS))
+
+
+@pytest.fixture
+async def capability_session_factory():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(SystemSetting.__table__.create)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        yield factory
+    finally:
+        await _wait_for_capability_finalizers()
+        await engine.dispose()
 
 
 def test_ledger_actions_fail_closed_until_capability_cache_is_ready() -> None:
@@ -158,6 +184,7 @@ async def test_normalize_missing_generation_defaults_to_zero() -> None:
     assert caps.normalize_capability_setting({"enabled": True}) == {
         "enabled": True,
         "generation": 0,
+        "forced_off": False,
     }
     assert caps.normalize_capability_setting(None)["enabled"] is True
 
@@ -261,8 +288,219 @@ async def test_set_module_enabled_persists_generation_and_cache(monkeypatch) -> 
     )
     assert result["desired_enabled"] is False
     assert result["generation"] == 1
-    assert db.rows["webhooks_enabled"].value == {"enabled": False, "generation": 1}
+    assert db.rows["webhooks_enabled"].value == {
+        "enabled": False,
+        "generation": 1,
+        "forced_off": False,
+    }
     assert caps.is_module_enabled_cached("webhooks", fail_closed=True) is False
+
+
+@pytest.mark.asyncio
+async def test_set_module_enabled_can_join_callers_transaction(monkeypatch) -> None:
+    db = _FakeSettingsDB()
+    await caps.bootstrap_from_db(db)  # type: ignore[arg-type]
+    broadcast = AsyncMock(return_value={})
+    apply_local = AsyncMock()
+    monkeypatch.setattr(caps, "_broadcast_reload_config", broadcast)
+    monkeypatch.setattr(caps, "_apply_local_transition", apply_local)
+
+    await caps.set_module_enabled(
+        db,  # type: ignore[arg-type]
+        "ledger",
+        False,
+        notify_workers=False,
+        apply_local=False,
+        write_audit=False,
+        commit_changes=False,
+    )
+
+    assert db.commits == 0
+    assert db.flushes == 1
+    assert db.rows["ledger_enabled"].value["enabled"] is False
+    assert caps.is_module_enabled_cached("ledger", fail_closed=True) is True
+    broadcast.assert_not_awaited()
+    apply_local.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_joined_transaction_publishes_only_after_commit(
+    capability_session_factory, monkeypatch
+) -> None:
+    apply_local = AsyncMock()
+    observed_db_values: list[dict[str, Any]] = []
+
+    async def _broadcast_after_commit(**_kwargs):
+        async with capability_session_factory() as observer:
+            row = await observer.get(SystemSetting, "ledger_enabled")
+            assert row is not None
+            observed_db_values.append(dict(row.value))
+        return {}
+
+    broadcast = AsyncMock(side_effect=_broadcast_after_commit)
+    monkeypatch.setattr(caps, "_apply_local_transition", apply_local)
+    monkeypatch.setattr(caps, "_broadcast_reload_config", broadcast)
+
+    async with capability_session_factory() as db:
+        await caps.bootstrap_from_db(db)
+        await caps.set_module_enabled(
+            db,
+            "ledger",
+            False,
+            write_audit=False,
+            commit_changes=False,
+        )
+
+        assert caps.is_module_enabled_cached("ledger", fail_closed=True) is True
+        broadcast.assert_not_awaited()
+        apply_local.assert_not_awaited()
+
+        await db.commit()
+        assert caps.is_module_enabled_cached("ledger", fail_closed=True) is False
+
+    await _wait_for_capability_finalizers()
+
+    assert observed_db_values == [
+        {"enabled": False, "generation": 1, "forced_off": False}
+    ]
+    apply_local.assert_awaited_once_with("ledger", False)
+    broadcast.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_stale_after_commit_finalizer_cannot_override_newer_generation(
+    monkeypatch,
+) -> None:
+    apply_local = AsyncMock()
+    broadcast = AsyncMock(return_value={})
+    monkeypatch.setattr(caps, "_apply_local_transition", apply_local)
+    monkeypatch.setattr(caps, "_broadcast_reload_config", broadcast)
+    caps._CACHE_READY = True
+    caps._DESIRED["interaction_bot"] = False
+    caps._GENERATIONS["interaction_bot"] = 2
+    caps._FORCED_OFF["interaction_bot"] = True
+
+    await caps._finalize_committed_capability_transitions(
+        [
+            {
+                "module_key": "interaction_bot",
+                "generation": 1,
+                "enabled": True,
+                "forced_off": False,
+                "notify_workers": True,
+                "apply_local": True,
+            }
+        ]
+    )
+
+    apply_local.assert_not_awaited()
+    broadcast.assert_not_awaited()
+    assert caps.is_module_enabled_cached(
+        "interaction_bot", fail_closed=True
+    ) is False
+    assert caps.get_module_generation_cached("interaction_bot") == 2
+
+
+@pytest.mark.asyncio
+async def test_joined_transaction_rollback_discards_runtime_side_effects(
+    capability_session_factory, monkeypatch
+) -> None:
+    broadcast = AsyncMock()
+    apply_local = AsyncMock()
+    monkeypatch.setattr(caps, "_broadcast_reload_config", broadcast)
+    monkeypatch.setattr(caps, "_apply_local_transition", apply_local)
+
+    async with capability_session_factory() as db:
+        await caps.bootstrap_from_db(db)
+        await caps.set_module_enabled(
+            db,
+            "ledger",
+            False,
+            write_audit=False,
+            commit_changes=False,
+        )
+        await db.rollback()
+
+    await _wait_for_capability_finalizers()
+
+    assert caps.is_module_enabled_cached("ledger", fail_closed=True) is True
+    broadcast.assert_not_awaited()
+    apply_local.assert_not_awaited()
+    async with capability_session_factory() as observer:
+        assert (
+            await observer.scalar(
+                select(SystemSetting).where(SystemSetting.key == "ledger_enabled")
+            )
+        ) is None
+
+
+@pytest.mark.asyncio
+async def test_nested_rollback_discards_only_savepoint_capability_transition(
+    capability_session_factory, monkeypatch
+) -> None:
+    broadcast = AsyncMock()
+    apply_local = AsyncMock()
+    monkeypatch.setattr(caps, "_broadcast_reload_config", broadcast)
+    monkeypatch.setattr(caps, "_apply_local_transition", apply_local)
+
+    async with capability_session_factory() as db:
+        await caps.bootstrap_from_db(db)
+        savepoint = await db.begin_nested()
+        await caps.set_module_enabled(
+            db,
+            "ledger",
+            False,
+            write_audit=False,
+            commit_changes=False,
+        )
+        await savepoint.rollback()
+        await db.commit()
+
+    await _wait_for_capability_finalizers()
+
+    assert caps.is_module_enabled_cached("ledger", fail_closed=True) is True
+    broadcast.assert_not_awaited()
+    apply_local.assert_not_awaited()
+    async with capability_session_factory() as observer:
+        assert (
+            await observer.scalar(
+                select(SystemSetting).where(SystemSetting.key == "ledger_enabled")
+            )
+        ) is None
+
+
+@pytest.mark.asyncio
+async def test_nested_commit_defers_capability_transition_until_outer_commit(
+    capability_session_factory, monkeypatch
+) -> None:
+    broadcast = AsyncMock(return_value={})
+    apply_local = AsyncMock()
+    monkeypatch.setattr(caps, "_broadcast_reload_config", broadcast)
+    monkeypatch.setattr(caps, "_apply_local_transition", apply_local)
+
+    async with capability_session_factory() as db:
+        await caps.bootstrap_from_db(db)
+        savepoint = await db.begin_nested()
+        await caps.set_module_enabled(
+            db,
+            "ledger",
+            False,
+            write_audit=False,
+            commit_changes=False,
+        )
+        await savepoint.commit()
+
+        assert caps.is_module_enabled_cached("ledger", fail_closed=True) is True
+        broadcast.assert_not_awaited()
+        apply_local.assert_not_awaited()
+
+        await db.commit()
+        assert caps.is_module_enabled_cached("ledger", fail_closed=True) is False
+
+    await _wait_for_capability_finalizers()
+
+    apply_local.assert_awaited_once_with("ledger", False)
+    broadcast.assert_awaited_once()
 
 
 @pytest.mark.asyncio

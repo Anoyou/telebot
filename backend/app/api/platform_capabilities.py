@@ -53,6 +53,7 @@ async def patch_platform_capability(
         user_id=user.id,
         notify_workers=True,
         apply_local=True,
+        forced_off=not bool(body.enabled),
     )
     # 重新聚合模块展示字段
     status = caps.build_status_payload()
@@ -61,6 +62,7 @@ async def patch_platform_capability(
         "key": module_key,
         "label": caps.MODULE_DEFS[module_key]["label"],  # type: ignore[index]
         "desired_enabled": result["desired_enabled"],
+        "forced_off": result.get("forced_off", False),
         "generation": result["generation"],
         "runtime_state": result.get("runtime_state") or "ready",
         "last_error": result.get("last_error"),

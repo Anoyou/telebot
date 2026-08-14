@@ -21,7 +21,7 @@ from ..schemas.account import (
     AccountSummary,
     AccountUpdateRequest,
 )
-from ..services import account_service, audit, login_service
+from ..services import account_service, audit, login_service, platform_capabilities
 
 router = APIRouter(prefix="/api/accounts", tags=["accounts"])
 
@@ -191,13 +191,19 @@ async def clone_config(
     user: CurrentUser,
 ) -> dict[str, int | bool]:
     """从 ``req.from_account_id`` 复制 features+rules 到 aid。"""
-    stats = await account_service.clone_config(
-        db,
-        src_aid=req.from_account_id,
-        dst_aid=aid,
-        features=req.features or None,
-        web_user_id=int(user.id),
-    )
+    try:
+        stats = await account_service.clone_config(
+            db,
+            src_aid=req.from_account_id,
+            dst_aid=aid,
+            features=req.features or None,
+            web_user_id=int(user.id),
+        )
+    except platform_capabilities.PluginCapabilityBlocked as exc:
+        raise HTTPException(
+            409,
+            detail={"code": exc.error_code, "message": str(exc)},
+        ) from exc
     await audit.write(
         db,
         user.id,

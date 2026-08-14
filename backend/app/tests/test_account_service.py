@@ -8,9 +8,28 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.schemas.account import AccountUpdateRequest
-from app.services import account_service
+from app.services import account_service, platform_capabilities
 from app.util.proxy import ProxyConfigError
 from app.worker import supervisor
+
+
+class _ScalarRows:
+    def __init__(self, rows):  # noqa: ANN001
+        self._rows = list(rows)
+
+    def all(self):
+        return list(self._rows)
+
+    def __iter__(self):
+        return iter(self._rows)
+
+
+class _ExecuteRows:
+    def __init__(self, rows):  # noqa: ANN001
+        self._rows = rows
+
+    def scalars(self):
+        return _ScalarRows(self._rows)
 
 
 @pytest.mark.asyncio
@@ -261,3 +280,47 @@ async def test_resume_marks_login_required_when_session_cannot_decrypt(monkeypat
     db.commit.assert_awaited_once()
     assert exc_info.value.status_code == 422
     assert exc_info.value.detail["code"] == "ACCOUNT_SESSION_DECRYPT_FAILED"
+
+
+@pytest.mark.asyncio
+async def test_clone_config_preflights_enabled_plugins_before_overwriting_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    src_feature = SimpleNamespace(
+        feature_key="lottery_plus",
+        enabled=True,
+        config={"prize": 8},
+        state="active",
+    )
+    db = AsyncMock()
+    db.get = AsyncMock(side_effect=[SimpleNamespace(id=1), SimpleNamespace(id=2)])
+    db.execute = AsyncMock(
+        side_effect=[
+            _ExecuteRows([src_feature]),
+            _ExecuteRows([]),
+        ]
+    )
+    blocked = platform_capabilities.PluginCapabilityBlocked(
+        "lottery_plus", "ledger", "值守预设"
+    )
+    ensure = AsyncMock(side_effect=blocked)
+    monkeypatch.setattr(platform_capabilities, "ensure_plugin_capabilities", ensure)
+
+    with pytest.raises(platform_capabilities.PluginCapabilityBlocked):
+        await account_service.clone_config(
+            db,
+            1,
+            2,
+            notify=False,
+            commit=False,
+            web_user_id=73,
+        )
+
+    ensure.assert_awaited_once_with(
+        db,
+        "lottery_plus",
+        triggered_by_user_id=73,
+    )
+    assert db.execute.await_count == 2
+    db.add.assert_not_called()
+    db.flush.assert_not_awaited()

@@ -25,6 +25,7 @@ import type {
   PlatformCapabilities,
   PlatformCapabilityPatchResult,
   PlatformModuleKey,
+  PlatformTree,
   SystemSettings,
   TemplateOut,
 } from "@/api/types";
@@ -205,6 +206,11 @@ export async function patchSystemSettings(
 // ===================== 平台能力热插拔 =====================
 export async function getPlatformCapabilities(): Promise<PlatformCapabilities> {
   const { data } = await api.get<PlatformCapabilities>("/api/system/capabilities");
+  return data;
+}
+
+export async function getPlatformTree(): Promise<PlatformTree> {
+  const { data } = await api.get<PlatformTree>("/api/platform/tree");
   return data;
 }
 

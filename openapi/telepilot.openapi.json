@@ -2698,6 +2698,11 @@
             "title": "Desired Enabled",
             "type": "boolean"
           },
+          "forced_off": {
+            "default": false,
+            "title": "Forced Off",
+            "type": "boolean"
+          },
           "generation": {
             "default": 0,
             "title": "Generation",
@@ -10369,6 +10374,237 @@
           "channels"
         ],
         "title": "PlatformCapabilitiesOut",
+        "type": "object"
+      },
+      "PlatformTreeBranch": {
+        "properties": {
+          "can_turn_off": {
+            "default": false,
+            "title": "Can Turn Off",
+            "type": "boolean"
+          },
+          "demanded_by": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Demanded By",
+            "type": "array"
+          },
+          "desired": {
+            "title": "Desired",
+            "type": "boolean"
+          },
+          "forced_off": {
+            "default": false,
+            "title": "Forced Off",
+            "type": "boolean"
+          },
+          "state": {
+            "enum": [
+              "starting",
+              "ready",
+              "quiescing",
+              "stopped",
+              "failed"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "state",
+          "desired"
+        ],
+        "title": "PlatformTreeBranch",
+        "type": "object"
+      },
+      "PlatformTreeLeaf": {
+        "properties": {
+          "attachment": {
+            "enum": [
+              "直通",
+              "命令",
+              "交互"
+            ],
+            "title": "Attachment",
+            "type": "string"
+          },
+          "enabled": {
+            "default": false,
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "requires": {
+            "items": {
+              "enum": [
+                "ai",
+                "interaction_bot",
+                "webhooks",
+                "ledger",
+                "dispatch_debug"
+              ],
+              "type": "string"
+            },
+            "title": "Requires",
+            "type": "array"
+          },
+          "source_missing": {
+            "default": false,
+            "title": "Source Missing",
+            "type": "boolean"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "key",
+          "attachment"
+        ],
+        "title": "PlatformTreeLeaf",
+        "type": "object"
+      },
+      "PlatformTreeOut": {
+        "properties": {
+          "branches": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/PlatformTreeBranch"
+            },
+            "propertyNames": {
+              "enum": [
+                "ai",
+                "interaction_bot",
+                "webhooks",
+                "ledger",
+                "dispatch_debug"
+              ]
+            },
+            "title": "Branches",
+            "type": "object"
+          },
+          "leaves": {
+            "items": {
+              "$ref": "#/components/schemas/PlatformTreeLeaf"
+            },
+            "title": "Leaves",
+            "type": "array"
+          },
+          "trunk": {
+            "$ref": "#/components/schemas/PlatformTreeTrunk"
+          }
+        },
+        "required": [
+          "trunk",
+          "branches"
+        ],
+        "title": "PlatformTreeOut",
+        "type": "object"
+      },
+      "PlatformTreeTrunk": {
+        "properties": {
+          "current_profile": {
+            "default": "production",
+            "enum": [
+              "production",
+              "safe_watch",
+              "custom"
+            ],
+            "title": "Current Profile",
+            "type": "string"
+          },
+          "kill_switch": {
+            "default": false,
+            "title": "Kill Switch",
+            "type": "boolean"
+          },
+          "userbot": {
+            "$ref": "#/components/schemas/PlatformTreeUserbot"
+          }
+        },
+        "required": [
+          "userbot"
+        ],
+        "title": "PlatformTreeTrunk",
+        "type": "object"
+      },
+      "PlatformTreeUserbot": {
+        "properties": {
+          "alive": {
+            "default": 0,
+            "title": "Alive",
+            "type": "integer"
+          },
+          "total": {
+            "default": 0,
+            "title": "Total",
+            "type": "integer"
+          },
+          "workers": {
+            "items": {
+              "$ref": "#/components/schemas/PlatformTreeWorker"
+            },
+            "title": "Workers",
+            "type": "array"
+          }
+        },
+        "title": "PlatformTreeUserbot",
+        "type": "object"
+      },
+      "PlatformTreeWorker": {
+        "properties": {
+          "account_id": {
+            "title": "Account Id",
+            "type": "integer"
+          },
+          "alive": {
+            "default": false,
+            "title": "Alive",
+            "type": "boolean"
+          },
+          "desired": {
+            "default": "running",
+            "title": "Desired",
+            "type": "string"
+          },
+          "fail_count": {
+            "default": 0,
+            "title": "Fail Count",
+            "type": "integer"
+          },
+          "pid": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pid"
+          },
+          "queued": {
+            "default": false,
+            "title": "Queued",
+            "type": "boolean"
+          },
+          "starting": {
+            "default": false,
+            "title": "Starting",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "account_id"
+        ],
+        "title": "PlatformTreeWorker",
         "type": "object"
       },
       "PluginAccountActionRequest": {
@@ -33508,6 +33744,80 @@
         "summary": "Restore Runtime Profile",
         "tags": [
           "runtime-profile"
+        ]
+      }
+    },
+    "/api/platform/tree": {
+      "get": {
+        "operationId": "get_platform_tree_api_platform_tree_get",
+        "parameters": [
+          {
+            "in": "cookie",
+            "name": "auth_token",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Auth Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlatformTreeOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "认证失败"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [
+          {
+            "AuthCookie": []
+          }
+        ],
+        "summary": "Get Platform Tree",
+        "tags": [
+          "platform-tree"
         ]
       }
     },

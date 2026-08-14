@@ -20,6 +20,7 @@ MANIFEST = Manifest(
     description="按规则把 incoming 消息转发到指定 chat（4 种 mode + 风控接入 + FloodWait 兜底）",
     category="automation",
     permissions=["read_chat", "send_message", "send_file"],
+    requires_platform_capabilities=[],
     # rule.config 的 JSON Schema —— 前端可据此渲染表单 / 做兜底校验
     # level 字段说明：
     #   - "global": 全局配置，所有账号共享

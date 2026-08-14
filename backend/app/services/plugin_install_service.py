@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import logging
 import shutil
@@ -42,6 +43,7 @@ from ..db.models.plugin_global_config import PluginGlobalConfig
 from ..settings import settings
 from ..worker.plugins.manifest import Manifest
 from ..worker.plugins.update_barrier import begin_plugin_update, clear_plugin_update
+from .platform_capabilities import ensure_plugin_capabilities
 from .plugin_install_history import record_plugin_install_history
 from .remote_plugin_service import (
     _attach_legacy_plugin_sqlite_links,
@@ -144,7 +146,7 @@ def parse_zip(zip_bytes: bytes) -> ParsedPlugin:
                     f"zip 必须包含 {required}（找不到 {root / required}）",
                 )
 
-        # 4) 加载 manifest.py 拿 Manifest
+        # 4) 先维持既有 Manifest 基础错误语义，再强制新装/升级显式声明平台能力。
         manifest = _load_manifest_from_path(root / "manifest.py")
         if not isinstance(manifest, Manifest):
             raise ManifestError(
@@ -156,6 +158,7 @@ def parse_zip(zip_bytes: bytes) -> ParsedPlugin:
                 "BAD_MANIFEST_KEY",
                 f"manifest.key 非法: {manifest.key!r}（不能为空且不允许斜杠）",
             )
+        _require_platform_capabilities_declaration(root / "manifest.py")
 
         # 5) 与 builtin 冲突
         if manifest.key in BUILTIN_FEATURES:
@@ -172,6 +175,36 @@ def parse_zip(zip_bytes: bytes) -> ParsedPlugin:
     except Exception:
         shutil.rmtree(extract_dir, ignore_errors=True)
         raise
+
+
+def _require_platform_capabilities_declaration(manifest_py: Path) -> None:
+    """确认 Manifest(...) 显式传入 requires_platform_capabilities。"""
+
+    try:
+        tree = ast.parse(manifest_py.read_text(encoding="utf-8"), filename=str(manifest_py))
+    except (OSError, SyntaxError) as exc:
+        raise ManifestError("BAD_MANIFEST", f"manifest.py 无法静态解析: {exc}") from exc
+    for node in tree.body:
+        value = None
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == "MANIFEST"
+            for target in node.targets
+        ):
+            value = node.value
+        elif (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == "MANIFEST"
+        ):
+            value = node.value
+        if isinstance(value, ast.Call) and any(
+            keyword.arg == "requires_platform_capabilities" for keyword in value.keywords
+        ):
+            return
+    raise ManifestError(
+        "PLATFORM_CAPABILITIES_REQUIRED",
+        "manifest.py 必须显式声明 requires_platform_capabilities（无需求请声明 []）",
+    )
 
 
 def _validate_zip_members(zf: zipfile.ZipFile) -> None:
@@ -341,6 +374,7 @@ async def install_zip(
     zip_bytes: bytes,
     signature: bytes | None = None,
     source: str = PLUGIN_SOURCE_ZIP,
+    triggered_by_user_id: int | None = None,
 ) -> InstalledPlugin:
     """完整的 zip 安装流程：解析 → 验签 → 落盘 → 写表。
 
@@ -439,6 +473,12 @@ async def install_zip(
             previous_version=previous_version,
         )
         await db.flush()
+        if final_enabled:
+            await ensure_plugin_capabilities(
+                db,
+                parsed.manifest.key,
+                triggered_by_user_id=triggered_by_user_id,
+            )
         if backup.exists():
             shutil.rmtree(backup, ignore_errors=True)
         return row
@@ -491,7 +531,13 @@ async def uninstall(db: AsyncSession, key: str) -> bool:
     return True
 
 
-async def set_enabled(db: AsyncSession, key: str, enabled: bool) -> InstalledPlugin:
+async def set_enabled(
+    db: AsyncSession,
+    key: str,
+    enabled: bool,
+    *,
+    triggered_by_user_id: int | None = None,
+) -> InstalledPlugin:
     """设置 enabled 标志；调用方负责后续向 worker 广播 reload_config。"""
     row = await db.get(InstalledPlugin, key)
     if row is None or row.source not in _PACKAGE_MANAGED_SOURCES:
@@ -501,6 +547,10 @@ async def set_enabled(db: AsyncSession, key: str, enabled: bool) -> InstalledPlu
         raise SignatureFailed(
             "SIGNATURE_FAILED",
             "签名校验失败，禁止启用；管理员可先重新上传带正确签名的 zip",
+        )
+    if enabled:
+        await ensure_plugin_capabilities(
+            db, key, triggered_by_user_id=triggered_by_user_id
         )
     changed = bool(row.enabled) != bool(enabled)
     row.enabled = bool(enabled)

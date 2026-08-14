@@ -24,6 +24,7 @@ from app.db.models.plugin import InstalledPlugin, PluginInstallHistory
 from app.db.models.plugin_global_config import PluginGlobalConfig
 from app.db.models.plugin_repo import PluginRepo
 from app.db.models.remote_plugin import RemotePlugin
+from app.services import platform_capabilities
 from app.services import plugin_repo_service as repo_svc
 from app.services import remote_plugin_service as svc
 
@@ -1030,14 +1031,16 @@ def _write_runtime_plugin(plugin_dir, *, key: str, version: str = "1.0.0", extra
             "{"
             f'"name":"{key}",'
             f'"display_name":"{key}",'
-            f'"version":"{version}"'
+            f'"version":"{version}",'
+            '"requires_platform_capabilities":[]'
             "}"
         ),
         encoding="utf-8",
     )
     (plugin_dir / "manifest.py").write_text(
         "from app.worker.plugins.manifest import Manifest\n"
-        f"MANIFEST = Manifest(key={key!r}, display_name={key!r}, version={version!r})\n",
+        f"MANIFEST = Manifest(key={key!r}, display_name={key!r}, version={version!r}, "
+        "requires_platform_capabilities=[])\n",
         encoding="utf-8",
     )
     (plugin_dir / "__init__.py").write_text(
@@ -1125,12 +1128,14 @@ class TestRemotePluginEnableFlow:
             assert str(plugin_dir) == str(target)
             plugin_dir.mkdir(parents=True)
             (plugin_dir / "plugin.json").write_text(
-                '{"name":"git_demo","display_name":"Git Demo","version":"1.2.3"}',
+                '{"name":"git_demo","display_name":"Git Demo","version":"1.2.3",'
+                '"requires_platform_capabilities":[]}',
                 encoding="utf-8",
             )
             (plugin_dir / "manifest.py").write_text(
                 "from app.worker.plugins.manifest import Manifest\n"
-                "MANIFEST = Manifest(key='git_demo', display_name='Git Demo', version='1.2.3')\n",
+                "MANIFEST = Manifest(key='git_demo', display_name='Git Demo', version='1.2.3', "
+                "requires_platform_capabilities=[])\n",
                 encoding="utf-8",
             )
             (plugin_dir / "__init__.py").write_text("PLUGIN_CLASS = None\n", encoding="utf-8")
@@ -1200,23 +1205,27 @@ class TestRemotePluginEnableFlow:
         plugin_dir = tmp_path / "installed" / "update_demo"
         (plugin_dir / ".git").mkdir(parents=True)
         (plugin_dir / "plugin.json").write_text(
-            '{"name":"update_demo","display_name":"Update Demo","version":"1.0.0"}',
+            '{"name":"update_demo","display_name":"Update Demo","version":"1.0.0",'
+            '"requires_platform_capabilities":[]}',
             encoding="utf-8",
         )
         (plugin_dir / "manifest.py").write_text(
             "from app.worker.plugins.manifest import Manifest\n"
-            "MANIFEST = Manifest(key='update_demo', display_name='Update Demo', version='1.0.0')\n",
+            "MANIFEST = Manifest(key='update_demo', display_name='Update Demo', version='1.0.0', "
+            "requires_platform_capabilities=[])\n",
             encoding="utf-8",
         )
         (plugin_dir / "__init__.py").write_text("PLUGIN_CLASS = None\n", encoding="utf-8")
         (plugin_dir / "plugin.py").write_text("import requests\n", encoding="utf-8")
 
-        async def _fake_pull(*_args, **_kwargs):  # noqa: ANN001
-            (plugin_dir / "plugin.json").write_text(
-                '{"name":"update_demo","display_name":"Update Demo","version":"1.1.0"}',
+        async def _fake_pull(*_args, **kwargs):  # noqa: ANN001
+            staged_dir = Path(kwargs["cwd"])
+            (staged_dir / "plugin.json").write_text(
+                '{"name":"update_demo","display_name":"Update Demo","version":"1.1.0",'
+                '"requires_platform_capabilities":[]}',
                 encoding="utf-8",
             )
-            (plugin_dir / "plugin.py").write_text(
+            (staged_dir / "plugin.py").write_text(
                 "import requests\nrequests.post('https://example.com')\n",
                 encoding="utf-8",
             )
@@ -1244,6 +1253,96 @@ class TestRemotePluginEnableFlow:
         assert installed.enabled is False
         assert installed.source_url == "https://example.com/update_demo.git"
         assert any("requests.post" in item and "timeout" in item for item in installed.lint_warnings)
+
+    @pytest.mark.asyncio
+    async def test_git_update_missing_capability_declaration_keeps_old_source(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        monkeypatch.setattr(svc.settings, "plugins_installed_dir", str(tmp_path / "installed"))
+        plugin_dir = tmp_path / "installed" / "update_demo"
+        _write_runtime_plugin(plugin_dir, key="update_demo", version="1.0.0")
+        (plugin_dir / ".git").mkdir()
+
+        async def _fake_pull(*_args, **kwargs):  # noqa: ANN001
+            staged_dir = Path(kwargs["cwd"])
+            (staged_dir / "plugin.json").write_text(
+                '{"name":"update_demo","display_name":"Update Demo","version":"2.0.0"}',
+                encoding="utf-8",
+            )
+            return ""
+
+        monkeypatch.setattr(svc, "_run_git", _fake_pull)
+        db = _FakeRemoteInstallDB()
+        db.installed_rows["update_demo"] = InstalledPlugin(
+            key="update_demo",
+            source="git",
+            source_url="https://example.com/update_demo.git",
+            installed_path=str(plugin_dir),
+            version="1.0.0",
+            enabled=True,
+        )
+
+        with pytest.raises(svc.InvalidPluginMetadata) as exc:
+            await svc.update(db, "update_demo")
+
+        assert exc.value.code == "PLATFORM_CAPABILITIES_REQUIRED"
+        assert '"1.0.0"' in (plugin_dir / "plugin.json").read_text(encoding="utf-8")
+        assert db.installed_rows["update_demo"].version == "1.0.0"
+        assert not (tmp_path / "installed" / "update_demo.installing").exists()
+        assert not (tmp_path / "installed" / "update_demo.bak-update").exists()
+        assert svc.plugin_update_active(tmp_path / "installed", "update_demo") is False
+
+    @pytest.mark.asyncio
+    async def test_git_update_capability_block_restores_old_source_and_barrier(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        from app.services import platform_capabilities
+
+        monkeypatch.setattr(svc.settings, "plugins_installed_dir", str(tmp_path / "installed"))
+        plugin_dir = tmp_path / "installed" / "update_demo"
+        _write_runtime_plugin(plugin_dir, key="update_demo", version="1.0.0")
+        (plugin_dir / ".git").mkdir()
+
+        async def _fake_pull(*_args, **kwargs):  # noqa: ANN001
+            staged_dir = Path(kwargs["cwd"])
+            (staged_dir / "plugin.json").write_text(
+                '{"name":"update_demo","display_name":"Update Demo","version":"2.0.0",'
+                '"requires_platform_capabilities":["interaction_bot"]}',
+                encoding="utf-8",
+            )
+            return ""
+
+        async def _blocked(*_args, **_kwargs):  # noqa: ANN001
+            raise platform_capabilities.PluginCapabilityBlocked(
+                "update_demo",
+                "interaction_bot",
+                "值守预设",
+            )
+
+        monkeypatch.setattr(svc, "_run_git", _fake_pull)
+        monkeypatch.setattr(platform_capabilities, "ensure_plugin_capabilities", _blocked)
+        db = _FakeRemoteInstallDB()
+        db.installed_rows["update_demo"] = InstalledPlugin(
+            key="update_demo",
+            source="git",
+            source_url="https://example.com/update_demo.git",
+            installed_path=str(plugin_dir),
+            version="1.0.0",
+            enabled=True,
+        )
+
+        with pytest.raises(platform_capabilities.PluginCapabilityBlocked):
+            await svc.update(db, "update_demo")
+
+        assert '"1.0.0"' in (plugin_dir / "plugin.json").read_text(encoding="utf-8")
+        assert db.installed_rows["update_demo"].version == "1.0.0"
+        assert not (tmp_path / "installed" / "update_demo.installing").exists()
+        assert not (tmp_path / "installed" / "update_demo.bak-update").exists()
+        assert svc.plugin_update_active(tmp_path / "installed", "update_demo") is False
 
     @pytest.mark.asyncio
     async def test_update_restores_missing_installed_plugin_dir(self, monkeypatch, tmp_path):
@@ -1607,6 +1706,62 @@ class TestPluginRepoInstallFlow:
         assert updated.manifest_json["_telepilot_remote"]["update_available"] is False
         assert updated.manifest_json["_telepilot_remote"]["latest_version"] == "0.3.2"
         assert updated.manifest_json["_telepilot_remote"]["runtime_revision_at"]
+
+    @pytest.mark.asyncio
+    async def test_bulk_repo_update_reports_capability_pruning_without_crashing(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        monkeypatch.setattr(repo_svc.settings, "plugins_installed_dir", str(tmp_path / "installed"))
+        repo_dir = tmp_path / "repo"
+        _write_runtime_plugin(repo_dir / "game_demo", key="game_demo", version="2.0.0")
+        install_dir = tmp_path / "installed" / "game_demo"
+        _write_runtime_plugin(install_dir, key="game_demo", version="1.0.0")
+
+        async def _cached(_url: str, **_kwargs):
+            return repo_dir
+
+        async def _blocked(*_args, **_kwargs):
+            raise platform_capabilities.PluginCapabilityBlocked(
+                "game_demo", "ledger", "值守预设"
+            )
+
+        monkeypatch.setattr(repo_svc, "_ensure_repo_cached_unlocked", _cached)
+        monkeypatch.setattr(
+            platform_capabilities, "ensure_plugin_capabilities", _blocked
+        )
+        db = _FakePluginRepoDB(PluginRepo(id=1, url="https://example.com/repo.git", name="Repo"))
+        db.installed_rows["game_demo"] = InstalledPlugin(
+            key="game_demo",
+            source="repo",
+            source_url="https://example.com/repo.git",
+            installed_path=str(install_dir),
+            version="1.0.0",
+            enabled=True,
+            manifest_json={"name": "game_demo"},
+        )
+
+        result = await repo_svc.update_installed_plugins_from_repo(db, 1)
+
+        assert result.checked == 1
+        assert result.update_available == 1
+        assert result.updated == 0
+        assert result.failed == 1
+        assert result.items[0].status == "failed"
+        assert result.items[0].message == (
+            "插件 game_demo 需要 资金台账 模块，但该模块已被值守预设关闭"
+        )
+        assert db.installed_rows["game_demo"].version == "1.0.0"
+        assert db.installed_rows["game_demo"].manifest_json == {"name": "game_demo"}
+        assert "game_demo" not in db.features
+        assert '"1.0.0"' in (install_dir / "plugin.json").read_text(encoding="utf-8")
+        assert not (tmp_path / "installed" / "game_demo.installing").exists()
+        assert not (tmp_path / "installed" / "game_demo.bak-update").exists()
+        assert (
+            svc.plugin_update_active(tmp_path / "installed", "game_demo")
+            is False
+        )
 
     @pytest.mark.asyncio
     async def test_repo_update_link_failure_rolls_back_and_retry_keeps_database(

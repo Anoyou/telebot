@@ -369,6 +369,32 @@ async def clone_config(
         af_q = af_q.where(AccountFeature.feature_key.in_(feature_filter))
     src_afs = (await db.execute(af_q)).scalars().all()
 
+    # 先完整预检所有即将启用的叶，再覆盖目标账号，避免被修枝剪阻断时留下半份配置。
+    from .platform_capabilities import ensure_plugin_capabilities
+
+    source_enabled_keys = {str(af.feature_key) for af in src_afs if bool(af.enabled)}
+    target_enabled_keys: set[str] = set()
+    if source_enabled_keys:
+        target_enabled_keys = set(
+            (
+                await db.execute(
+                    select(AccountFeature.feature_key).where(
+                        AccountFeature.account_id == dst_aid,
+                        AccountFeature.feature_key.in_(source_enabled_keys),
+                        AccountFeature.enabled.is_(True),
+                    )
+                )
+            ).scalars()
+        )
+    for feature_key in sorted(
+        source_enabled_keys - target_enabled_keys
+    ):
+        await ensure_plugin_capabilities(
+            db,
+            feature_key,
+            triggered_by_user_id=web_user_id,
+        )
+
     # 先清掉目标账号同 key 的 account_feature，保证幂等
     if src_afs:
         keys_to_overwrite = [af.feature_key for af in src_afs]

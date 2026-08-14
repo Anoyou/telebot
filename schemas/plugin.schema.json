@@ -160,6 +160,20 @@
       "title": "Permissions",
       "type": "array"
     },
+    "requires_platform_capabilities": {
+      "items": {
+        "enum": [
+          "ai",
+          "interaction_bot",
+          "webhooks",
+          "ledger",
+          "dispatch_debug"
+        ],
+        "type": "string"
+      },
+      "title": "Requires Platform Capabilities",
+      "type": "array"
+    },
     "tags": {
       "items": {
         "type": "string"

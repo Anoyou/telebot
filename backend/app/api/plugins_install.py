@@ -21,6 +21,7 @@ from ..schemas.plugin_center import PluginCenterItem
 from ..services import audit
 from ..services import plugin_center_service as pcs
 from ..services import plugin_install_service as pis
+from ..services.platform_capabilities import PluginCapabilityBlocked
 from ..services.remote_plugin_service import RemotePluginError, trigger_reload
 from ..settings import settings
 from ..worker.ipc import CMD_RELOAD_CONFIG, cmd_channel, make_cmd
@@ -218,7 +219,14 @@ async def upload_plugin_package(
     zip_bytes = await file.read()
     sig_bytes = await _read_signature(signature_file, signature)
     try:
-        row = await pis.install_zip(db, zip_bytes=zip_bytes, signature=sig_bytes)
+        row = await pis.install_zip(
+            db,
+            zip_bytes=zip_bytes,
+            signature=sig_bytes,
+            triggered_by_user_id=user.id,
+        )
+    except PluginCapabilityBlocked as exc:
+        raise _bad(exc.error_code, str(exc), 409) from exc
     except pis.PluginInstallError as exc:
         raise _map_install_error(exc) from exc
     await audit.write(db, user.id, "plugin.install_upload", target=f"plugin:{row.key}")
@@ -235,7 +243,11 @@ async def enable_install(
     key: str, db: DBSession, user: CurrentUser
 ) -> PluginInstallOut:
     try:
-        row = await pis.set_enabled(db, key, True)
+        row = await pis.set_enabled(
+            db, key, True, triggered_by_user_id=user.id
+        )
+    except PluginCapabilityBlocked as exc:
+        raise _bad(exc.error_code, str(exc), 409) from exc
     except pis.PluginInstallError as exc:
         raise _map_install_error(exc) from exc
     await audit.write(db, user.id, "plugin.install_enable", target=f"plugin:{key}")
@@ -249,7 +261,9 @@ async def disable_install(
     key: str, db: DBSession, user: CurrentUser
 ) -> PluginInstallOut:
     try:
-        row = await pis.set_enabled(db, key, False)
+        row = await pis.set_enabled(
+            db, key, False, triggered_by_user_id=user.id
+        )
     except pis.PluginInstallError as exc:
         raise _map_install_error(exc) from exc
     await audit.write(db, user.id, "plugin.install_disable", target=f"plugin:{key}")
@@ -271,7 +285,22 @@ async def batch_install_state(
     items: list[PluginBatchStateItem] = []
     for key in keys:
         try:
-            row = await pis.set_enabled(db, key, body.enabled)
+            row = await pis.set_enabled(
+                db,
+                key,
+                body.enabled,
+                triggered_by_user_id=user.id,
+            )
+        except PluginCapabilityBlocked as exc:
+            items.append(
+                PluginBatchStateItem(
+                    key=key,
+                    ok=False,
+                    code=exc.error_code,
+                    message=str(exc),
+                )
+            )
+            continue
         except pis.PluginInstallError as exc:
             items.append(
                 PluginBatchStateItem(

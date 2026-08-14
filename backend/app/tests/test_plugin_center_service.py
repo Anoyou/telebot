@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -21,6 +22,10 @@ from app.schemas.plugin_center import (
     PluginCenterUpdateStatus,
 )
 from app.services import plugin_center_service as pcs
+from app.services.plugin_capability_requirements import (
+    MISSING_DECLARATION_WARNING,
+    PluginCapabilityRequirement,
+)
 
 
 class _Result:
@@ -151,6 +156,20 @@ async def test_list_installed_plugins_overview_aggregates_matrix_runtime_and_tra
             }
         ),
     )
+    monkeypatch.setattr(
+        pcs,
+        "list_installed_capability_requirements",
+        AsyncMock(
+            return_value=[
+                PluginCapabilityRequirement(
+                    key="demo_repo",
+                    source="repo",
+                    path=Path("/tmp/demo_repo"),
+                    declared=True,
+                )
+            ]
+        ),
+    )
 
     db = AsyncMock()
     db.execute = AsyncMock(
@@ -188,6 +207,48 @@ async def test_list_installed_plugins_overview_aggregates_matrix_runtime_and_tra
     assert row.recent_trace.trace_id == "evt_demo_failed"
     assert row.recent_trace.account_id == 102
     assert row.recent_trace.status == "failed"
+
+
+@pytest.mark.asyncio
+async def test_installed_legacy_missing_declaration_is_exposed_as_warning_badge(
+    monkeypatch,
+) -> None:
+    installed = InstalledPlugin(
+        key="legacy_leaf",
+        source="local",
+        version="1.0.0",
+        enabled=True,
+        trust_tier="local",
+        lint_warnings=[],
+    )
+    monkeypatch.setattr(
+        pcs.feature_service,
+        "feature_matrix",
+        AsyncMock(return_value={"features": [], "accounts": []}),
+    )
+    monkeypatch.setattr(
+        pcs,
+        "list_installed_capability_requirements",
+        AsyncMock(
+            return_value=[
+                PluginCapabilityRequirement(
+                    key="legacy_leaf",
+                    source="local",
+                    path=Path("/tmp/legacy_leaf"),
+                    declared=False,
+                    warnings=(MISSING_DECLARATION_WARNING,),
+                )
+            ]
+        ),
+    )
+    db = AsyncMock()
+    db.execute = AsyncMock(
+        side_effect=[_Result([installed]), _Result([]), _Result([])]
+    )
+
+    rows = await pcs.list_installed_plugins_overview(db)
+
+    assert rows[0].lint_warnings == [MISSING_DECLARATION_WARNING]
 
 
 @pytest.mark.asyncio

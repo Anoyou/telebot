@@ -23,6 +23,7 @@ class CapabilityModuleState(BaseModel):
     key: ModuleKey
     label: str
     desired_enabled: bool = True
+    forced_off: bool = False
     generation: int = 0
     runtime_state: RuntimeState = "starting"
     last_error: str | None = None

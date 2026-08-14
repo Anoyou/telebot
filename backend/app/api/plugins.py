@@ -13,7 +13,7 @@ from ..db.models.account import Account
 from ..db.models.feature import BUILTIN_FEATURES, AccountFeature, Feature
 from ..deps import CurrentUser, DBSession
 from ..redis_client import get_redis
-from ..services import audit, feature_service
+from ..services import audit, feature_service, platform_capabilities
 from ..worker.ipc import CMD_RELOAD_PLUGIN, cmd_channel, make_cmd
 
 log = logging.getLogger(__name__)
@@ -84,9 +84,16 @@ async def install_plugin(
     _ensure_builtin_or_501(payload.plugin_key)
     await feature_service.seed_builtin_features(db)
     await _ensure_accounts_exist(db, payload.account_ids)
-    n = await feature_service.bulk_set_enabled(
-        db, payload.account_ids, payload.plugin_key, enabled=True
-    )
+    try:
+        n = await feature_service.bulk_set_enabled(
+            db,
+            payload.account_ids,
+            payload.plugin_key,
+            enabled=True,
+            triggered_by_user_id=user.id,
+        )
+    except platform_capabilities.PluginCapabilityBlocked as exc:
+        raise _bad(exc.error_code, str(exc), 409) from exc
     await audit.write(
         db,
         user.id,
@@ -125,7 +132,16 @@ async def enable_plugin(
     _ensure_builtin_or_501(key)
     await feature_service.seed_builtin_features(db)
     await _ensure_accounts_exist(db, payload.account_ids)
-    n = await feature_service.bulk_set_enabled(db, payload.account_ids, key, enabled=True)
+    try:
+        n = await feature_service.bulk_set_enabled(
+            db,
+            payload.account_ids,
+            key,
+            enabled=True,
+            triggered_by_user_id=user.id,
+        )
+    except platform_capabilities.PluginCapabilityBlocked as exc:
+        raise _bad(exc.error_code, str(exc), 409) from exc
     await audit.write(
         db,
         user.id,

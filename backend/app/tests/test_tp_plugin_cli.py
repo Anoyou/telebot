@@ -70,6 +70,12 @@ def test_new_scaffold_passes_check(profile: str, tmp_path: Path) -> None:
     assert not report.unknown_events
     assert not report.unknown_filter_keys
 
+    plugin_json = json.loads((plugin_dir / "plugin.json").read_text(encoding="utf-8"))
+    expected = ["interaction_bot", "ledger"] if profile == "session_game" else []
+    assert plugin_json["requires_platform_capabilities"] == expected
+    manifest_source = (plugin_dir / "manifest.py").read_text(encoding="utf-8")
+    assert f"requires_platform_capabilities={expected!r}" in manifest_source
+
 
 def test_passthrough_scaffold_uses_explicit_outcomes(tmp_path: Path) -> None:
     plugin_dir = tmp_path / "demo_passthrough_outcomes"

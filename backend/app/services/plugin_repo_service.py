@@ -53,6 +53,7 @@ from ..schemas.plugin_repo import (
 )
 from ..settings import settings
 from ..worker.plugins.update_barrier import begin_plugin_update, clear_plugin_update
+from .platform_capabilities import PluginCapabilityBlocked
 from .remote_plugin_service import (
     DuplicatePluginName,
     InvalidPluginMetadata,
@@ -617,6 +618,7 @@ async def install_plugin_from_repo(
     *,
     default_enabled: bool = False,
     replace_existing: bool = False,
+    triggered_by_user_id: int | None = None,
 ) -> RemotePluginView:
     """从仓库中安装指定名字的插件。
 
@@ -639,6 +641,7 @@ async def install_plugin_from_repo(
             plugin_name,
             default_enabled=default_enabled,
             replace_existing=replace_existing,
+            triggered_by_user_id=triggered_by_user_id,
         )
 
 
@@ -650,6 +653,7 @@ async def _install_plugin_from_cached_repo(
     *,
     default_enabled: bool,
     replace_existing: bool,
+    triggered_by_user_id: int | None,
 ) -> RemotePluginView:
 
     # 扫描定位插件子目录
@@ -694,6 +698,7 @@ async def _install_plugin_from_cached_repo(
             plugin_dir=target_dir,
             meta=meta,
             installed=existing,
+            triggered_by_user_id=triggered_by_user_id,
         )
     if install_path.exists():
         raise DuplicatePluginName(
@@ -711,7 +716,11 @@ async def _install_plugin_from_cached_repo(
             staging,
             ignore=shutil.ignore_patterns(".git", ".gitignore", "__pycache__"),
         )
-        staged_meta = _read_plugin_metadata(staging, fallback_name=final_name)
+        staged_meta = _read_plugin_metadata(
+            staging,
+            fallback_name=final_name,
+            require_platform_capabilities=True,
+        )
         _validate_runtime_plugin_shape(staging, staged_meta)
         lint_warnings = lint_plugin_metadata_files(staging)
         staging.rename(install_path)
@@ -765,6 +774,12 @@ async def _install_plugin_from_cached_repo(
             lint_warnings=lint_warnings,
         )
         await db.flush()
+        if final_enabled:
+            from .platform_capabilities import ensure_plugin_capabilities
+
+            await ensure_plugin_capabilities(
+                db, final_name, triggered_by_user_id=triggered_by_user_id
+            )
 
         if default_enabled:
             aids = (await db.execute(select(Account.id))).scalars().all()
@@ -805,6 +820,7 @@ async def _replace_installed_plugin_from_repo_dir(
     plugin_dir: Path,
     meta: PluginMetadata,
     installed: InstalledPlugin,
+    triggered_by_user_id: int | None = None,
 ) -> RemotePluginView:
     """用仓库缓存中的插件目录覆盖已安装插件，并保留用户启停状态。"""
 
@@ -828,7 +844,11 @@ async def _replace_installed_plugin_from_repo_dir(
             staging,
             ignore=shutil.ignore_patterns(".git", ".gitignore", "__pycache__"),
         )
-        staged_meta = _read_plugin_metadata(staging, fallback_name=final_name)
+        staged_meta = _read_plugin_metadata(
+            staging,
+            fallback_name=final_name,
+            require_platform_capabilities=True,
+        )
         if staged_meta.name != final_name:
             raise PluginRepoError(
                 "PLUGIN_NAME_MISMATCH",
@@ -864,6 +884,16 @@ async def _replace_installed_plugin_from_repo_dir(
     old_enabled = bool(installed.enabled)
     old_default_enabled = remote_plugin_view_from_installed(installed).default_enabled
     try:
+        # 先按已经切入的新版源码解析叶→枝需求，再改任何 ORM 元数据。批量升级会
+        # 捕获修枝剪拒绝并继续处理下一片叶；若把预检放在 upsert 之后，失败项的
+        # dirty state 会被外层最终 commit 一并写入。
+        if old_enabled:
+            from .platform_capabilities import ensure_plugin_capabilities
+
+            await ensure_plugin_capabilities(
+                db, final_name, triggered_by_user_id=triggered_by_user_id
+            )
+
         feat = (await db.execute(select(Feature).where(Feature.key == final_name))).scalar_one_or_none()
         if feat is None:
             db.add(
@@ -936,6 +966,8 @@ def _installed_plugin_metadata_needs_refresh(installed: InstalledPlugin, meta: P
 async def update_installed_plugins_from_repo(
     db: AsyncSession,
     repo_id: int,
+    *,
+    triggered_by_user_id: int | None = None,
 ) -> PluginRepoBulkUpdateResult:
     """把仓库中版本更高的已安装插件批量升级到该仓库版本。"""
 
@@ -946,13 +978,20 @@ async def update_installed_plugins_from_repo(
             force_refresh=True,
             token=_repo_credential(row),
         )
-        return await _update_installed_plugins_from_cached_repo(db, row, repo_dir)
+        return await _update_installed_plugins_from_cached_repo(
+            db,
+            row,
+            repo_dir,
+            triggered_by_user_id=triggered_by_user_id,
+        )
 
 
 async def _update_installed_plugins_from_cached_repo(
     db: AsyncSession,
     row: PluginRepo,
     repo_dir: Path,
+    *,
+    triggered_by_user_id: int | None,
 ) -> PluginRepoBulkUpdateResult:
     result = PluginRepoBulkUpdateResult(repo_id=row.id, repo_name=row.name)
 
@@ -990,6 +1029,7 @@ async def _update_installed_plugins_from_cached_repo(
                         plugin_dir=plugin_dir,
                         meta=meta,
                         installed=installed,
+                        triggered_by_user_id=triggered_by_user_id,
                     )
                 except PluginRepoError as exc:
                     result.failed += 1
@@ -1001,6 +1041,19 @@ async def _update_installed_plugins_from_cached_repo(
                             to_version=meta.version,
                             status="failed",
                             message=exc.message,
+                        )
+                    )
+                    continue
+                except PluginCapabilityBlocked as exc:
+                    result.failed += 1
+                    result.items.append(
+                        PluginRepoBulkUpdateItem(
+                            name=meta.name,
+                            display_name=meta.display_name or meta.name,
+                            from_version=old_version,
+                            to_version=meta.version,
+                            status="failed",
+                            message=str(exc),
                         )
                     )
                     continue
@@ -1039,6 +1092,7 @@ async def _update_installed_plugins_from_cached_repo(
                 plugin_dir=plugin_dir,
                 meta=meta,
                 installed=installed,
+                triggered_by_user_id=triggered_by_user_id,
             )
         except PluginRepoError as exc:
             result.failed += 1
@@ -1050,6 +1104,19 @@ async def _update_installed_plugins_from_cached_repo(
                     to_version=meta.version,
                     status="failed",
                     message=exc.message,
+                )
+            )
+            continue
+        except PluginCapabilityBlocked as exc:
+            result.failed += 1
+            result.items.append(
+                PluginRepoBulkUpdateItem(
+                    name=meta.name,
+                    display_name=meta.display_name or meta.name,
+                    from_version=old_version,
+                    to_version=meta.version,
+                    status="failed",
+                    message=str(exc),
                 )
             )
             continue
@@ -1104,6 +1171,7 @@ async def install_local_plugin(
     plugin_name: str,
     *,
     default_enabled: bool = False,
+    triggered_by_user_id: int | None = None,
 ) -> RemotePluginView:
     """从 ``plugins/local_imports`` 导入指定本地插件。"""
     root = _local_import_root()
@@ -1141,7 +1209,11 @@ async def install_local_plugin(
             staging,
             ignore=shutil.ignore_patterns(".git", ".gitignore", "__pycache__"),
         )
-        staged_meta = _read_plugin_metadata(staging, fallback_name=final_name)
+        staged_meta = _read_plugin_metadata(
+            staging,
+            fallback_name=final_name,
+            require_platform_capabilities=True,
+        )
         _validate_runtime_plugin_shape(staging, staged_meta)
         lint_warnings = lint_plugin_metadata_files(staging)
         staging.rename(install_path)
@@ -1195,6 +1267,12 @@ async def install_local_plugin(
             lint_warnings=lint_warnings,
         )
         await db.flush()
+        if final_enabled:
+            from .platform_capabilities import ensure_plugin_capabilities
+
+            await ensure_plugin_capabilities(
+                db, final_name, triggered_by_user_id=triggered_by_user_id
+            )
 
         if default_enabled:
             aids = (await db.execute(select(Account.id))).scalars().all()

@@ -1070,6 +1070,7 @@ class ActionExecutor:
                     user_id=None,
                     notify_workers=True,
                     apply_local=True,
+                    forced_off=not bool(args.get("enabled")),
                 )
             return
 

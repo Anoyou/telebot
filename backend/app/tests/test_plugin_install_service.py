@@ -140,12 +140,18 @@ def _make_zip(
     key: str = "demo",
     version: str = "0.1.0",
     layout: str = "flat",  # flat | nested(包一层 outer/) | missing-plugin | missing-init
+    include_platform_capabilities: bool = True,
     extra_members: list[tuple[str, bytes]] | None = None,
 ) -> bytes:
     """生成一个最小化的插件 zip 字节流。"""
+    declaration = (
+        ", requires_platform_capabilities=[]"
+        if include_platform_capabilities
+        else ""
+    )
     manifest_py = (
         "from app.worker.plugins.manifest import Manifest\n"
-        f"MANIFEST = Manifest(key={key!r}, display_name='Demo', version={version!r})\n"
+        f"MANIFEST = Manifest(key={key!r}, display_name='Demo', version={version!r}{declaration})\n"
     ).encode()
     init_py = (
         b"from .plugin import DemoPlugin\n"
@@ -256,6 +262,13 @@ def test_parse_zip_manifest_missing_const(tmp_path) -> None:
     with pytest.raises(pis.ManifestError) as ex:
         pis.parse_zip(buf.getvalue())
     assert ex.value.code in ("MANIFEST_MISSING_CONST", "BAD_MANIFEST")
+
+
+def test_parse_zip_rejects_new_install_without_platform_capability_declaration() -> None:
+    z = _make_zip(key="missing_caps", include_platform_capabilities=False)
+    with pytest.raises(pis.ManifestError) as ex:
+        pis.parse_zip(z)
+    assert ex.value.code == "PLATFORM_CAPABILITIES_REQUIRED"
 
 
 # ─────────────────────────────────────────────────────
@@ -542,6 +555,35 @@ async def test_install_zip_upgrade_keeps_enabled(tmp_path, monkeypatch) -> None:
             "before-upgrade",
             "old-connection-after-upgrade",
         ]
+
+
+@pytest.mark.asyncio
+async def test_install_zip_upgrade_without_platform_capability_declaration_is_rejected(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(pis.settings, "plugins_installed_dir", str(tmp_path / "installed"))
+    db = _FakeDB()
+    private_key, public_key = _ed25519_keypair()
+    monkeypatch.setattr(pis.settings, "plugin_pubkey", public_key)
+    first = _make_zip(key="upgrade_caps", version="1.0.0")
+    row = await pis.install_zip(db, zip_bytes=first, signature=private_key.sign(first))
+    row.enabled = True
+    install_dir = Path(row.installed_path)
+
+    second = _make_zip(
+        key="upgrade_caps",
+        version="2.0.0",
+        include_platform_capabilities=False,
+    )
+    with pytest.raises(pis.ManifestError) as ex:
+        await pis.install_zip(db, zip_bytes=second, signature=private_key.sign(second))
+
+    assert ex.value.code == "PLATFORM_CAPABILITIES_REQUIRED"
+    assert db.installed_rows["upgrade_caps"].version == "1.0.0"
+    assert db.installed_rows["upgrade_caps"].enabled is True
+    assert "1.0.0" in (install_dir / "manifest.py").read_text(encoding="utf-8")
+    assert not (tmp_path / "installed" / "upgrade_caps.bak-zip").exists()
+    assert not (tmp_path / "installed" / "upgrade_caps.installing").exists()
 
 
 @pytest.mark.asyncio

@@ -14,7 +14,7 @@
 
 唯一例外：`payout`、收付款、发奖永远由 userbot 执行，不随会话通道切到 interaction bot。
 
-可选字段 `requires_platform_capabilities` 可写在 Manifest、interaction entry 或 event subscription 上，声明对 `ai` / `interaction_bot` / `webhooks` 等平台模块的依赖。旧插件未声明时继续加载；平台在路由层裁剪不可用入口，并在 `FeatureInfo.runtime_availability` 中返回 `ready` / `partial` / `paused` / `transitioning`。详见 [平台能力热插拔](./PLATFORM-CAPABILITIES.md)。
+必填顶层字段 `requires_platform_capabilities` 必须同时写在 `plugin.json` 与 `Manifest`，声明插件对 `ai` / `interaction_bot` / `webhooks` / `ledger` / `dispatch_debug` 平台模块的依赖；无需求时显式写 `[]`。它不能写在 interaction entry 或 event subscription 上。存量插件缺失时只挂 warning，新装或升级缺失时拒绝；启用叶只会自动点亮允许开启的枝，不会顶开值守预设或管理员强制关闭。完整规则见[远程插件：`requires_platform_capabilities` 声明](./PLUGIN-REMOTE.md#requires_platform_capabilities-声明)和[平台能力热插拔](./PLATFORM-CAPABILITIES.md)。
 
 Event Bus、Trace、MessageOps 是两条标准消息链路的内部契约，不是第四种模式。两条标准消息链路都可使用标准事件信封，并通过 `ctx.messages` / 标准 action 输出；legacy hook 仍保留兼容语义：
 

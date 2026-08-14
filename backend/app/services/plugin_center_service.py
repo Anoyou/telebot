@@ -19,6 +19,7 @@ from ..schemas.plugin_center import (
     PluginCenterUpdateStatus,
 )
 from . import feature_service
+from .plugin_capability_requirements import list_installed_capability_requirements
 from .redactor import redact_text
 
 
@@ -97,6 +98,9 @@ async def list_installed_plugins_overview(db: AsyncSession) -> list[PluginCenter
     ).scalars().all()
     if not installed_rows:
         return []
+    capability_by_key = {
+        item.key: item for item in await list_installed_capability_requirements(db)
+    }
 
     plugin_keys = [str(row.key) for row in installed_rows if str(row.key or "").strip()]
     matrix = await feature_service.feature_matrix(db)
@@ -222,9 +226,18 @@ async def list_installed_plugins_overview(db: AsyncSession) -> list[PluginCenter
                 global_enabled=bool(installed.enabled),
                 signature_ok=installed.signature_ok,
                 trust_tier=_normalize_text(installed.trust_tier),
-                lint_warnings=[
-                    item for item in (installed.lint_warnings or []) if isinstance(item, str)
-                ],
+                lint_warnings=list(
+                    dict.fromkeys(
+                        [
+                            item
+                            for item in (installed.lint_warnings or [])
+                            if isinstance(item, str)
+                        ]
+                        + list(
+                            getattr(capability_by_key.get(key), "warnings", ())
+                        )
+                    )
+                ),
                 update=PluginCenterUpdateStatus(
                     update_available=bool(feature_info.get("update_available", False)),
                     latest_version=_normalize_text(feature_info.get("latest_version")),

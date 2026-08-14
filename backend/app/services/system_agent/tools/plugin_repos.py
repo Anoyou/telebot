@@ -252,6 +252,7 @@ async def install_from_repo_execute(ctx: ToolContext, args: dict[str, Any]) -> d
             int(args.get("repo_id")),
             plugin_name,
             default_enabled=default_enabled,
+            triggered_by_user_id=ctx.web_user_id,
         )
     except Exception as exc:  # noqa: BLE001
         raise ValueError(_err(exc)) from None

@@ -525,6 +525,7 @@ async def save_config_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[st
         verify_tokens=False,
         interaction_identity=args.get("_interaction_identity"),
         transfer_identity=args.get("_transfer_identity"),
+        triggered_by_user_id=ctx.web_user_id,
     )
     return {
         "account_id": account_id,

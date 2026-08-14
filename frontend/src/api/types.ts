@@ -992,6 +992,7 @@ export interface PlatformCapabilityModule {
   key: PlatformModuleKey | string;
   label: string;
   desired_enabled: boolean;
+  forced_off?: boolean;
   generation: number;
   runtime_state: PlatformRuntimeState | string;
   last_error?: string | null;
@@ -1032,6 +1033,44 @@ export interface PlatformCapabilityPatchResult {
   worker_convergence: PlatformWorkerConvergence;
   ok: boolean;
   message?: string | null;
+}
+
+export interface PlatformTree {
+  trunk: {
+    userbot: {
+      workers: Array<{
+        account_id: number;
+        pid?: number | null;
+        alive: boolean;
+        desired: string;
+        fail_count: number;
+        queued: boolean;
+        starting: boolean;
+      }>;
+      total: number;
+      alive: number;
+    };
+    kill_switch: boolean;
+    current_profile: "production" | "safe_watch" | "custom";
+  };
+  branches: Record<
+    PlatformModuleKey,
+    {
+      state: PlatformRuntimeState;
+      desired: boolean;
+      forced_off: boolean;
+      demanded_by: string[];
+      can_turn_off: boolean;
+    }
+  >;
+  leaves: Array<{
+    key: string;
+    attachment: "直通" | "命令" | "交互";
+    enabled: boolean;
+    requires: PlatformModuleKey[];
+    warnings: string[];
+    source_missing: boolean;
+  }>;
 }
 
 export type RuntimeProfileStatus =

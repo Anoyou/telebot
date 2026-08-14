@@ -20,6 +20,7 @@ from app.schemas.config_bundle import (
     ConfigBundleRuleItem,
     ConfigBundleSourceAccount,
 )
+from app.services import platform_capabilities
 from app.services.config_bundle_service import (
     BundleConfirmError,
     BundleTooLarge,
@@ -465,6 +466,56 @@ async def test_apply_bundle_confirm_only_add_when_conflicts_disabled() -> None:
     assert imported == 0
     assert skipped == 0
     assert conflicts == 1
+
+
+@pytest.mark.asyncio
+async def test_apply_bundle_confirm_preflights_enabled_plugin_before_writes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = ConfigBundleExport(
+        source_account=ConfigBundleSourceAccount(id=1, label="src"),
+        features={
+            "lottery_plus": ConfigBundleFeatureItem(
+                feature_key="lottery_plus",
+                enabled=True,
+                config={},
+            )
+        },
+    )
+    target = ConfigBundleExport(
+        source_account=ConfigBundleSourceAccount(id=2, label="dst")
+    )
+    dry_run = compare_bundles(
+        source,
+        target,
+        available_features={"lottery_plus": "Lottery Plus"},
+        available_command_templates={},
+    )
+    db = _FakeDB([])
+    blocked = platform_capabilities.PluginCapabilityBlocked(
+        "lottery_plus", "ledger", "值守预设"
+    )
+    ensure = AsyncMock(side_effect=blocked)
+    monkeypatch.setattr(platform_capabilities, "ensure_plugin_capabilities", ensure)
+
+    with pytest.raises(platform_capabilities.PluginCapabilityBlocked):
+        await apply_bundle_confirm(
+            db,
+            account_id=2,
+            source=source,
+            dry_run=dry_run,
+            available_command_templates={},
+            apply_conflicts=False,
+            confirm_chat_id_conflicts=False,
+            web_user_id=73,
+        )
+
+    ensure.assert_awaited_once_with(
+        db,
+        "lottery_plus",
+        triggered_by_user_id=73,
+    )
+    assert db.added == []
 
 
 @pytest.mark.asyncio

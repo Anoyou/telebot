@@ -12,6 +12,7 @@
     "delete_message",
     "ai_agent"
   ],
+  "requires_platform_capabilities": ["interaction_bot", "ledger"],
   "min_telepilot_version": "0.15.0",
   "min_telebot_version": "0.10.0",
   "cleanup_mode": "resource",

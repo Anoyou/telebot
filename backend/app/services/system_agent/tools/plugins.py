@@ -106,6 +106,7 @@ async def install_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[str, A
             source_url,
             name=name,
             default_enabled=default_enabled,
+            triggered_by_user_id=ctx.web_user_id,
         )
     except Exception as exc:  # noqa: BLE001
         raise ValueError(_err(exc)) from None
@@ -217,7 +218,13 @@ async def set_package_enabled_execute(ctx: ToolContext, args: dict[str, Any]) ->
     name = str(args.get("name") or args.get("plugin_key") or "").strip()
     enabled = bool(args.get("enabled"))
     try:
-        row = await svc.set_enabled(ctx.db, name, enabled=enabled, bootstrap_accounts=False)
+        row = await svc.set_enabled(
+            ctx.db,
+            name,
+            enabled=enabled,
+            bootstrap_accounts=False,
+            triggered_by_user_id=ctx.web_user_id,
+        )
     except Exception as exc:  # noqa: BLE001
         raise ValueError(_err(exc)) from None
     if ctx.action is not None:

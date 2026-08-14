@@ -34,6 +34,7 @@ from ..services import (
     feature_service,
     interaction_bot_runtime,
     interaction_bot_service,
+    platform_capabilities,
 )
 from . import features as features_api
 
@@ -265,11 +266,18 @@ async def update_account_bot_interaction(
 
     payload_data = payload.model_dump(exclude_unset=True)
     await _ensure_keyword_rules_have_interaction_bot_token(db, aid, payload_data)
-    data = await interaction_bot_service.update_interaction_bot_config(
-        db,
-        aid,
-        payload_data,
-    )
+    try:
+        data = await interaction_bot_service.update_interaction_bot_config(
+            db,
+            aid,
+            payload_data,
+            triggered_by_user_id=user.id,
+        )
+    except platform_capabilities.PluginCapabilityBlocked as exc:
+        raise HTTPException(
+            409,
+            detail={"code": exc.error_code, "message": str(exc)},
+        ) from exc
     await audit.write(
         db,
         user.id,
@@ -384,6 +392,7 @@ async def save_account_bot_interaction_composite(
             config=config,
             notify=False,
             commit=False,
+            triggered_by_user_id=user.id,
         )
         plugin_summaries.append(
             AccountBotInteractionCompositePluginSummary(
@@ -393,11 +402,18 @@ async def save_account_bot_interaction_composite(
             )
         )
 
-    data = await interaction_bot_service.update_interaction_bot_config(
-        db,
-        aid,
-        interaction_payload,
-    )
+    try:
+        data = await interaction_bot_service.update_interaction_bot_config(
+            db,
+            aid,
+            interaction_payload,
+            triggered_by_user_id=user.id,
+        )
+    except platform_capabilities.PluginCapabilityBlocked as exc:
+        raise HTTPException(
+            409,
+            detail={"code": exc.error_code, "message": str(exc)},
+        ) from exc
     await audit.write(
         db,
         user.id,

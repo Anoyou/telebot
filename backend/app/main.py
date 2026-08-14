@@ -28,6 +28,7 @@ from .api import message_templates as message_templates_api
 from .api import network as network_api
 from .api import notify_bots as notify_bots_api
 from .api import platform_capabilities as platform_capabilities_api
+from .api import platform_tree as platform_tree_api
 from .api import proxies as proxies_api
 from .api import rate_limit as rate_limit_api
 from .api import runtime_profiles as runtime_profiles_api
@@ -552,6 +553,7 @@ app.include_router(ledger_api.router)  # WP5：资金台账接口空桩
 app.include_router(webhooks_api.router)  # WP7：入站 Webhook 接口空桩
 app.include_router(system_agent_api.router)  # System Agent：自然语言系统助手
 app.include_router(platform_capabilities_api.router)  # 平台能力热插拔
+app.include_router(platform_tree_api.router)  # WP-T4：平台看树视图
 app.include_router(runtime_profiles_api.router)  # 值守运行预设
 
 

@@ -49,6 +49,14 @@ class BundleConfirmError(ValueError):
         self.message = message
 
 
+def _diff_item_will_apply(item: ConfigBundleDiffItem, *, apply_conflicts: bool) -> bool:
+    if item.action == "skip":
+        return False
+    if item.action != "conflict":
+        return True
+    return item.conflict_kind != "blocked" and apply_conflicts
+
+
 def sanitize_bundle_value(value: Any) -> Any:
     """递归移除 bundle 里的敏感字段。"""
     return redact_value(value, drop_sensitive_keys=True)
@@ -543,18 +551,35 @@ async def apply_bundle_confirm(
     template_rows = (await db.execute(select(CommandTemplate))).scalars().all()
     template_by_name = {row.name: row for row in template_rows}
 
+    # 在任何覆盖写入前完整预检将被启用的叶，阻断时保持目标配置不变。
+    from .platform_capabilities import ensure_plugin_capabilities
+
+    feature_keys_to_enable = {
+        str(src.feature_key)
+        for item in dry_run.items
+        if item.entity == "feature"
+        and _diff_item_will_apply(item, apply_conflicts=apply_conflicts)
+        and (item.action == "add" or "enabled" in set(item.fields))
+        and (src := src_features.get(item.key)) is not None
+        and bool(src.enabled)
+    }
+    for feature_key in sorted(feature_keys_to_enable):
+        await ensure_plugin_capabilities(
+            db,
+            feature_key,
+            triggered_by_user_id=web_user_id,
+        )
+
     for item in dry_run.items:
         key = item.key
         if item.action == "skip":
             skipped += 1
             continue
-        if item.action == "conflict":
-            if item.conflict_kind == "blocked":
-                conflicts += 1
-                continue
-            if not apply_conflicts:
-                conflicts += 1
-                continue
+        if item.action == "conflict" and not _diff_item_will_apply(
+            item, apply_conflicts=apply_conflicts
+        ):
+            conflicts += 1
+            continue
 
         if item.entity == "feature":
             src = src_features.get(key)

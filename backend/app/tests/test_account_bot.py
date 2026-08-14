@@ -3726,6 +3726,8 @@ async def test_update_transfer_notice_syncs_enabled_module_rules_to_account_feat
 
     db = _DB()
     monkeypatch.setattr(account_bot_service, "ensure_account", AsyncMock())
+    ensure = AsyncMock(return_value=[])
+    monkeypatch.setattr(platform_capabilities, "ensure_plugin_capabilities", ensure)
 
     await account_bot_service.update_transfer_notice_config(
         db,
@@ -3762,6 +3764,7 @@ async def test_update_transfer_notice_syncs_enabled_module_rules_to_account_feat
                 },
             ],
         },
+        triggered_by_user_id=73,
     )
 
     added_features = [
@@ -3774,6 +3777,72 @@ async def test_update_transfer_notice_syncs_enabled_module_rules_to_account_feat
     assert existing.state == "disabled"
     assert existing.last_error is None
     assert all(getattr(row, "feature_key", None) != "math10" for row in db.added)
+    assert [call.args[1] for call in ensure.await_args_list] == [
+        "game24",
+        "dice_grid_hunt",
+    ]
+    assert all(
+        call.kwargs["triggered_by_user_id"] == 73
+        for call in ensure.await_args_list
+    )
+
+
+@pytest.mark.asyncio
+async def test_update_transfer_notice_rejects_blocked_module_before_account_feature_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _DB:
+        def __init__(self) -> None:
+            self.added: list[object] = []
+
+        async def get(self, model, key):  # noqa: ANN001
+            if model is account_bot_service.SystemSetting:
+                return None
+            if model is account_bot_service.Feature:
+                return SimpleNamespace(key=key)
+            if model is account_bot_service.AccountFeature:
+                return None
+            return None
+
+        def add(self, row):  # noqa: ANN001
+            self.added.append(row)
+
+        async def flush(self):
+            return None
+
+    db = _DB()
+    monkeypatch.setattr(account_bot_service, "ensure_account", AsyncMock())
+    blocked = platform_capabilities.PluginCapabilityBlocked(
+        "game24", "interaction_bot", "值守预设"
+    )
+    ensure = AsyncMock(side_effect=blocked)
+    monkeypatch.setattr(platform_capabilities, "ensure_plugin_capabilities", ensure)
+
+    with pytest.raises(platform_capabilities.PluginCapabilityBlocked):
+        await account_bot_service.update_transfer_notice_config(
+            db,
+            1,
+            {
+                "enabled": True,
+                "rules": [
+                    {
+                        "id": "game",
+                        "enabled": True,
+                        "trigger_mode": "keyword",
+                        "action": "module",
+                        "module_key": "game24",
+                    }
+                ],
+            },
+            triggered_by_user_id=73,
+        )
+
+    ensure.assert_awaited_once_with(
+        db,
+        "game24",
+        triggered_by_user_id=73,
+    )
+    assert db.added == []
 
 
 @pytest.mark.asyncio

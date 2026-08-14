@@ -232,6 +232,7 @@ MANIFEST = Manifest(
     description="群内彩票玩法，支持下注、奖池滚存、自动开奖、历史和消息模板预览",
     permissions=["send_message", "edit_message", "read_chat", "delete_message", "ai_agent"],
     category="interactive",
+    requires_platform_capabilities=["interaction_bot", "ledger"],
     capabilities={"agent_tools": {"enabled": True}},
     agent_keywords=["彩票", "开奖", "lottery", "奖池", "下注", "期号"],
     agent_tools=[

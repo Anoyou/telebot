@@ -35,7 +35,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import unquote, urlparse
 
 from jsonschema import Draft7Validator
@@ -196,6 +196,9 @@ class PluginMetadataSchema(BaseModel):
     entry: str = "plugin.py"
     # permissions 和 config_schema 是可选扩展字段
     permissions: list[str] = Field(default_factory=list)
+    requires_platform_capabilities: list[
+        Literal["ai", "interaction_bot", "webhooks", "ledger", "dispatch_debug"]
+    ] = Field(default_factory=list)
     config_schema: dict[str, Any] | None = None
     config_actions: list[dict[str, Any]] = Field(default_factory=list)
     agent_tools: list[dict[str, Any]] = Field(default_factory=list)
@@ -330,6 +333,7 @@ class PluginMetadata:
     version: str = "0.0.0"
     entry: str = "plugin.py"
     permissions: list[str] = field(default_factory=list)
+    requires_platform_capabilities: list[str] = field(default_factory=list)
     config_schema: dict[str, Any] | None = None
     config_actions: list[dict[str, Any]] = field(default_factory=list)
     agent_tools: list[dict[str, Any]] = field(default_factory=list)
@@ -515,6 +519,9 @@ def _feature_manifest_from_meta(meta: PluginMetadata) -> dict[str, Any] | None:
         manifest["capabilities"] = dict(meta.capabilities)
     if meta.permissions:
         manifest["permissions"] = list(meta.permissions)
+    manifest["requires_platform_capabilities"] = list(
+        meta.requires_platform_capabilities
+    )
     if meta.min_telepilot_version:
         manifest["min_telepilot_version"] = meta.min_telepilot_version
     if meta.min_telebot_version:
@@ -890,7 +897,12 @@ async def _clone_git_source(
 # ─────────────────────────────────────────────────────
 # 元数据读取：只支持 plugin.json，禁止执行 manifest.py
 # ─────────────────────────────────────────────────────
-def _read_plugin_metadata(plugin_dir: Path, *, fallback_name: str) -> PluginMetadata:
+def _read_plugin_metadata(
+    plugin_dir: Path,
+    *,
+    fallback_name: str,
+    require_platform_capabilities: bool = False,
+) -> PluginMetadata:
     """从插件目录读元数据。**安全设计：只解析 plugin.json，绝对不执行 manifest.py**。
 
     plugin.json 字段约定：
@@ -930,6 +942,13 @@ def _read_plugin_metadata(plugin_dir: Path, *, fallback_name: str) -> PluginMeta
         raise InvalidPluginMetadata(
             "BAD_PLUGIN_JSON", f"plugin.json 解析失败: {exc}"
         ) from exc
+    if not isinstance(raw_data, dict):
+        raise InvalidPluginMetadata("BAD_PLUGIN_JSON", "plugin.json 顶层必须是对象")
+    if require_platform_capabilities and "requires_platform_capabilities" not in raw_data:
+        raise InvalidPluginMetadata(
+            "PLATFORM_CAPABILITIES_REQUIRED",
+            "新装或升级插件必须显式声明 requires_platform_capabilities（允许空数组）",
+        )
 
     # Pydantic 校验
     try:
@@ -959,6 +978,9 @@ def _read_plugin_metadata(plugin_dir: Path, *, fallback_name: str) -> PluginMeta
         version=str(validated.version or "0.0.0"),
         entry=str(validated.entry or "plugin.py"),
         permissions=list(validated.permissions or []),
+        requires_platform_capabilities=list(
+            validated.requires_platform_capabilities or []
+        ),
         config_schema=validated.config_schema,
         config_actions=[item for item in validated.config_actions if isinstance(item, dict)],
         agent_tools=[item for item in validated.agent_tools if isinstance(item, dict)],
@@ -1280,6 +1302,7 @@ def _manifest_json_from_remote_meta(meta: PluginMetadata) -> dict[str, Any]:
         "version": meta.version,
         "entry": meta.entry,
         "permissions": list(meta.permissions),
+        "requires_platform_capabilities": list(meta.requires_platform_capabilities),
     }
     if meta.usage:
         data["usage"] = meta.usage
@@ -1740,6 +1763,7 @@ async def install(
     name: str | None = None,
     enable: bool = False,
     default_enabled: bool = False,
+    triggered_by_user_id: int | None = None,
 ) -> RemotePluginView:
     """从 Git 仓库克隆并安装一个远程插件。
 
@@ -1796,7 +1820,11 @@ async def install(
         raise
 
     try:
-        meta = _read_plugin_metadata(staging, fallback_name=final_name)
+        meta = _read_plugin_metadata(
+            staging,
+            fallback_name=final_name,
+            require_platform_capabilities=True,
+        )
         _validate_runtime_plugin_shape(staging, meta)
         lint_warnings = lint_plugin_metadata_files(staging)
         staging.rename(target)
@@ -1846,6 +1874,12 @@ async def install(
         )
         record_plugin_install_history(db, row=row, event_type="installed")
         await db.flush()
+        if final_enabled:
+            from .platform_capabilities import ensure_plugin_capabilities
+
+            await ensure_plugin_capabilities(
+                db, final_name, triggered_by_user_id=triggered_by_user_id
+            )
 
         # 如果 default_enabled=True，为所有已有账号启用
         if default_enabled:
@@ -1924,12 +1958,23 @@ async def uninstall(db: AsyncSession, name: str, *, remove_files: bool = True) -
 
 
 async def set_enabled(
-    db: AsyncSession, name: str, *, enabled: bool, bootstrap_accounts: bool = False
+    db: AsyncSession,
+    name: str,
+    *,
+    enabled: bool,
+    bootstrap_accounts: bool = False,
+    triggered_by_user_id: int | None = None,
 ) -> RemotePluginView:
     """翻转 ``enabled`` 标志。``name`` 不存在抛 ``RemotePluginNotFound``。"""
     row = await db.get(InstalledPlugin, name)
     if row is None or row.source not in _REMOTE_INSTALL_SOURCES:
         raise RemotePluginNotFound("PLUGIN_NOT_FOUND", f"插件不存在: {name}")
+    if enabled:
+        from .platform_capabilities import ensure_plugin_capabilities
+
+        await ensure_plugin_capabilities(
+            db, name, triggered_by_user_id=triggered_by_user_id
+        )
     changed = bool(row.enabled) != bool(enabled)
     row.enabled = bool(enabled)
     if row.enabled and bootstrap_accounts:
@@ -1945,10 +1990,20 @@ async def set_enabled(
 
 
 async def enable(
-    db: AsyncSession, name: str, *, bootstrap_accounts: bool = False
+    db: AsyncSession,
+    name: str,
+    *,
+    bootstrap_accounts: bool = False,
+    triggered_by_user_id: int | None = None,
 ) -> RemotePluginView:
     """启用插件 = ``set_enabled(..., enabled=True)``。"""
-    return await set_enabled(db, name, enabled=True, bootstrap_accounts=bootstrap_accounts)
+    return await set_enabled(
+        db,
+        name,
+        enabled=True,
+        bootstrap_accounts=bootstrap_accounts,
+        triggered_by_user_id=triggered_by_user_id,
+    )
 
 
 async def disable(db: AsyncSession, name: str) -> RemotePluginView:
@@ -1956,7 +2011,12 @@ async def disable(db: AsyncSession, name: str) -> RemotePluginView:
     return await set_enabled(db, name, enabled=False)
 
 
-async def update(db: AsyncSession, name: str) -> RemotePluginView:
+async def update(
+    db: AsyncSession,
+    name: str,
+    *,
+    triggered_by_user_id: int | None = None,
+) -> RemotePluginView:
     """从远程仓库拉取最新版本（``git pull``）+ 重读 plugin.json + 写新版本号。
 
     注意：manifest.py 不会被执行，只解析 plugin.json。
@@ -1968,87 +2028,141 @@ async def update(db: AsyncSession, name: str) -> RemotePluginView:
     target = Path(row.installed_path or _existing_plugin_dir(name))
     source_url = str(row.source_url or "")
     git_env = await _git_env_for_installed_source(db, source_url) if source_url else None
-    restored_from_source = False
-    if not target.exists():
-        await _copy_plugin_from_source_url(
-            name=name,
-            source_url=source_url,
-            target=target,
-            replace_existing=False,
-            git_env=git_env,
-        )
-        restored_from_source = True
+    staging = target.with_name(f"{target.name}.installing")
+    backup = target.with_name(f"{target.name}.bak-update")
+    target_existed = target.exists()
+    barrier_started = False
+    swapped = False
+    legacy_sqlite_names: list[str] = []
+    legacy_json_names: list[str] = []
 
-    # git pull（带 timeout）。如果插件是从多插件仓库子目录复制安装的，
-    # 安装目录没有 .git，此时临时 clone source_url 后按 plugin.json.name 定位子目录覆盖。
-    if (target / ".git").exists():
-        begin_plugin_update(target.parent, name)
-        try:
-            await _run_git("pull", "--ff-only", cwd=target, timeout=60.0, env=git_env)
-        except Exception:
+    if staging.exists():
+        shutil.rmtree(staging, ignore_errors=True)
+    if backup.exists():
+        shutil.rmtree(backup, ignore_errors=True)
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        # 永远先在 staging 拉取与校验。新版缺声明或能力被修枝剪阻断时，
+        # 运行中的旧目录保持不变或由 backup 原样恢复。
+        if target_existed and (target / ".git").exists():
+            shutil.copytree(target, staging, symlinks=True)
+            await _run_git("pull", "--ff-only", cwd=staging, timeout=60.0, env=git_env)
+        else:
+            if not source_url:
+                raise RemotePluginError("SOURCE_URL_MISSING", f"插件 {name} 缺少 source_url，无法更新")
+            if source_url.startswith("local://"):
+                raise RemotePluginError(
+                    "DIR_MISSING",
+                    f"插件目录已丢失或不含 Git 元数据: {target}；本地导入插件无法从 {source_url!r} 自动更新，请重新导入。",
+                )
+            _validate_source_url(source_url)
+            with tempfile.TemporaryDirectory(prefix="telepilot-plugin-update-") as tmp:
+                repo_dir = Path(tmp) / "repo"
+                await _clone_git_source(source_url, repo_dir, timeout=180.0, env=git_env)
+                _, source_dir = _find_plugin_metadata_in_repo(repo_dir, name)
+                shutil.copytree(
+                    source_dir,
+                    staging,
+                    ignore=shutil.ignore_patterns(".git", ".gitignore", "__pycache__"),
+                )
+
+        meta = _read_plugin_metadata(
+            staging,
+            fallback_name=name,
+            require_platform_capabilities=True,
+        )
+        if meta.name != name:
+            raise RemotePluginError(
+                "PLUGIN_NAME_MISMATCH",
+                f"更新源码中的插件名为 {meta.name!r}，预期 {name!r}",
+            )
+        _validate_runtime_plugin_shape(staging, meta)
+        lint_warnings = lint_plugin_metadata_files(staging)
+
+        if target_existed:
+            legacy_sqlite_names = _relocate_legacy_plugin_sqlite(target, name)
+            legacy_json_names = _relocate_legacy_plugin_json(target, name)
+            begin_plugin_update(target.parent, name, target_version=meta.version)
+            barrier_started = True
+            target.rename(backup)
+        staging.rename(target)
+        swapped = True
+        _attach_legacy_plugin_sqlite_links(target, name, legacy_sqlite_names)
+        _attach_legacy_plugin_json_links(target, name, legacy_json_names)
+
+        previous_version = row.version
+        old_source = row.source
+        old_source_url = row.source_url
+        old_enabled = row.enabled
+        old_signature_ok = row.signature_ok
+        old_trust_tier = row.trust_tier
+        old_source_label = _source_label_for_installed(row)
+        old_default_enabled = remote_plugin_view_from_installed(row).default_enabled
+
+        # 能力枝预检必须先于 DB 元数据变更；若被值守或管理员修枝剪阻断，
+        # except 分支恢复旧源码，调用方事务回滚时也不会留下半升级元数据。
+        if bool(old_enabled):
+            from .platform_capabilities import ensure_plugin_capabilities
+
+            await ensure_plugin_capabilities(
+                db, name, triggered_by_user_id=triggered_by_user_id
+            )
+
+        feat = (
+            await db.execute(select(Feature).where(Feature.key == name))
+        ).scalar_one_or_none()
+        if feat is not None:
+            feat.display_name = meta.display_name or name
+            feat.version = meta.version or feat.version
+            feat.is_builtin = False
+            feat.manifest = _merge_feature_manifest_preserving_global_config(feat.manifest, meta)
+        updated_version = meta.version or row.version
+        manifest_json = _with_remote_info(
+            _manifest_json_from_remote_meta(meta),
+            default_enabled=old_default_enabled,
+            latest_version=updated_version,
+            update_available=False,
+            last_update_check_at=datetime.now(UTC),
+            last_update_check_error=None,
+            runtime_revision_at=datetime.now(UTC),
+        )
+        row = await upsert_installed_plugin(
+            db,
+            key=name,
+            source=old_source,
+            source_url=old_source_url,
+            installed_path=str(target),
+            version=updated_version,
+            manifest_json=manifest_json,
+            enabled=old_enabled,
+            signature_ok=old_signature_ok,
+            trust_tier=old_trust_tier,
+            source_label=old_source_label,
+            last_install_error=None,
+            lint_warnings=lint_warnings,
+        )
+        record_plugin_install_history(
+            db,
+            row=row,
+            event_type="updated",
+            previous_version=previous_version,
+        )
+        await db.flush()
+    except Exception:
+        if barrier_started:
             clear_plugin_update(target.parent, name)
-            raise
-    elif not restored_from_source:
-        await _copy_plugin_from_source_url(
-            name=name,
-            source_url=source_url,
-            target=target,
-            replace_existing=True,
-            git_env=git_env,
-        )
+        if swapped and target.exists():
+            shutil.rmtree(target, ignore_errors=True)
+        if backup.exists():
+            backup.rename(target)
+        raise
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
 
-    meta = _read_plugin_metadata(target, fallback_name=name)
-    _validate_runtime_plugin_shape(target, meta)
-    lint_warnings = lint_plugin_metadata_files(target)
-    previous_version = row.version
-    old_source = row.source
-    old_source_url = row.source_url
-    old_enabled = row.enabled
-    old_signature_ok = row.signature_ok
-    old_trust_tier = row.trust_tier
-    old_source_label = _source_label_for_installed(row)
-    old_default_enabled = remote_plugin_view_from_installed(row).default_enabled
-    feat = (
-        await db.execute(select(Feature).where(Feature.key == name))
-    ).scalar_one_or_none()
-    if feat is not None:
-        feat.display_name = meta.display_name or name
-        feat.version = meta.version or feat.version
-        feat.is_builtin = False
-        feat.manifest = _merge_feature_manifest_preserving_global_config(feat.manifest, meta)
-    updated_version = meta.version or row.version
-    manifest_json = _with_remote_info(
-        _manifest_json_from_remote_meta(meta),
-        default_enabled=old_default_enabled,
-        latest_version=updated_version,
-        update_available=False,
-        last_update_check_at=datetime.now(UTC),
-        last_update_check_error=None,
-        runtime_revision_at=datetime.now(UTC),
-    )
-    row = await upsert_installed_plugin(
-        db,
-        key=name,
-        source=old_source,
-        source_url=old_source_url,
-        installed_path=str(target),
-        version=updated_version,
-        manifest_json=manifest_json,
-        enabled=old_enabled,
-        signature_ok=old_signature_ok,
-        trust_tier=old_trust_tier,
-        source_label=old_source_label,
-        last_install_error=None,
-        lint_warnings=lint_warnings,
-    )
-    record_plugin_install_history(
-        db,
-        row=row,
-        event_type="updated",
-        previous_version=previous_version,
-    )
-    await db.flush()
-
+    if backup.exists():
+        shutil.rmtree(backup, ignore_errors=True)
     return remote_plugin_view_from_installed(row)
 
 

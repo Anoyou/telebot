@@ -35,7 +35,7 @@ from ..schemas.feature import (
     PluginGlobalConfigResponse,
     PluginGlobalConfigUpdate,
 )
-from ..services import audit, feature_service
+from ..services import audit, feature_service, platform_capabilities
 from ..services.plugin_config_action_jobs import (
     control_plugin_config_action_job,
     create_plugin_config_action_job,
@@ -411,9 +411,21 @@ async def patch_account_feature(
                     f"配置验证失败: {'; '.join(f'{e.field}: {e.message}' for e in validation.errors)}",
                 )
 
-    af = await feature_service.set_account_feature(
-        db, aid, key, enabled=payload.enabled, config=payload.config
-    )
+    try:
+        af = await feature_service.set_account_feature(
+            db,
+            aid,
+            key,
+            enabled=payload.enabled,
+            config=payload.config,
+            triggered_by_user_id=user.id,
+        )
+    except platform_capabilities.PluginCapabilityBlocked as exc:
+        raise _bad(
+            exc.error_code,
+            str(exc),
+            409,
+        ) from exc
     await audit.write(
         db,
         user.id,
@@ -492,6 +504,7 @@ async def update_account_feature_config(
         key,
         enabled=bool(existing.enabled) if existing is not None else False,
         config=payload.config,
+        triggered_by_user_id=user.id,
     )
     await audit.write(
         db,
@@ -547,6 +560,7 @@ async def update_account_feature_direct_passthrough(
         key,
         enabled=bool(existing.enabled) if existing is not None else False,
         config=config,
+        triggered_by_user_id=user.id,
     )
     await audit.write(
         db,
@@ -622,6 +636,7 @@ async def reorder_account_direct_passthrough(
             key,
             enabled=True,
             config=config,
+            triggered_by_user_id=user.id,
         )
         results.append(
             AccountFeatureItem(

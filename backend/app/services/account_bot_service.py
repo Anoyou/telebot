@@ -1305,8 +1305,10 @@ async def _ensure_interaction_module_account_features(
     db: AsyncSession,
     aid: int,
     data: dict[str, Any],
+    *,
+    triggered_by_user_id: int | None = None,
 ) -> list[str]:
-    synced: list[str] = []
+    candidates: list[tuple[str, AccountFeature | None]] = []
     for module_key in _enabled_interaction_module_keys(data):
         feature = await db.get(Feature, module_key)
         if feature is None:
@@ -1320,6 +1322,21 @@ async def _ensure_interaction_module_account_features(
             AccountFeature,
             {"account_id": aid, "feature_key": module_key},
         )
+        candidates.append((module_key, af))
+
+    # 先完成全部能力预检，再创建或打开 AccountFeature，避免多叶规则半应用。
+    from .platform_capabilities import ensure_plugin_capabilities
+
+    for module_key, af in candidates:
+        if af is None or not bool(af.enabled):
+            await ensure_plugin_capabilities(
+                db,
+                module_key,
+                triggered_by_user_id=triggered_by_user_id,
+            )
+
+    synced: list[str] = []
+    for module_key, af in candidates:
         if af is None:
             db.add(
                 AccountFeature(
@@ -1412,6 +1429,7 @@ async def update_transfer_notice_config(
     verify_tokens: bool = True,
     interaction_identity: dict[str, Any] | None = None,
     transfer_identity: dict[str, Any] | None = None,
+    triggered_by_user_id: int | None = None,
 ) -> dict[str, Any]:
     await ensure_account(db, aid)
     setting_key = transfer_notice_setting_key(aid)
@@ -1486,7 +1504,12 @@ async def update_transfer_notice_config(
             "启用转账触发的规则前，必须配置可信通知 Bot ID（测试 Abot 或官方通知 Bot）",
             422,
         )
-    synced_module_keys = await _ensure_interaction_module_account_features(db, aid, data)
+    synced_module_keys = await _ensure_interaction_module_account_features(
+        db,
+        aid,
+        data,
+        triggered_by_user_id=triggered_by_user_id,
+    )
     if synced_module_keys:
         log.info(
             "interaction rule synced account features aid=%s modules=%s",

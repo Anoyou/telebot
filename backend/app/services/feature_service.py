@@ -109,6 +109,9 @@ def _feature_manifest_from_installed_plugin(
     permissions = manifest_json.get("permissions")
     if isinstance(permissions, list):
         manifest["permissions"] = list(permissions)
+    required_capabilities = manifest_json.get("requires_platform_capabilities")
+    if isinstance(required_capabilities, list):
+        manifest["requires_platform_capabilities"] = list(required_capabilities)
     if manifest_json.get("x-experimental") or manifest_json.get("experimental"):
         manifest["x-experimental"] = True
     for version_key in ("min_telepilot_version", "min_telebot_version"):
@@ -578,6 +581,7 @@ async def set_account_feature(
     *,
     notify: bool = True,
     commit: bool = True,
+    triggered_by_user_id: int | None = None,
 ) -> AccountFeature:
     """对 [账号 × feature] 做 upsert。
 
@@ -597,6 +601,13 @@ async def set_account_feature(
             )
         )
     ).scalar_one_or_none()
+    if enabled and (af is None or not bool(af.enabled)):
+        from .platform_capabilities import ensure_plugin_capabilities
+
+        await ensure_plugin_capabilities(
+            db, key, triggered_by_user_id=triggered_by_user_id
+        )
+
     from .plugin_config_secrets import encrypt_config_secrets
 
     feature_row = await db.get(Feature, key)
@@ -710,11 +721,21 @@ async def bulk_set_enabled(
     aids: Iterable[int],
     key: str,
     enabled: bool,
+    *,
+    triggered_by_user_id: int | None = None,
 ) -> int:
     """对一组账号统一启 / 停某 feature。返回受影响条数。"""
     n = 0
     for aid in aids:
-        await set_account_feature(db, aid, key, enabled, config=None, notify=True)
+        await set_account_feature(
+            db,
+            aid,
+            key,
+            enabled,
+            config=None,
+            notify=True,
+            triggered_by_user_id=triggered_by_user_id,
+        )
         n += 1
     return n
 

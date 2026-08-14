@@ -17,12 +17,16 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal
 
+from sqlalchemy import event as sa_event
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
 from ..db.base import AsyncSessionLocal
 from ..db.models.account import Account
+from ..db.models.feature import AccountFeature
+from ..db.models.plugin import InstalledPlugin
 from ..db.models.system import SystemSetting
 from ..redis_client import get_redis
 from ..worker.ipc import CMD_RELOAD_CONFIG, publish_cmd_with_ack
@@ -81,6 +85,7 @@ _CACHE_READY = False
 _CACHE_LOCK = asyncio.Lock()
 _DESIRED: dict[ModuleKey, bool] = {key: DEFAULT_ENABLED for key in ALL_MODULE_KEYS}
 _GENERATIONS: dict[ModuleKey, int] = {key: 0 for key in ALL_MODULE_KEYS}
+_FORCED_OFF: dict[ModuleKey, bool] = {key: False for key in ALL_MODULE_KEYS}
 _RUNTIME: dict[ModuleKey, RuntimeState] = {key: "starting" for key in ALL_MODULE_KEYS}
 _LAST_ERROR: dict[ModuleKey, str | None] = {key: None for key in ALL_MODULE_KEYS}
 _LAST_TRANSITION_AT: dict[ModuleKey, datetime | None] = {key: None for key in ALL_MODULE_KEYS}
@@ -94,6 +99,8 @@ _LAST_WORKER_CONVERGENCE: dict[str, Any] = {
     "last_broadcast_at": None,
     "notes": [],
 }
+_PENDING_CAPABILITY_TRANSITION_STACK = "telepilot_pending_capability_transition_stack"
+_CAPABILITY_FINALIZER_TASKS: set[asyncio.Task[None]] = set()
 _LEDGER_DENY_LOCK = threading.RLock()
 _LEDGER_DENY_GENERATION = 0
 _LEDGER_DENY_NEXT_TOKEN = 1
@@ -141,6 +148,205 @@ class LedgerActionsFailedClosed(RuntimeError):
         self.reasons = reasons if reasons is not None else ledger_action_block_reasons()
         reason_text = ", ".join(self.reasons) if self.reasons else "unknown"
         super().__init__(f"ledger actions denied (fail-closed): {reason_text}")
+
+
+class PluginCapabilityBlocked(RuntimeError):
+    """插件所需平台枝被值守预设或管理员修枝剪阻断。"""
+
+    error_code = "PLUGIN_CAPABILITY_FORCED_OFF"
+
+    def __init__(self, plugin_key: str, module_key: ModuleKey, reason: str) -> None:
+        self.plugin_key = plugin_key
+        self.module_key = module_key
+        self.reason = reason
+        label = MODULE_DEFS[module_key]["label"]
+        super().__init__(f"插件 {plugin_key} 需要 {label} 模块，但该模块已被{reason}关闭")
+
+
+def _session_info_target(session: Any) -> dict[str, Any]:
+    """取 AsyncSession 包装的同步 Session.info。"""
+
+    sync_session = getattr(session, "sync_session", None)
+    if sync_session is not None:
+        return sync_session.info
+    info = getattr(session, "info", None)
+    if isinstance(info, dict):
+        return info
+    raise TypeError("platform capability transaction requires Session.info")
+
+
+def _pending_capability_stack(
+    session_or_info: Any,
+) -> list[list[dict[str, Any]]]:
+    info = (
+        session_or_info
+        if isinstance(session_or_info, dict)
+        else _session_info_target(session_or_info)
+    )
+    stack = info.get(_PENDING_CAPABILITY_TRANSITION_STACK)
+    if not isinstance(stack, list):
+        stack = []
+        info[_PENDING_CAPABILITY_TRANSITION_STACK] = stack
+    return stack
+
+
+def _schedule_capability_transition_after_commit(
+    session: Any,
+    *,
+    module_key: ModuleKey,
+    generation: int,
+    enabled: bool,
+    forced_off: bool,
+    notify_workers: bool,
+    apply_local: bool,
+) -> None:
+    """把运行时副作用挂到当前最外层事务成功提交之后。"""
+
+    stack = _pending_capability_stack(session)
+    if not stack:
+        stack.append([])
+    stack[-1].append(
+        {
+            "module_key": module_key,
+            "generation": generation,
+            "enabled": enabled,
+            "forced_off": forced_off,
+            "notify_workers": notify_workers,
+            "apply_local": apply_local,
+        }
+    )
+
+
+def _coalesce_capability_transitions(
+    pending: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """同一事务内同一模块只执行最终状态，保留首次出现顺序。"""
+
+    ordered_keys: list[ModuleKey] = []
+    latest: dict[ModuleKey, dict[str, Any]] = {}
+    for item in pending:
+        module_key: ModuleKey = item["module_key"]
+        if module_key not in latest:
+            ordered_keys.append(module_key)
+        latest[module_key] = item
+    return [latest[module_key] for module_key in ordered_keys]
+
+
+async def _finalize_committed_capability_transitions(
+    pending: list[dict[str, Any]],
+) -> None:
+    """在 DB 已提交后执行本地收敛与 worker 广播。"""
+
+    for item in pending:
+        module_key: ModuleKey = item["module_key"]
+        enabled = bool(item["enabled"])
+        generation = int(item["generation"])
+        forced_off = bool(item["forced_off"])
+        try:
+            async with _SWITCH_LOCKS[module_key]:
+                # 提交钩子异步收敛期间，管理员可能已写入更高 generation。
+                # 旧任务不得在较新的修枝剪之后重新启动模块或广播旧状态。
+                if (
+                    _GENERATIONS[module_key] != generation
+                    or _DESIRED[module_key] != enabled
+                    or _FORCED_OFF[module_key] != forced_off
+                ):
+                    log.info(
+                        "跳过过期平台能力收敛 module=%s generation=%s",
+                        module_key,
+                        generation,
+                    )
+                    continue
+                if item["apply_local"]:
+                    await _apply_local_transition(module_key, enabled)
+                if item["notify_workers"]:
+                    await _broadcast_reload_config(
+                        source="platform_capabilities.auto_enable",
+                        module_key=module_key,
+                        generation=generation,
+                        enabled=enabled,
+                    )
+        except Exception:  # noqa: BLE001
+            log.exception(
+                "提交后平台能力收敛失败 module=%s generation=%s",
+                module_key,
+                generation,
+            )
+
+
+def _consume_finalizer_result(task: asyncio.Task[None]) -> None:
+    _CAPABILITY_FINALIZER_TASKS.discard(task)
+    if task.cancelled():
+        return
+    try:
+        task.result()
+    except Exception:  # noqa: BLE001
+        log.exception("提交后平台能力收敛任务异常")
+
+
+def _drain_committed_capability_transitions(
+    pending: list[dict[str, Any]],
+) -> None:
+    """提交钩子：先发布已提交缓存，再异步执行外部副作用。"""
+
+    global _CACHE_READY
+    coalesced = _coalesce_capability_transitions(pending)
+    if not coalesced:
+        return
+    for item in coalesced:
+        module_key: ModuleKey = item["module_key"]
+        _DESIRED[module_key] = bool(item["enabled"])
+        _GENERATIONS[module_key] = int(item["generation"])
+        _FORCED_OFF[module_key] = bool(item["forced_off"])
+    _CACHE_READY = True
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        asyncio.run(_finalize_committed_capability_transitions(coalesced))
+        return
+    task = loop.create_task(_finalize_committed_capability_transitions(coalesced))
+    _CAPABILITY_FINALIZER_TASKS.add(task)
+    task.add_done_callback(_consume_finalizer_result)
+
+
+def _install_capability_after_commit_hooks() -> None:
+    """仅在最外层提交后执行；SAVEPOINT 回滚只丢弃当前层。"""
+
+    if getattr(Session, "_telepilot_capability_hooks", False):
+        return
+
+    @sa_event.listens_for(Session, "after_begin")
+    def _after_begin(session: Session, transaction: Any, connection: Any) -> None:  # noqa: ARG001
+        stack = _pending_capability_stack(session)
+        if getattr(transaction, "nested", False):
+            stack.append([])
+        elif not stack:
+            stack.append([])
+
+    @sa_event.listens_for(Session, "after_commit")
+    def _after_commit(session: Session) -> None:
+        stack = _pending_capability_stack(session)
+        if len(stack) > 1:
+            child = stack.pop()
+            stack[-1].extend(child)
+            return
+        pending = list(stack.pop()) if stack else []
+        session.info.pop(_PENDING_CAPABILITY_TRANSITION_STACK, None)
+        _drain_committed_capability_transitions(pending)
+
+    @sa_event.listens_for(Session, "after_rollback")
+    def _after_rollback(session: Session) -> None:
+        stack = _pending_capability_stack(session)
+        if len(stack) > 1:
+            stack.pop()
+            return
+        session.info.pop(_PENDING_CAPABILITY_TRANSITION_STACK, None)
+
+    Session._telepilot_capability_hooks = True  # type: ignore[attr-defined]
+
+
+_install_capability_after_commit_hooks()
 
 
 def register_ledger_action_deny(reason: str, *, owner: str) -> LedgerActionDenyRegistration:
@@ -225,6 +431,7 @@ class CapabilitySnapshot:
     generations: dict[ModuleKey, int]
     runtime: dict[ModuleKey, RuntimeState]
     cache_ready: bool
+    forced_off: dict[ModuleKey, bool] = field(default_factory=dict)
     last_error: dict[ModuleKey, str | None] = field(default_factory=dict)
     last_transition_at: dict[ModuleKey, datetime | None] = field(default_factory=dict)
 
@@ -260,16 +467,21 @@ def _normalize_generation(value: Any, *, default: int = 0) -> int:
         return default
 
 
+def _normalize_forced_off(value: Any) -> bool:
+    return bool(value.get("forced_off", False)) if isinstance(value, dict) else False
+
+
 def normalize_capability_setting(
     value: Any,
     *,
     default_enabled: bool = DEFAULT_ENABLED,
 ) -> dict[str, Any]:
-    """把 SystemSetting 值规范化为 ``{enabled, generation}``。"""
+    """把 SystemSetting 值规范化为 ``{enabled, generation, forced_off}``。"""
 
     return {
         "enabled": _normalize_enabled(value, default=default_enabled),
         "generation": _normalize_generation(value, default=0),
+        "forced_off": _normalize_forced_off(value),
     }
 
 
@@ -289,6 +501,7 @@ def get_snapshot() -> CapabilitySnapshot:
         generations=dict(_GENERATIONS),
         runtime=dict(_RUNTIME),
         cache_ready=_CACHE_READY,
+        forced_off=dict(_FORCED_OFF),
         last_error=dict(_LAST_ERROR),
         last_transition_at=dict(_LAST_TRANSITION_AT),
     )
@@ -323,12 +536,13 @@ async def bootstrap_from_db(db: AsyncSession | None = None) -> CapabilitySnapsho
         # 被受控入口继续当作可用状态消费。
         _CACHE_READY = False
         if db is not None:
-            desired, generations = await _load_desired_from_db(db)
+            desired, generations, forced_off = await _load_desired_from_db(db)
         else:
             async with AsyncSessionLocal() as session:
-                desired, generations = await _load_desired_from_db(session)
+                desired, generations, forced_off = await _load_desired_from_db(session)
         _DESIRED.update(desired)
         _GENERATIONS.update(generations)
+        _FORCED_OFF.update(forced_off)
         _apply_startup_runtime()
         _CACHE_READY = True
         return get_snapshot()
@@ -341,27 +555,30 @@ async def refresh_cache_from_db(db: AsyncSession | None = None) -> CapabilitySna
     async with _CACHE_LOCK:
         _CACHE_READY = False
         if db is not None:
-            desired, generations = await _load_desired_from_db(db)
+            desired, generations, forced_off = await _load_desired_from_db(db)
         else:
             async with AsyncSessionLocal() as session:
-                desired, generations = await _load_desired_from_db(session)
+                desired, generations, forced_off = await _load_desired_from_db(session)
         _DESIRED.update(desired)
         _GENERATIONS.update(generations)
+        _FORCED_OFF.update(forced_off)
         _CACHE_READY = True
         return get_snapshot()
 
 
 async def _load_desired_from_db(
     db: AsyncSession,
-) -> tuple[dict[ModuleKey, bool], dict[ModuleKey, int]]:
+) -> tuple[dict[ModuleKey, bool], dict[ModuleKey, int], dict[ModuleKey, bool]]:
     desired: dict[ModuleKey, bool] = {}
     generations: dict[ModuleKey, int] = {}
+    forced_off: dict[ModuleKey, bool] = {}
     for module_key, meta in MODULE_DEFS.items():
         row = await db.get(SystemSetting, meta["setting_key"])
         normalized = normalize_capability_setting(row.value if row is not None else None)
         desired[module_key] = bool(normalized["enabled"])
         generations[module_key] = int(normalized["generation"])
-    return desired, generations
+        forced_off[module_key] = bool(normalized["forced_off"])
+    return desired, generations, forced_off
 
 
 def _apply_startup_runtime() -> None:
@@ -395,6 +612,34 @@ async def read_module_desired(
     row = await db.get(SystemSetting, module_setting_key(module_key))
     normalized = normalize_capability_setting(row.value if row is not None else None)
     return bool(normalized["enabled"]), int(normalized["generation"])
+
+
+async def read_module_control(
+    db: AsyncSession,
+    module_key: ModuleKey,
+    *,
+    for_update: bool = False,
+) -> tuple[bool, int, bool]:
+    """读取 desired/generation/forced_off；旧数据默认未被管理员强制关闭。"""
+
+    setting_key = module_setting_key(module_key)
+    if for_update and isinstance(db, AsyncSession):
+        row = (
+            await db.execute(
+                select(SystemSetting)
+                .where(SystemSetting.key == setting_key)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+    else:
+        row = await db.get(SystemSetting, setting_key)
+    normalized = normalize_capability_setting(row.value if row is not None else None)
+    return (
+        bool(normalized["enabled"]),
+        int(normalized["generation"]),
+        bool(normalized["forced_off"]),
+    )
 
 
 async def is_module_enabled(db: AsyncSession | None, module_key: ModuleKey) -> bool:
@@ -444,6 +689,9 @@ async def set_module_enabled(
     notify_workers: bool = True,
     apply_local: bool = True,
     write_audit: bool = True,
+    forced_off: bool | None = None,
+    commit_changes: bool = True,
+    required_by_plugin: str | None = None,
 ) -> dict[str, Any]:
     """写入目标状态并执行热切换。
 
@@ -455,15 +703,29 @@ async def set_module_enabled(
         raise KeyError(f"unknown module: {module_key}")
 
     async with _SWITCH_LOCKS[module_key]:
-        current_enabled, current_gen = await read_module_desired(db, module_key)
+        current_enabled, current_gen, current_forced_off = await read_module_control(
+            db, module_key, for_update=True
+        )
         next_enabled = bool(enabled)
+        if required_by_plugin is not None and next_enabled and current_forced_off:
+            raise PluginCapabilityBlocked(
+                required_by_plugin, module_key, "管理员强制"
+            )
+        next_forced_off = current_forced_off if forced_off is None else bool(forced_off)
         # 幂等：状态相同仍返回当前快照，但 generation 不前进。
-        if current_enabled == next_enabled and _CACHE_READY and _DESIRED[module_key] == next_enabled:
+        if (
+            current_enabled == next_enabled
+            and current_forced_off == next_forced_off
+            and _CACHE_READY
+            and _DESIRED[module_key] == next_enabled
+            and _FORCED_OFF[module_key] == next_forced_off
+        ):
             snap = get_snapshot()
             return {
                 "module_key": module_key,
                 "desired_enabled": next_enabled,
                 "generation": current_gen,
+                "forced_off": next_forced_off,
                 "runtime_state": snap.runtime.get(module_key, "ready" if next_enabled else "stopped"),
                 "worker_convergence": dict(_LAST_WORKER_CONVERGENCE),
                 "changed": False,
@@ -471,33 +733,50 @@ async def set_module_enabled(
 
         next_gen = current_gen + 1
         setting_key = module_setting_key(module_key)
-        payload = {"enabled": next_enabled, "generation": next_gen}
+        payload = {
+            "enabled": next_enabled,
+            "generation": next_gen,
+            "forced_off": next_forced_off,
+        }
         row = await db.get(SystemSetting, setting_key)
         if row is None:
             db.add(SystemSetting(key=setting_key, value=payload))
         else:
             row.value = payload
             flag_modified(row, "value")
-        await db.commit()
+        if commit_changes:
+            await db.commit()
+            async with _CACHE_LOCK:
+                _DESIRED[module_key] = next_enabled
+                _GENERATIONS[module_key] = next_gen
+                _FORCED_OFF[module_key] = next_forced_off
+                _CACHE_READY = True
 
-        async with _CACHE_LOCK:
-            _DESIRED[module_key] = next_enabled
-            _GENERATIONS[module_key] = next_gen
-            _CACHE_READY = True
+            if apply_local:
+                await _apply_local_transition(module_key, next_enabled)
 
-        if apply_local:
-            await _apply_local_transition(module_key, next_enabled)
-
-        worker_conv = (
-            await _broadcast_reload_config(
-                source="platform_capabilities",
+            worker_conv = (
+                await _broadcast_reload_config(
+                    source="platform_capabilities",
+                    module_key=module_key,
+                    generation=next_gen,
+                    enabled=next_enabled,
+                )
+                if notify_workers
+                else dict(_LAST_WORKER_CONVERGENCE)
+            )
+        else:
+            await db.flush()
+            _schedule_capability_transition_after_commit(
+                db,
                 module_key=module_key,
                 generation=next_gen,
                 enabled=next_enabled,
+                forced_off=next_forced_off,
+                notify_workers=notify_workers,
+                apply_local=apply_local,
             )
-            if notify_workers
-            else dict(_LAST_WORKER_CONVERGENCE)
-        )
+            worker_conv = dict(_LAST_WORKER_CONVERGENCE)
 
         if write_audit:
             try:
@@ -512,6 +791,7 @@ async def set_module_enabled(
                         "module": module_key,
                         "enabled": next_enabled,
                         "generation": next_gen,
+                        "forced_off": next_forced_off,
                         "worker_convergence": {
                             "acked": worker_conv.get("acked"),
                             "offline_or_timeout": worker_conv.get("offline_or_timeout"),
@@ -519,7 +799,10 @@ async def set_module_enabled(
                         },
                     },
                 )
-                await db.commit()
+                if commit_changes:
+                    await db.commit()
+                else:
+                    await db.flush()
             except Exception:  # noqa: BLE001
                 log.exception("写入平台能力审计失败 module=%s", module_key)
 
@@ -527,6 +810,7 @@ async def set_module_enabled(
             "module_key": module_key,
             "desired_enabled": next_enabled,
             "generation": next_gen,
+            "forced_off": next_forced_off,
             "runtime_state": _RUNTIME.get(module_key),
             "last_error": _LAST_ERROR.get(module_key),
             "worker_convergence": worker_conv,
@@ -549,7 +833,110 @@ async def set_ai_enabled_compat(
         user_id=user_id,
         notify_workers=True,
         apply_local=True,
+        forced_off=not enabled,
     )
+
+
+async def compute_demand(db: AsyncSession) -> dict[ModuleKey, list[str]]:
+    """按所有账号启用叶的并集计算五个可选模块需求。"""
+
+    from .plugin_capability_requirements import (
+        list_builtin_capability_requirements,
+        list_installed_capability_requirements,
+    )
+
+    demand: dict[ModuleKey, list[str]] = {key: [] for key in ALL_MODULE_KEYS}
+    enabled_leaf_keys = set(
+        (
+            await db.execute(
+                select(AccountFeature.feature_key).where(AccountFeature.enabled.is_(True))
+            )
+        ).scalars()
+    )
+    installed_rows = (await db.execute(select(InstalledPlugin))).scalars().all()
+    installed_enabled = {row.key: bool(row.enabled) for row in installed_rows}
+    records = list_builtin_capability_requirements()
+    records.extend(await list_installed_capability_requirements(db))
+    for record in records:
+        if record.key not in enabled_leaf_keys or not record.participates_in_demand:
+            continue
+        if record.source != "builtin" and not installed_enabled.get(record.key, False):
+            continue
+        for module_key in record.requires:
+            demand[module_key].append(record.key)  # type: ignore[index]
+    return {key: sorted(set(values)) for key, values in demand.items()}
+
+
+async def ensure_plugin_capabilities(
+    db: AsyncSession,
+    plugin_key: str,
+    *,
+    triggered_by_user_id: int | None = None,
+) -> list[ModuleKey]:
+    """启用叶之前自动点亮声明的枝；修枝剪状态始终优先。"""
+
+    from . import audit as audit_svc
+    from . import runtime_profile_service
+    from .plugin_capability_requirements import get_plugin_capability_requirement
+
+    requirement = await get_plugin_capability_requirement(db, plugin_key)
+    if requirement is None or not requirement.participates_in_demand:
+        return []
+
+    guard = await runtime_profile_service.acquire_plugin_enable_guard(db)
+    try:
+        safe_watch = guard.state.get("active_profile") == "safe_watch"
+        controls: dict[ModuleKey, tuple[bool, int, bool]] = {}
+        # 先完整预检，再执行任何自动点亮，避免多枝插件留下部分成功状态。
+        for raw_module_key in requirement.requires:
+            module_key: ModuleKey = raw_module_key  # type: ignore[assignment]
+            if (
+                safe_watch
+                and runtime_profile_service.PRESETS["safe_watch"].get(module_key)
+                is False
+            ):
+                raise PluginCapabilityBlocked(plugin_key, module_key, "值守预设")
+            controls[module_key] = await read_module_control(db, module_key)
+            if controls[module_key][2]:
+                raise PluginCapabilityBlocked(plugin_key, module_key, "管理员强制")
+
+        # 启用叶的外层事务提交前，值守不能越过同一把 T1 锁开始转换。
+        guard.hold_until_transaction_end(db)
+        opened: list[ModuleKey] = []
+        for raw_module_key in requirement.requires:
+            module_key: ModuleKey = raw_module_key  # type: ignore[assignment]
+            enabled, _generation, _forced = controls[module_key]
+            if enabled:
+                continue
+            await set_module_enabled(
+                db,
+                module_key,
+                True,
+                user_id=triggered_by_user_id,
+                forced_off=None,
+                write_audit=False,
+                commit_changes=False,
+                required_by_plugin=plugin_key,
+            )
+            message = f"因插件 {plugin_key} 需要，自动启用模块 {module_key}"
+            await audit_svc.write(
+                db,
+                triggered_by_user_id,
+                "platform_capability.auto_enable",
+                target=module_key,
+                detail={
+                    "message": message,
+                    "trigger_plugin": plugin_key,
+                    "module": module_key,
+                    "triggered_by_user_id": triggered_by_user_id,
+                },
+            )
+            opened.append(module_key)
+        if opened:
+            await db.flush()
+        return opened
+    finally:
+        guard.release_if_unbound()
 
 
 async def _apply_local_transition(module_key: ModuleKey, enabled: bool) -> None:
@@ -820,6 +1207,7 @@ def build_status_payload() -> dict[str, Any]:
                 "key": key,
                 "label": meta["label"],
                 "desired_enabled": desired,
+                "forced_off": bool(snap.forced_off.get(key, False)),
                 "generation": snap.generation(key) if snap.cache_ready else 0,
                 "runtime_state": runtime if snap.cache_ready else "starting",
                 "last_error": snap.last_error.get(key),
@@ -1179,6 +1567,7 @@ def _reset_for_tests() -> None:
     for key in ALL_MODULE_KEYS:
         _DESIRED[key] = DEFAULT_ENABLED
         _GENERATIONS[key] = 0
+        _FORCED_OFF[key] = False
         _RUNTIME[key] = "starting"
         _LAST_ERROR[key] = None
         _LAST_TRANSITION_AT[key] = None
@@ -1194,6 +1583,9 @@ def _reset_for_tests() -> None:
             "notes": [],
         }
     )
+    for task in tuple(_CAPABILITY_FINALIZER_TASKS):
+        task.cancel()
+    _CAPABILITY_FINALIZER_TASKS.clear()
     with _LEDGER_DENY_LOCK:
         _LEDGER_DENY_REGISTRATIONS.clear()
         _LEDGER_DENY_GENERATION = 0
@@ -1208,8 +1600,10 @@ __all__ = [
     "LEDGER_ACTIONS_FAILED_CLOSED_ERROR_CODE",
     "LedgerActionDenyRegistration",
     "LedgerActionsFailedClosed",
+    "PluginCapabilityBlocked",
     "bootstrap_from_db",
     "build_status_payload",
+    "compute_demand",
     "channel_module_key",
     "evaluate_plugin_runtime_availability",
     "filter_runtime_event_subscriptions",
@@ -1229,6 +1623,7 @@ __all__ = [
     "module_setting_key",
     "normalize_capability_setting",
     "read_module_desired",
+    "read_module_control",
     "register_ledger_action_deny",
     "reconcile_local_module",
     "reconcile_runtime_after_startup",
@@ -1237,6 +1632,7 @@ __all__ = [
     "require_ledger_actions_enabled",
     "set_ai_enabled_compat",
     "set_module_enabled",
+    "ensure_plugin_capabilities",
     "stop_local_module",
     "subscription_blocked_reason",
     "_reset_for_tests",

@@ -2380,6 +2380,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/platform/tree": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Platform Tree */
+        get: operations["get_platform_tree_api_platform_tree_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/plugin-config-action-jobs/{job_id}": {
         parameters: {
             query?: never;
@@ -5308,6 +5325,11 @@ export interface components {
              */
             desired_enabled: boolean;
             /**
+             * Forced Off
+             * @default false
+             */
+            forced_off: boolean;
+            /**
              * Generation
              * @default 0
              */
@@ -8019,6 +8041,124 @@ export interface components {
             /** Updated At */
             updated_at?: string | null;
             worker_convergence?: components["schemas"]["CapabilityWorkerConvergence"];
+        };
+        /** PlatformTreeBranch */
+        PlatformTreeBranch: {
+            /**
+             * Can Turn Off
+             * @default false
+             */
+            can_turn_off: boolean;
+            /** Demanded By */
+            demanded_by?: string[];
+            /** Desired */
+            desired: boolean;
+            /**
+             * Forced Off
+             * @default false
+             */
+            forced_off: boolean;
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "starting" | "ready" | "quiescing" | "stopped" | "failed";
+        };
+        /** PlatformTreeLeaf */
+        PlatformTreeLeaf: {
+            /**
+             * Attachment
+             * @enum {string}
+             */
+            attachment: "直通" | "命令" | "交互";
+            /**
+             * Enabled
+             * @default false
+             */
+            enabled: boolean;
+            /** Key */
+            key: string;
+            /** Requires */
+            requires?: ("ai" | "interaction_bot" | "webhooks" | "ledger" | "dispatch_debug")[];
+            /**
+             * Source Missing
+             * @default false
+             */
+            source_missing: boolean;
+            /** Warnings */
+            warnings?: string[];
+        };
+        /** PlatformTreeOut */
+        PlatformTreeOut: {
+            /** Branches */
+            branches: {
+                [key: string]: components["schemas"]["PlatformTreeBranch"];
+            };
+            /** Leaves */
+            leaves?: components["schemas"]["PlatformTreeLeaf"][];
+            trunk: components["schemas"]["PlatformTreeTrunk"];
+        };
+        /** PlatformTreeTrunk */
+        PlatformTreeTrunk: {
+            /**
+             * Current Profile
+             * @default production
+             * @enum {string}
+             */
+            current_profile: "production" | "safe_watch" | "custom";
+            /**
+             * Kill Switch
+             * @default false
+             */
+            kill_switch: boolean;
+            userbot: components["schemas"]["PlatformTreeUserbot"];
+        };
+        /** PlatformTreeUserbot */
+        PlatformTreeUserbot: {
+            /**
+             * Alive
+             * @default 0
+             */
+            alive: number;
+            /**
+             * Total
+             * @default 0
+             */
+            total: number;
+            /** Workers */
+            workers?: components["schemas"]["PlatformTreeWorker"][];
+        };
+        /** PlatformTreeWorker */
+        PlatformTreeWorker: {
+            /** Account Id */
+            account_id: number;
+            /**
+             * Alive
+             * @default false
+             */
+            alive: boolean;
+            /**
+             * Desired
+             * @default running
+             */
+            desired: string;
+            /**
+             * Fail Count
+             * @default 0
+             */
+            fail_count: number;
+            /** Pid */
+            pid?: number | null;
+            /**
+             * Queued
+             * @default false
+             */
+            queued: boolean;
+            /**
+             * Starting
+             * @default false
+             */
+            starting: boolean;
         };
         /** PluginAccountActionRequest */
         PluginAccountActionRequest: {
@@ -19249,6 +19389,55 @@ export interface operations {
             };
             /** @description CSRF 校验失败或权限不足 */
             403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get_platform_tree_api_platform_tree_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: {
+                auth_token?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlatformTreeOut"];
+                };
+            };
+            /** @description 认证失败 */
+            401: {
                 headers: {
                     [name: string]: unknown;
                 };

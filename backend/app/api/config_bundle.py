@@ -17,7 +17,7 @@ from ..schemas.config_bundle import (
     ConfigBundleDryRunResponse,
     ConfigBundleExport,
 )
-from ..services import audit
+from ..services import audit, platform_capabilities
 from ..services.config_bundle_service import (
     BundleConfirmError,
     BundleTooLarge,
@@ -222,6 +222,8 @@ async def confirm_config_bundle(
         )
     except BundleConfirmError as exc:
         raise _bad(exc.code, exc.message) from exc
+    except platform_capabilities.PluginCapabilityBlocked as exc:
+        raise _bad(exc.error_code, str(exc), 409) from exc
 
     await audit.write(
         db,

@@ -19,6 +19,7 @@ MANIFEST = Manifest(
     description="cron / once / interval 定时触发动作（send_message / run_command / call_llm）",
     category="automation",
     permissions=["send_message", "send_file"],
+    requires_platform_capabilities=[],
     # level 字段说明：
     #   - "global": 全局配置，所有账号共享
     #   - "account": 账号级配置，按账号隔离（默认）

@@ -265,6 +265,7 @@ async def set_enabled_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[st
         config=None,
         notify=False,
         commit=False,
+        triggered_by_user_id=ctx.web_user_id,
     )
     return {
         "account_id": account_id,
@@ -360,6 +361,7 @@ async def reorder_direct_execute(ctx: ToolContext, args: dict[str, Any]) -> dict
             config=config,
             commit=False,
             notify=False,
+            triggered_by_user_id=ctx.web_user_id,
         )
         updated.append(
             {
@@ -479,6 +481,7 @@ async def save_account_config_execute(
         config=merged,
         notify=False,
         commit=False,
+        triggered_by_user_id=ctx.web_user_id,
     )
     return {
         "account_id": account_id,

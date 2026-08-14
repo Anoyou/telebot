@@ -5,10 +5,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
 
+from sqlalchemy import event as sa_event
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
 from ..db.base import AsyncSessionLocal
@@ -64,6 +67,61 @@ _STATE_CACHE: dict[str, Any] = {
 _CACHE_READY = False
 _PROFILE_LOCK = asyncio.Lock()
 _DENY_HANDLE: platform_capabilities.LedgerActionDenyRegistration | None = None
+_PLUGIN_ENABLE_GUARD_KEY = "telepilot_runtime_profile_plugin_enable_guard"
+
+
+@dataclass(slots=True)
+class PluginEnableGuard:
+    """把插件启用与值守切换串行到同一个 T1 同步边界。"""
+
+    state: dict[str, Any]
+    _owns_lock: bool
+    _bound_to_transaction: bool = False
+
+    def hold_until_transaction_end(self, db: Any) -> None:
+        """真实 SQLAlchemy 会话持锁到最外层 commit/rollback。"""
+
+        if not self._owns_lock or self._bound_to_transaction:
+            return
+        sync_session = getattr(db, "sync_session", None)
+        info = getattr(sync_session, "info", None)
+        if not isinstance(info, dict):
+            return
+        info[_PLUGIN_ENABLE_GUARD_KEY] = self
+        self._bound_to_transaction = True
+
+    def release_if_unbound(self) -> None:
+        if (
+            self._owns_lock
+            and not self._bound_to_transaction
+            and _PROFILE_LOCK.locked()
+        ):
+            _PROFILE_LOCK.release()
+            self._owns_lock = False
+
+    def release_after_transaction(self) -> None:
+        if self._owns_lock and _PROFILE_LOCK.locked():
+            _PROFILE_LOCK.release()
+        self._owns_lock = False
+        self._bound_to_transaction = False
+
+
+def _install_plugin_enable_guard_hooks() -> None:
+    if getattr(Session, "_telepilot_runtime_profile_guard_hooks", False):
+        return
+
+    @sa_event.listens_for(Session, "after_transaction_end")
+    def _after_transaction_end(session: Session, transaction: Any) -> None:
+        if getattr(transaction, "parent", None) is not None:
+            return
+        guard = session.info.pop(_PLUGIN_ENABLE_GUARD_KEY, None)
+        if isinstance(guard, PluginEnableGuard):
+            guard.release_after_transaction()
+
+    Session._telepilot_runtime_profile_guard_hooks = True  # type: ignore[attr-defined]
+
+
+_install_plugin_enable_guard_hooks()
 
 
 def _now() -> str:
@@ -130,6 +188,26 @@ async def refresh_state_from_db(db: AsyncSession | None = None) -> dict[str, Any
         )
         _sync_process_local_deny(state)
         return state
+
+
+async def acquire_plugin_enable_guard(db: AsyncSession) -> PluginEnableGuard:
+    """复用值守锁，并允许调用方把锁延续到插件事务提交。"""
+
+    sync_session = getattr(db, "sync_session", None)
+    info = getattr(sync_session, "info", None)
+    if isinstance(info, dict):
+        existing = info.get(_PLUGIN_ENABLE_GUARD_KEY)
+        if isinstance(existing, PluginEnableGuard):
+            existing.state = await refresh_state_from_db(db)
+            return existing
+
+    await _PROFILE_LOCK.acquire()
+    try:
+        state = await refresh_state_from_db(db)
+    except BaseException:
+        _PROFILE_LOCK.release()
+        raise
+    return PluginEnableGuard(state=state, _owns_lock=True)
 
 
 async def read_worker_pause_state() -> bool:
@@ -418,6 +496,8 @@ def _reset_for_tests() -> None:
         _DENY_HANDLE.dispose()
     _DENY_HANDLE = None
     _CACHE_READY = False
+    if _PROFILE_LOCK.locked():
+        _PROFILE_LOCK.release()
     _STATE_CACHE.clear()
     _STATE_CACHE.update(_normalized_state(None))
 
@@ -432,6 +512,8 @@ __all__ = [
     "ProfileConvergenceFailed",
     "ProfileSnapshotInvalid",
     "RuntimeProfileError",
+    "PluginEnableGuard",
+    "acquire_plugin_enable_guard",
     "apply",
     "dry_run",
     "get_status",
