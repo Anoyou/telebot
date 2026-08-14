@@ -8,7 +8,6 @@ import {
   Cog,
   Download,
   Save,
-  ShieldAlert,
   ShieldCheck,
   SlidersHorizontal,
   Sparkles,
@@ -43,21 +42,15 @@ import { PageHeader, PageShell } from "@/components/layout/PageScaffold";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { SectionHeader, SignalPill } from "@/components/ui/status";
 import {
-  applyRuntimeProfile,
-  dryRunRuntimeProfile,
   getPlatformCapabilities,
-  getPlatformTree,
-  getRuntimeProfile,
   getSystemSettings,
   patchPlatformCapability,
   patchSystemSettings,
-  restoreRuntimeProfile,
 } from "@/api/system";
-import type { PlatformModuleKey, RuntimeProfileDryRunOut } from "@/api/types";
+import type { PlatformModuleKey } from "@/api/types";
 import { listAccounts } from "@/api/accounts";
 import { getErrMsg, api } from "@/lib/api";
 import { moduleLabel, runtimeStateLabel } from "@/lib/navigation";
-import { PlatformTreeView } from "./PlatformTreeView";
 import { NotifyBots } from "./NotifyBots";
 import { DeviceProfileManager } from "./DeviceProfileManager";
 import { ProxyManager } from "./ProxyManager";
@@ -72,14 +65,6 @@ interface KillSwitchState {
 }
 
 type RuntimeLogLevel = "debug" | "info" | "warn" | "error";
-
-const RUNTIME_PROFILE_STATUS_LABEL = {
-  idle: "空闲",
-  applying: "正在进入",
-  active: "值守中",
-  restoring: "正在恢复",
-  failed: "收敛失败",
-} as const;
 
 const GUIDE_STEPS: Array<{
   title: string;
@@ -124,8 +109,6 @@ export function SettingsIndex() {
   const [guideExpanded, setGuideExpanded] = useState(false);
   const [quickAid, setQuickAid] = useState("");
   const [quickBindOpen, setQuickBindOpen] = useState(false);
-  const [profileConfirmOpen, setProfileConfirmOpen] = useState(false);
-  const [profilePreview, setProfilePreview] = useState<RuntimeProfileDryRunOut | null>(null);
   const guideActive = searchParams.get("guide") === "1";
   const currentStep = useMemo(
     () => getGuideStepByPath(location.pathname, location.search),
@@ -281,59 +264,6 @@ export function SettingsIndex() {
     queryKey: ["system", "capabilities"],
     queryFn: getPlatformCapabilities,
     staleTime: 10_000,
-  });
-
-  const treeQ = useQuery({
-    queryKey: ["platform", "tree"],
-    queryFn: getPlatformTree,
-    staleTime: 10_000,
-  });
-
-  const profileQ = useQuery({
-    queryKey: ["system", "runtime-profile"],
-    queryFn: getRuntimeProfile,
-    staleTime: 5_000,
-  });
-
-  const invalidateRuntimeProfile = () => {
-    qc.invalidateQueries({ queryKey: ["system", "runtime-profile"] });
-    qc.invalidateQueries({ queryKey: ["system", "capabilities"] });
-    qc.invalidateQueries({ queryKey: ["system", "settings"] });
-    qc.invalidateQueries({ queryKey: ["platform", "tree"] });
-  };
-
-  const previewSafeWatch = useMutation({
-    mutationFn: () => dryRunRuntimeProfile("safe_watch"),
-    onSuccess: (data) => {
-      setProfilePreview(data);
-      setProfileConfirmOpen(true);
-    },
-    onError: (err) => toast.error(getErrMsg(err)),
-  });
-
-  const applySafeWatch = useMutation({
-    mutationFn: () => applyRuntimeProfile("safe_watch"),
-    onSuccess: () => {
-      setProfileConfirmOpen(false);
-      toast.success("值守模式已激活：插件叶投递、定时任务和资金动作已冻结");
-      invalidateRuntimeProfile();
-    },
-    onError: (err) => {
-      toast.error(getErrMsg(err));
-      invalidateRuntimeProfile();
-    },
-  });
-
-  const restoreProfile = useMutation({
-    mutationFn: restoreRuntimeProfile,
-    onSuccess: () => {
-      toast.success("已恢复值守前快照，插件投递与定时任务恢复");
-      invalidateRuntimeProfile();
-    },
-    onError: (err) => {
-      toast.error(getErrMsg(err));
-      invalidateRuntimeProfile();
-    },
   });
 
   const saveCapability = useMutation({
@@ -506,57 +436,6 @@ export function SettingsIndex() {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={profileConfirmOpen} onOpenChange={setProfileConfirmOpen}>
-        <DialogContent className="max-w-lg">
-          <DialogHeader>
-            <DialogTitle>确认进入值守模式</DialogTitle>
-            <DialogDescription>
-              值守会暂停插件叶投递与定时任务，并注册资金动作拒绝原因。平台观测、告警通知和内置管理命令仍可用。
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-3 text-sm">
-            <div className="rounded-md border bg-muted/20 p-3">
-              <div className="font-medium">模块变更预览</div>
-              {profilePreview?.diff.length ? (
-                <div className="mt-2 space-y-1.5">
-                  {profilePreview.diff.map((item) => (
-                    <div key={item.key} className="flex items-center justify-between gap-3 text-xs">
-                      <span>{moduleLabel(item.key)}</span>
-                      <span className="text-muted-foreground">
-                        {item.from_enabled ? "开启" : "关闭"} → {item.to_enabled ? "开启" : "关闭"}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <p className="mt-2 text-xs text-muted-foreground">
-                  模块开关无需调整，仍会执行 worker 暂停收敛与资金冻结。
-                </p>
-              )}
-            </div>
-            <div className="rounded-md border border-warning/30 bg-warning/10 p-3 text-xs leading-5">
-              {profilePreview?.blind_spot}
-            </div>
-          </div>
-          <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => setProfileConfirmOpen(false)}
-              disabled={applySafeWatch.isPending}
-            >
-              取消
-            </Button>
-            <Button
-              onClick={() => applySafeWatch.mutate()}
-              loading={applySafeWatch.isPending}
-              loadingText="正在收敛"
-            >
-              确认进入值守
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
       <Tabs value={tab} onValueChange={(v) => setTab(v as typeof tab)}>
         <TabsList className="flex h-auto flex-wrap justify-start gap-1">
           <TabsTrigger value="account" className="gap-1.5">
@@ -680,138 +559,6 @@ export function SettingsIndex() {
                   </div>
                 </div>
               </div>
-            </CardContent>
-          </Card>
-
-          <Card className="overflow-hidden">
-            <div
-              className={`h-1 ${
-                profileQ.data?.status === "failed"
-                  ? "bg-destructive"
-                  : profileQ.data?.active_profile === "safe_watch"
-                    ? "bg-warning"
-                    : "bg-success"
-              }`}
-            />
-            <CardHeader className="gap-3">
-              <div className="flex flex-wrap items-start justify-between gap-3">
-                <div className="space-y-1">
-                  <CardTitle className="flex items-center gap-2 text-base">
-                    <ShieldAlert className="h-4 w-4 text-warning" />
-                    运行模式
-                  </CardTitle>
-                  <CardDescription>
-                    一键进入可持久、自愈的值守态，恢复时逐项还原进入前快照。
-                  </CardDescription>
-                </div>
-                <SignalPill
-                  tone={
-                    profileQ.data?.status === "failed"
-                      ? "danger"
-                      : profileQ.data?.active_profile === "safe_watch"
-                        ? "warn"
-                        : "success"
-                  }
-                  label="当前"
-                  value={
-                    profileQ.isLoading
-                      ? "读取中"
-                      : profileQ.data?.active_profile === "safe_watch"
-                        ? "值守"
-                        : profileQ.data?.current_profile === "custom"
-                          ? "自定义"
-                          : "生产"
-                  }
-                />
-              </div>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="grid gap-2 text-xs sm:grid-cols-3">
-                <div className="rounded-md border bg-muted/20 p-3">
-                  <div className="text-muted-foreground">投递与任务</div>
-                  <div className="mt-1 font-medium">
-                    {profileQ.data?.active_profile === "safe_watch" ? "已暂停" : "按配置运行"}
-                  </div>
-                </div>
-                <div className="rounded-md border bg-muted/20 p-3">
-                  <div className="text-muted-foreground">资金动作</div>
-                  <div className="mt-1 font-medium">
-                    {profileQ.data?.active_profile === "safe_watch" ? "已拒绝" : "按能力闸运行"}
-                  </div>
-                </div>
-                <div className="rounded-md border bg-muted/20 p-3">
-                  <div className="text-muted-foreground">状态</div>
-                  <div className="mt-1 font-medium">
-                    {profileQ.data
-                      ? RUNTIME_PROFILE_STATUS_LABEL[profileQ.data.status]
-                      : "读取中"}
-                  </div>
-                </div>
-              </div>
-
-              {profileQ.data?.active_profile === "safe_watch" ? (
-                <div className="rounded-md border border-warning/30 bg-warning/10 p-3 text-xs leading-5">
-                  {profileQ.data.blind_spot}
-                </div>
-              ) : null}
-              {profileQ.data?.last_error ? (
-                <div className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-xs text-destructive">
-                  收敛失败：{profileQ.data.last_error}
-                </div>
-              ) : null}
-
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <p className="max-w-2xl text-xs leading-5 text-muted-foreground">
-                  值守中 userbot 直通与命令入站继续纯观测落库，插件叶零投递。平台通知与内置管理命令保留，可随时查询并退出值守。
-                </p>
-                {profileQ.data?.active_profile === "safe_watch" ? (
-                  <Button
-                    variant="outline"
-                    onClick={() => restoreProfile.mutate()}
-                    loading={restoreProfile.isPending}
-                    loadingText="正在恢复"
-                    disabled={
-                      profileQ.data.status === "restoring"
-                      || profileQ.data.status === "applying"
-                    }
-                  >
-                    恢复值守前快照
-                  </Button>
-                ) : (
-                  <Button
-                    onClick={() => previewSafeWatch.mutate()}
-                    loading={previewSafeWatch.isPending}
-                    loadingText="正在预检"
-                    disabled={profileQ.isLoading || profileQ.data?.status === "applying"}
-                  >
-                    进入值守模式
-                  </Button>
-                )}
-              </div>
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2 text-base">
-                <Waypoints className="h-4 w-4" />
-                看树视图
-              </CardTitle>
-              <CardDescription>
-                汇总这台机器的树干、五条平台枝与已登记插件叶；仅提示无需求的枝可关，不会自动休眠。
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              {treeQ.isLoading ? (
-                <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                  <Spinner className="h-3.5 w-3.5" />
-                  正在读取平台树…
-                </div>
-              ) : treeQ.isError ? (
-                <p className="text-xs text-destructive">看树数据读取失败：{getErrMsg(treeQ.error)}</p>
-              ) : treeQ.data ? (
-                <PlatformTreeView tree={treeQ.data} />
-              ) : null}
             </CardContent>
           </Card>
 

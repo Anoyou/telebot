@@ -1,10 +1,13 @@
 import { useMemo, useState } from "react";
+import { Pencil } from "lucide-react";
 
 import type { PlatformModuleKey, PlatformTree } from "@/api/types";
+import { Button } from "@/components/ui/button";
 import { moduleLabel, runtimeStateLabel } from "@/lib/navigation";
 import { cn } from "@/lib/utils";
 
 type TreeLeaf = PlatformTree["leaves"][number];
+type TreeLeafDetails = { displayName: string; canEdit: boolean };
 
 type HoverTarget =
   | { kind: "branch"; key: PlatformModuleKey }
@@ -25,7 +28,15 @@ function sortLeaves(leaves: TreeLeaf[]): TreeLeaf[] {
   );
 }
 
-export function PlatformTreeView({ tree }: { tree: PlatformTree }) {
+export function PlatformTreeView({
+  tree,
+  leafDetails,
+  onEditLeaf,
+}: {
+  tree: PlatformTree;
+  leafDetails?: ReadonlyMap<string, TreeLeafDetails>;
+  onEditLeaf?: (key: string) => void;
+}) {
   const [hover, setHover] = useState<HoverTarget>(null);
 
   const groups = useMemo(() => {
@@ -77,7 +88,9 @@ export function PlatformTreeView({ tree }: { tree: PlatformTree }) {
 
   const clearHover = () => setHover(null);
 
-  const renderLeafRow = (leaf: TreeLeaf) => (
+  const renderLeafRow = (leaf: TreeLeaf) => {
+    const details = leafDetails?.get(leaf.key);
+    return (
     <div
       key={leaf.key}
       tabIndex={0}
@@ -99,8 +112,15 @@ export function PlatformTreeView({ tree }: { tree: PlatformTree }) {
         )}
         aria-hidden
       />
-      <span className={cn("font-medium", !leaf.enabled && "text-muted-foreground")}>
-        {leaf.key}
+      <span className="min-w-0 max-w-full">
+        <span className={cn("break-words font-medium", !leaf.enabled && "text-muted-foreground")}>
+          {details?.displayName || leaf.key}
+        </span>
+        {details?.displayName && details.displayName !== leaf.key ? (
+          <span className="ml-1.5 break-all font-mono text-[10px] text-muted-foreground">
+            {leaf.key}
+          </span>
+        ) : null}
       </span>
       <span className="rounded bg-muted px-1 py-px text-[10px] leading-4 text-muted-foreground">
         {leaf.attachment}
@@ -127,8 +147,22 @@ export function PlatformTreeView({ tree }: { tree: PlatformTree }) {
           {warning}
         </span>
       ))}
+      {details?.canEdit && onEditLeaf ? (
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          className="ml-auto h-6 shrink-0 px-2 text-[10px]"
+          onClick={() => onEditLeaf(leaf.key)}
+          aria-label={`编辑 ${details.displayName || leaf.key}`}
+        >
+          <Pencil className="mr-1 h-3 w-3" />
+          编辑
+        </Button>
+      ) : null}
     </div>
-  );
+    );
+  };
 
   return (
     <div className="text-xs" onMouseLeave={clearHover}>

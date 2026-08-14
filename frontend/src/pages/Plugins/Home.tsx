@@ -5,16 +5,16 @@ import { toast } from "sonner";
 import {
   AlertTriangle,
   ArrowRight,
-  BookOpen,
   ChevronDown,
   History,
   MessageSquareText,
   Package2,
-  Package,
   Pencil,
+  Rows3,
   Search,
   Settings2,
   Sparkles,
+  Waypoints,
   Zap,
 } from "lucide-react";
 
@@ -26,7 +26,7 @@ import {
   listInstalledPackages,
   listPluginInstallHistory,
 } from "@/api/plugins";
-import { getSystemSettings } from "@/api/system";
+import { getPlatformTree } from "@/api/system";
 import type { AccountFeatureItem, FeatureInfo } from "@/api/types";
 import type { PluginInstallHistoryItem, PluginInstallOut } from "@/api/plugins";
 import type { PluginLLMUsageSummaryItem } from "@/api/llmUsage";
@@ -37,7 +37,6 @@ import { MetaBadge } from "@/components/ui/meta-badge";
 import {
   SectionHeader,
   SignalPill,
-  ToneRailCard,
 } from "@/components/ui/status";
 import {
   Card,
@@ -58,6 +57,7 @@ import {
 import { pluginUsageGuideWarning, splitPluginWarnings } from "@/lib/plugin-config-contract";
 import { isPlatformFeature } from "@/lib/plugin-modes";
 import { cn, formatDateTime } from "@/lib/utils";
+import { PlatformTreeView } from "@/pages/Settings/PlatformTreeView";
 import {
   compactUsageText,
   pluginContractRiskWarnings,
@@ -73,11 +73,13 @@ import {
 } from "@/types/pluginContract";
 
 import { featureConfigPath } from "./_shared/featureConfig";
+import { AccountRuntimePanel } from "./AccountRuntimePanel";
 import { PluginWorkspaceHeader } from "./WorkspaceHeader";
 
 type ModuleCategory = "direct_passthrough" | "interactive" | "automation" | "utility";
 type ModuleCategoryFilter = "all" | ModuleCategory;
 type PluginStatusFilter = "all" | "enabled" | "disabled" | "failed";
+type PluginView = "cards" | "tree";
 const CATEGORY_META: Record<ModuleCategory, { title: string; hint: string; icon: ComponentType<{ className?: string }> }> = {
   direct_passthrough: {
     title: "裸直通",
@@ -211,10 +213,10 @@ export function PluginsHome() {
   const [searchParams] = useSearchParams();
   const [selectedAid, setSelectedAid] = useState<number | null>(null);
   const [guideExpanded, setGuideExpanded] = useState(false);
-  const [aiPanelExpanded, setAiPanelExpanded] = useState(false);
   const [selectedCategory, setSelectedCategory] = useState<ModuleCategoryFilter>("all");
   const [pluginSearch, setPluginSearch] = useState("");
   const [pluginStatus, setPluginStatus] = useState<PluginStatusFilter>("all");
+  const [pluginView, setPluginView] = useState<PluginView>("cards");
   const [selectedPluginKeys, setSelectedPluginKeys] = useState<Set<string>>(() => new Set());
   const [historyPluginKey, setHistoryPluginKey] = useState<string | null>(null);
   const guideActive = searchParams.get("guide") === "1";
@@ -222,9 +224,10 @@ export function PluginsHome() {
     queryKey: ["matrix"],
     queryFn: getFeatureMatrix,
   });
-  const settingsQ = useQuery({
-    queryKey: ["system", "settings"],
-    queryFn: getSystemSettings,
+  const treeQ = useQuery({
+    queryKey: ["platform", "tree"],
+    queryFn: getPlatformTree,
+    staleTime: 10_000,
   });
   const installedQ = useQuery({
     queryKey: ["plugins", "installed-packages"],
@@ -244,6 +247,10 @@ export function PluginsHome() {
   const features = matrixQ.data?.features ?? [];
   const pluginFeatures = useMemo(
     () => features.filter((feature) => !isPlatformFeature(feature) && feature.key !== "forward"),
+    [features],
+  );
+  const treePluginFeatures = useMemo(
+    () => features.filter((feature) => !isPlatformFeature(feature)),
     [features],
   );
   useEffect(() => {
@@ -294,6 +301,22 @@ export function PluginsHome() {
     }
     return map;
   }, [pluginUsageQ.data]);
+  const treeLeafDetails = useMemo(() => {
+    const details = new Map<string, { displayName: string; canEdit: boolean }>();
+    for (const feature of treePluginFeatures) {
+      details.set(feature.key, {
+        displayName: feature.display_name || feature.key,
+        canEdit: Boolean(featureConfigPath(selectedAid ?? undefined, feature.key, feature, { source: "plugins" })),
+      });
+    }
+    return details;
+  }, [selectedAid, treePluginFeatures]);
+  const openTreeLeafEditor = (key: string) => {
+    const feature = treePluginFeatures.find((item) => item.key === key);
+    if (!feature) return;
+    const path = featureConfigPath(selectedAid ?? undefined, key, feature, { source: "plugins" });
+    if (path) nav(path);
+  };
 
   const grouped = useMemo(() => {
     const zones: Record<ModuleCategory, typeof features> = {
@@ -402,67 +425,9 @@ export function PluginsHome() {
     <PageShell>
       <PluginWorkspaceHeader activeTab="home" guideActive={guideActive} />
 
-      <Card className="hidden md:block">
-        <CardContent className="space-y-4 !pt-5">
-          {(settingsQ.data?.ai_enabled ?? false) ? (
-            <div className="rounded-lg border px-4 py-3">
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                <SectionHeader
-                  icon={Sparkles}
-                  title="AI 插件入口"
-                  description="AI 属于插件配置：先配置模型凭据，再创建指令模板，最后按账号启用；调用记录与排障集中在同一个工作台。"
-                />
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  className="shrink-0"
-                  onClick={() => setAiPanelExpanded((value) => !value)}
-                  aria-expanded={aiPanelExpanded}
-                >
-                  {aiPanelExpanded ? "收起" : "展开"}
-                  <ChevronDown className={`ml-1 h-4 w-4 transition-transform ${aiPanelExpanded ? "rotate-180" : ""}`} />
-                </Button>
-              </div>
-              {aiPanelExpanded ? (
-                <div className="mt-3 grid gap-2 md:grid-cols-2 xl:grid-cols-4">
-                  <ToneRailCard
-                    icon={Sparkles}
-                    title="AI 工作台"
-                    value={<Button size="sm" variant="outline" className="border-primary/35 bg-primary/5 text-primary hover:bg-primary/10" onClick={() => nav("/ai")}>打开</Button>}
-                    valueClassName="flex flex-wrap gap-2"
-                    description="总览模型、指令模板和启用状态"
-                    tone="primary"
-                  />
-                  <ToneRailCard
-                    icon={Package}
-                    title="模型提供商"
-                    value={<Button size="sm" variant="outline" className="border-primary/35 bg-primary/5 text-primary hover:bg-primary/10" onClick={() => nav("/ai?tab=providers")}>配置</Button>}
-                    valueClassName="flex flex-wrap gap-2"
-                    description="配置 OpenAI、Anthropic、Ollama 等"
-                    tone="neutral"
-                  />
-                  <ToneRailCard
-                    icon={History}
-                    title="近期调用"
-                    value={<Button size="sm" variant="outline" className="border-primary/35 bg-primary/5 text-primary hover:bg-primary/10" onClick={() => nav("/ai?tab=usage")}>查看详情</Button>}
-                    valueClassName="flex flex-wrap gap-2"
-                    description="查看成功率、耗时和错误原因"
-                    tone="success"
-                  />
-                  <ToneRailCard
-                    icon={BookOpen}
-                    title="帮助与示例"
-                    value={<Button size="sm" variant="outline" className="border-primary/35 bg-primary/5 text-primary hover:bg-primary/10" onClick={() => nav("/ai?help=1")}>前往</Button>}
-                    valueClassName="flex flex-wrap gap-2"
-                    description="浮层查看原理、示例和术语"
-                    tone="warn"
-                  />
-                </div>
-              ) : null}
-            </div>
-          ) : null}
-          {guideActive ? (
+      {guideActive ? (
+        <Card className="hidden md:block">
+          <CardContent className="space-y-4 !pt-5">
             <GuideContextCard
               expanded={guideExpanded}
               onToggle={() => setGuideExpanded((v) => !v)}
@@ -477,9 +442,9 @@ export function PluginsHome() {
                 setGuideExpanded(false);
               }}
             />
-          ) : null}
-        </CardContent>
-      </Card>
+          </CardContent>
+        </Card>
+      ) : null}
 
       {codexImageFeature && codexImageState === "failed" ? (
         <Card className="border-warning/40 bg-warning/10">
@@ -508,6 +473,7 @@ export function PluginsHome() {
           />
         </CardHeader>
         <CardContent className="space-y-4">
+          <AccountRuntimePanel />
           {accountFeaturesQ.isError ? (
             <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
               当前账号插件状态加载失败，暂时无法显示最近错误详情。
@@ -554,6 +520,38 @@ export function PluginsHome() {
               </Button>
             </div>
           ) : null}
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border bg-muted/20 p-2.5">
+            <div>
+              <div className="text-sm font-medium">插件视图</div>
+              <div className="text-xs text-muted-foreground">按使用目的浏览卡片，或按平台能力查看树状依赖。</div>
+            </div>
+            <div className="grid w-full gap-1 rounded-md border bg-background p-1 sm:inline-flex sm:w-auto" role="group" aria-label="切换插件视图">
+              <Button
+                type="button"
+                size="sm"
+                variant={pluginView === "cards" ? "secondary" : "ghost"}
+                className="min-w-0 w-full justify-center px-2.5 sm:w-auto sm:flex-none"
+                aria-pressed={pluginView === "cards"}
+                onClick={() => setPluginView("cards")}
+              >
+                <Rows3 className="mr-1 h-4 w-4" />
+                卡片视图（功能分类）
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant={pluginView === "tree" ? "secondary" : "ghost"}
+                className="min-w-0 w-full justify-center px-2.5 sm:w-auto sm:flex-none"
+                aria-pressed={pluginView === "tree"}
+                onClick={() => setPluginView("tree")}
+              >
+                <Waypoints className="mr-1 h-4 w-4" />
+                树状视图（能力分类）
+              </Button>
+            </div>
+          </div>
+          {pluginView === "cards" ? (
+            <>
           <div className="grid gap-2 rounded-lg border bg-muted/20 p-3 sm:grid-cols-[minmax(0,1fr)_160px_auto] sm:items-end">
             <label className="space-y-1.5 text-sm">
               <span className="text-muted-foreground">全局搜索</span>
@@ -665,6 +663,27 @@ export function PluginsHome() {
               onOpenHistory={setHistoryPluginKey}
             />
           </div>
+            </>
+          ) : (
+            <Card>
+              <CardHeader className="pb-3">
+                <SectionHeader
+                  icon={Waypoints}
+                  title="树状视图（能力分类）"
+                  description="叶按嫁接通道生长，能力枝显示插件依赖；悬停任一枝叶可查看关联。"
+                />
+              </CardHeader>
+              <CardContent>
+                {treeQ.isLoading ? (
+                  <div className="flex items-center gap-2 text-sm text-muted-foreground"><Spinner className="h-4 w-4" />正在读取平台树</div>
+                ) : treeQ.isError ? (
+                  <p className="text-sm text-destructive">树状视图读取失败，请稍后重试。</p>
+                ) : treeQ.data ? (
+                  <PlatformTreeView tree={treeQ.data} leafDetails={treeLeafDetails} onEditLeaf={openTreeLeafEditor} />
+                ) : null}
+              </CardContent>
+            </Card>
+          )}
         </CardContent>
       </Card>
       <PluginInstallHistoryDialog
