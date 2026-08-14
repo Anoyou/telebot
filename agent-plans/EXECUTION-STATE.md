@@ -9,7 +9,7 @@
 - [x] WP-T2 接线规范 — done `104ddddb`
 - [x] WP-T3 钱的保险丝 — done `61c87613`
 - [x] WP-T1 值守预设 — done `ee60ffed`
-- [ ] WP-T4 声明补齐+按叶点枝+看树视图 — in_progress
+- [x] WP-T4 声明补齐+按叶点枝+看树视图 — done `8f426055`
 - [~] WP-T5 AI 写操作工具 — 挂起（扳机：首个真实写工具需求）
 
 ## 当前计划：内置 Codex Gateway / 全链路 Agent 接入 / LLM 错误语义收口 v1
