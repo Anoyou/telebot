@@ -36,7 +36,7 @@
 9. 禁止在普通会话消息里把 `send_via` 当必填样板；大多数动作应该继承 `session.channel`。
 10. 禁止在需要 `show_alert` 晚提示的按钮入口上开启 `callback_fast_ack`。
 11. `send_rich_message` 默认走 Interaction Bot；只有明确接受 Premium/能力门禁和 HTML/Markdown 限制时才显式选择 UserBot，任何失败都禁止静默降级成普通 HTML/纯文本。
-12. 禁止把 `tp_plugin session_game|command` 当前生成的 `interaction_entries + on_interaction` 兼容桥直接当成新插件最终架构；新插件应补齐 `event_subscriptions` 并迁到 `on_event`。
+12. 禁止把 `tp_plugin new <name> --profile session_game|command` 当前生成的 `interaction_entries + on_interaction` 兼容桥直接当成新插件最终架构；新插件应补齐 `event_subscriptions` 并迁到 `on_event`。
 13. 禁止用 `answer_callback` 尝试点击第三方 Bot 的按钮；它只用于 ACK 当前 Interaction Bot 收到的 callback。
 14. 禁止自动打开 URL 按钮，或自动分享手机号、地理位置。普通键盘按钮、Switch Inline 等非 callback 按钮也不得按 callback 按钮处理。
 15. 禁止调用 `message.buttons[row][column].click()`；该旧穿透路径已被安全阻断。必须改用 `ctx.messages.click_callback_button(...)`，由平台统一做权限、目标复核、限流、Trace、ActionEvent、dry-run 和重复点击保护。

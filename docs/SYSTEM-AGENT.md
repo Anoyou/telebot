@@ -147,6 +147,7 @@ System Agent 使用四层上下文，避免每轮回放全部原始消息：
 | `features.get_account_status` | 账号功能/插件启停矩阵 |
 | `features.get_config` / `save_account_config` / `save_global_config` | 读取脱敏后的插件配置 JSON；修改受 Schema、管理员角色与 Action 确认约束 |
 | `features.list_plugin_databases` / `query_plugin_database` | 管理员列出插件私有 SQLite 结构并执行受限、参数化的只读查询 |
+| `plugin_{plugin_key}.{tool_name}` | 已安装且启用的插件可通过 manifest 的 `capabilities.agent_tools` 与 `agent_tools[].expose=["system_agent"]` 声明只读工具；还需声明 `permissions=["ai_agent"]`。账号必须启用该插件，主进程经 Worker IPC 执行，10 秒超时；写语义声明不会暴露，结果会脱敏并标记为外部数据 |
 | `logs.recent` / `search_errors` / `get_event_detail` | 运行日志（默认 20，最大 500） |
 | `source.search` / `source.read` | 管理员只读检索部署源码并按行查看；拒绝敏感目录、路径越界、执行和写入 |
 | `web.search` / `web.read` | 搜索公开互联网，或读取指定公开 URL 并提取文本正文 |

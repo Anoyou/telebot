@@ -156,7 +156,7 @@ result = await ctx.ai.run_agent(
 - 超限时，插件会收到 `AIQuotaError`；平台同时写入一条 `LLMUsage(success=False, error_type="plugin_quota_exceeded")`，可在 Usage 页排查。
 - Redis 不可用时会降级为 DB 检查，但并发预扣保护会暂时关闭；生产环境建议保留 Redis 可用性监控。
 - DB 降级统计会同时聚合 `plugin:{key}` 与 `plugin:{key}:*` usage，因此 `run_agent()` 和普通文本调用共享同一插件额度，不会因 source 子类型漏计。
-- token 估算是软上限：当前按 UTF-8 字节数 `// 4` 粗估，中文场景通常会偏低 1.5-2x，并发尖峰也可能瞬时越限。
+- token 估算是软上限：平台先把 `system` 与 `user` 合并后的 UTF-8 字节数按每 4 字节向上取整（`(bytes + 3) // 4`，至少 1），再加上本次请求的 `max_output_tokens` 作为预扣值；并发尖峰仍可能瞬时越限。
 - 跨午夜的请求按 acquire 当时所属的自然日记账，软上限场景误差可接受。
 
 ## AI 玩法组件
