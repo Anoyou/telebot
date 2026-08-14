@@ -129,3 +129,8 @@
 ## 修改边界
 
 本轮只修改文档：本审计报告、PLUGIN-AI.md、PLUGIN-RULES.md、SYSTEM-AGENT.md 和 CHANGELOG.md；未修改后端、前端或示例代码。
+
+## 裁定结果（2026-08-15，advisor）
+
+1. **ctx.messages 矩阵**：采纳单列。缓冲 facade 行方法清单补入 `apply`——矩阵此前只在 live 行列出 apply，与正文"两种 facade 都提供 apply"自相矛盾，扫表会误判为 live 专属。已修 PLUGIN-API-REFERENCE.md。
+2. **external_http_bypass_proxy**：判定为"虚假安全示能"——原措辞暗示该权限参与直连门禁，代码事实是门禁只看 Manifest `http.allow_direct` + 账号 `network_mode=direct`（http_facade.py 双门禁，权限名不参与）。文档已改为直述现状（PLUGIN-SAFETY.md）。代码层后续二选一（择机小票，本轮不动代码）：a) 把该权限接入 direct 门禁成第三重门——倾向此项，符合"权限用于安装提示与审计"的平台惯例，动工前先盘点存量 allow_direct 插件做迁移提示；b) 正式移除该权限名。

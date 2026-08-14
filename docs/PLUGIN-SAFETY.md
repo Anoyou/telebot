@@ -41,7 +41,7 @@ Manifest 中的 `permissions` 字段声明插件需要的能力：
 | `click_bot_button` | `ctx.messages.click_callback_button` | 以 UserBot 身份点击第三方 Bot callback；平台二次读取并复核真实消息，安装插件必须显式声明 |
 | `moderate_chat` | `ban_user` / `kick_user` / `mute_user` / `unban_user` | 受控成员管理；高危权限，不开放 raw MTProto |
 | `external_http` | `ctx.http.get` / `ctx.http.post` | 安全 HTTP facade；必须同时声明 `allowed_hosts` |
-| `external_http_bypass_proxy` | direct 网络出口 | 预留高危权限；当前直连还必须通过 Manifest `http.allow_direct` 和账号配置共同开启 |
+| `external_http_bypass_proxy` | direct 网络出口 | 预留权限名，**当前不参与运行时门禁**：直连实际由 Manifest `http.allow_direct` + 账号 `network_mode="direct"` 双门禁决定。审计插件能否直连以 `http.allow_direct` 为准，勿以本权限是否声明为依据 |
 | `ai_text` | `ctx.ai.complete` / `ctx.ai.list_providers` | 平台文本 LLM facade；返回脱敏 provider 元数据 |
 | `ai_agent` | `ctx.ai.run_agent` | 有界工具调用；还需 `capabilities.agent_tools.enabled=true`、`agent_tools[]` 与宿主 handler 双白名单 |
 

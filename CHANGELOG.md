@@ -28,6 +28,7 @@
 ### 文档
 
 - 完成插件文档族真实性审计：修正 AI token 预扣估算与 tp_plugin 脚手架命令示例，补充 System Agent 动态插件只读工具说明。
+- 裁定并修正两处语义措辞：`ctx.messages` 矩阵为缓冲 facade 补入 `apply`；`external_http_bypass_proxy` 改为直述"不参与直连门禁"，审计以 `http.allow_direct` 为准。
 
 ## [0.97.0-beta.4] - 2026-08-15 · patch（补丁预发布） · 修复浏览器测试夹具
 
