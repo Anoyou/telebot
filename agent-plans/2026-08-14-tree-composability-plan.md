@@ -1,6 +1,6 @@
 # 树形组合化改造方案（Tree Composability Round）v1.1
 
-> 2026-08-14 定稿；同日 v1.1 修订（T1 卡点裁定）：核实 kill_switch 为"全停"级开关而非发送级闸 → T1/T3 施工顺序对调、值守语义改为"暂停叶子投递"（详见 §4 WP-T1/WP-T3、§5、§8）。
+> 2026-08-14 定稿；同日 v1.1 修订（T1 卡点裁定）：核实 kill_switch 为"全停"级开关而非发送级闸 → T1/T3 施工顺序对调、值守语义改为"暂停叶子投递"（详见 §4 WP-T1/WP-T3、§5、§8）；v1.1a：值守观测口径裁定（枝关闭优先）；v1.1b：T4 声明表口径 10 叶（codex_image 残留目录出表，见 §4 WP-T4）。
 > 来源：DeepSeek Harness（Cordis"一切皆插件"+ 运行模式）设计思想对照 TelePilot 现状的完整讨论，结论收敛为本方案。
 > 本文是**派工文档**：每个 WP 可单独交给一个 worker 施工。施工前必读 §1 词汇表与 §2 全局纪律。
 > ⚠️ 项目铁律：**计划文档 ≠ 代码现状**。本文引用的行号是 2026-08-14 快照，动手前必须 grep 复核。
@@ -100,13 +100,13 @@ TelePilot 的目标架构用一棵树描述。**改造原则：能力皆可组�
 **树语**：让"枝按叶的需求自动生长"成真，并给树装一面镜子。
 
 **要做**：
-1. **补作业**：为 builtin 中仍被注册的插件（`forward`、`scheduler`）与全部 9 个 installed 插件（bot_mute_guard、codex_image、dice_grid_hunt、guess_number、lottery_plus、poetry_blank、pt_promote、redpack-byRBQ、sum）补 `requires_platform_capabilities` 声明。逐个读代码判断，PR 里每插件一行理由（如 lottery_plus → ledger+interaction_bot；codex_image → ai）。被 `_NON_CORE_BUILTIN_COMPAT_KEYS` 排除的目录不动。
+1. **补作业**：为 builtin 中仍被注册的插件（`forward`、`scheduler`）与 8 个有源码的 installed 插件（bot_mute_guard、dice_grid_hunt、guess_number、lottery_plus、poetry_blank、pt_promote、redpack-byRBQ、sum）补 `requires_platform_capabilities` 声明。逐个读代码判断，PR 里每插件一行理由（如 lottery_plus → ledger+interaction_bot）。被 `_NON_CORE_BUILTIN_COMPAT_KEYS` 排除的目录不动。**v1.1b 勘误**：`codex_image` 本地仅剩 `__pycache__` 残留、源码已迁外部插件仓库——按残留目录处理不入表（同 feature_registry 对 compat 残留的哲学：残留目录不算代码）；其声明随外部仓库下次发版携带，由本 WP 的新装/升级 schema 校验强制。推导器与看树视图必须容忍"DB 已装但本地无源码"的叶：标记源缺失 warning、不参与 demand 计算、不崩溃（codex_image 残留即现成测试用例）。
 2. **schema 强制**：`schemas/plugin.schema.json` 增加该字段校验（enum 限五值，允许空数组=什么枝都不要）；`plugin_install_service` 对**新装/升级**强制"字段必须存在"；devkit 脚手架模板默认带字段。存量已安装未声明 → 插件中心 warning badge，不拦截。
 3. **推导器**：`platform_capabilities` 增加 `compute_demand()` → `{module: [依赖它的插件 key]}`（跨账号取并集）。启用/安装插件时所需枝未开 → **默认自动点亮**并写审计（"因 X 需要，自动启用 Y"）；若该枝被预设/管理员强制关（引入 `forced_off` 标记语义，修枝剪优先）→ 启用失败并返回明确错误。枝开着但无叶需要 → 工作台提示"可关"，**不自动关**。
 4. **看树视图**：`GET /api/platform/tree` 返回 `{trunk: {userbot 状态, kill_switch, 当前 profile}, branches: {模块: {state, demanded_by}}, leaves: [{key, 嫁接方式(直通/命令/交互), enabled, requires}]}`；工作台简单渲染（对标 dsh 的 `--dump-config`：一眼说清这台机器跑的是什么树）。
 5. 可选加分项：System Agent 已有 features 工具面的话，顺带暴露只读"看树"查询。
 
-**验收**：端到端——全新部署只启用 `sum` 型工具叶 → 看树显示台账枝灭、资金 API 拒绝（依赖 T3）；启用 `lottery_plus` → ledger+interaction_bot 自动点亮且有审计；值守激活时启用游戏插件被拒并提示原因；11 叶（forward、scheduler + 9 installed）声明齐全、新装缺声明被 schema 拦截。
+**验收**：端到端——全新部署只启用 `sum` 型工具叶 → 看树显示台账枝灭、资金 API 拒绝（依赖 T3）；启用 `lottery_plus` → ledger+interaction_bot 自动点亮且有审计；值守激活时启用游戏插件被拒并提示原因；10 叶（forward、scheduler + 8 有源码 installed）声明齐全、新装缺声明被 schema 拦截；源缺失残留叶显示 warning 且不参与 demand。
 
 ### WP-T5（挂起，勿开工）AI 写操作工具开闸
 
@@ -129,7 +129,7 @@ WP-T5 挂起
 
 1. 工作台一键值守/恢复可用，审计可查，三嫁接方式零出站验证通过。
 2. ledger 枝断时三执行体资金全拒的回归测试常绿，且默认 fail-closed。
-3. 11 叶声明齐全；新装插件缺声明被拦；按叶点枝 + 看树视图上线。
+3. 10 叶声明齐全（codex_image 残留出表，见 §4 WP-T4 v1.1b）；新装插件缺声明被拦；按叶点枝 + 看树视图上线。
 4. 协议文档与 Protocol 类合入，零行为变化。
 5. CHANGELOG 逐 WP 记录；EXECUTION-STATE.md 本计划分节全部 done + commit 哈希。
 
