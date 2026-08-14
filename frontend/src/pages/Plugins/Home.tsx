@@ -311,6 +311,30 @@ export function PluginsHome() {
     }
     return details;
   }, [selectedAid, treePluginFeatures]);
+  const accountTree = useMemo(() => {
+    if (!treeQ.data) return null;
+    const enabledForAccount = (key: string) => {
+      const item = accountFeatureByKey.get(key);
+      if (item) return item.enabled && item.state === "active";
+      return selectedAccount?.feature_enabled?.[key] === true
+        || selectedAccount?.features?.[key] === "active";
+    };
+    const leaves = treeQ.data.leaves.map((leaf) => ({
+      ...leaf,
+      enabled: enabledForAccount(leaf.key),
+    }));
+    const enabledKeys = new Set(leaves.filter((leaf) => leaf.enabled).map((leaf) => leaf.key));
+    const branches = Object.fromEntries(
+      Object.entries(treeQ.data.branches).map(([key, branch]) => [
+        key,
+        {
+          ...branch,
+          demanded_by: branch.demanded_by.filter((pluginKey) => enabledKeys.has(pluginKey)),
+        },
+      ]),
+    ) as typeof treeQ.data.branches;
+    return { ...treeQ.data, branches, leaves };
+  }, [accountFeatureByKey, selectedAccount, treeQ.data]);
   const openTreeLeafEditor = (key: string) => {
     const feature = treePluginFeatures.find((item) => item.key === key);
     if (!feature) return;
@@ -552,7 +576,7 @@ export function PluginsHome() {
           </div>
           {pluginView === "cards" ? (
             <>
-          <div className="grid gap-2 rounded-lg border bg-muted/20 p-3 sm:grid-cols-[minmax(0,1fr)_160px_auto] sm:items-end">
+          <div className="grid gap-3 rounded-lg border bg-muted/20 p-3 sm:grid-cols-[minmax(0,1fr)_160px] lg:grid-cols-[minmax(0,1fr)_160px_auto] lg:items-end">
             <label className="space-y-1.5 text-sm">
               <span className="text-muted-foreground">全局搜索</span>
               <span className="relative block">
@@ -574,12 +598,13 @@ export function PluginsHome() {
                 <option value="failed">当前账号异常</option>
               </Select>
             </label>
-            <div className="flex flex-wrap gap-2">
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-3 lg:flex lg:flex-wrap">
               <Button
                 type="button"
                 size="sm"
                 variant="outline"
                 disabled={!selectableKeys.length || batchInstallMutation.isPending}
+                className="w-full lg:w-auto"
                 onClick={() => setSelectedPluginKeys((current) => (
                   current.size === selectableKeys.length ? new Set() : new Set(selectableKeys)
                 ))}
@@ -590,6 +615,7 @@ export function PluginsHome() {
                 type="button"
                 size="sm"
                 disabled={!selectedPluginKeys.size || batchInstallMutation.isPending}
+                className="w-full lg:w-auto"
                 onClick={() => runBatchInstallAction(true)}
               >
                 全局启用（{selectedPluginKeys.size}）
@@ -599,11 +625,19 @@ export function PluginsHome() {
                 size="sm"
                 variant="outline"
                 disabled={!selectedPluginKeys.size || batchInstallMutation.isPending}
+                className="w-full lg:w-auto"
                 onClick={() => runBatchInstallAction(false)}
               >
                 全局停用
               </Button>
             </div>
+            <p className="text-xs text-muted-foreground sm:col-span-2 lg:col-span-1">
+              {selectableKeys.length === 0
+                ? "当前筛选没有可批量操作的已安装插件。"
+                : selectedPluginKeys.size === 0
+                  ? "先选择当前结果，再执行全局启用或停用。"
+                  : `已选择 ${selectedPluginKeys.size} 个插件，可批量启用或停用。`}
+            </p>
           </div>
           <div
             data-plugin-category-layout
@@ -670,7 +704,7 @@ export function PluginsHome() {
                 <SectionHeader
                   icon={Waypoints}
                   title="树状视图（能力分类）"
-                  description="叶按嫁接通道生长，能力枝显示插件依赖；悬停任一枝叶可查看关联。"
+                  description="按消息入口和平台能力查看插件关系；悬停任一插件或能力可查看关联。"
                 />
               </CardHeader>
               <CardContent>
@@ -678,8 +712,8 @@ export function PluginsHome() {
                   <div className="flex items-center gap-2 text-sm text-muted-foreground"><Spinner className="h-4 w-4" />正在读取平台树</div>
                 ) : treeQ.isError ? (
                   <p className="text-sm text-destructive">树状视图读取失败，请稍后重试。</p>
-                ) : treeQ.data ? (
-                  <PlatformTreeView tree={treeQ.data} leafDetails={treeLeafDetails} onEditLeaf={openTreeLeafEditor} />
+                ) : accountTree ? (
+                  <PlatformTreeView tree={accountTree} leafDetails={treeLeafDetails} onEditLeaf={openTreeLeafEditor} />
                 ) : null}
               </CardContent>
             </Card>

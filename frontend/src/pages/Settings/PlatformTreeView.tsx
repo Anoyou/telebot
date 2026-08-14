@@ -60,7 +60,7 @@ export function PlatformTreeView({
   const safeWatch = tree.trunk.current_profile === "safe_watch";
   const { alive, total } = tree.trunk.userbot;
 
-  // 叶的生长位置由嫁接通道决定；requires 是取养分的管线。
+  // 插件的接入位置由消息通道决定；requires 是额外依赖的平台能力。
   const hostBranchOf = (leaf: TreeLeaf): PlatformModuleKey | null =>
     leaf.attachment === "交互" ? "interaction_bot" : null;
 
@@ -199,12 +199,12 @@ export function PlatformTreeView({
         </span>
         {safeWatch ? (
           <span className="inline-flex items-center gap-1 rounded-full border border-warning/50 px-2 py-0.5 text-warning">
-            ✂ 值守中 · 叶投递已暂停
+            值守中 · 插件投递已暂停
           </span>
         ) : null}
       </div>
       <p className="pb-3 text-[11px] text-muted-foreground/70">
-        叶挂在自己的嫁接通道上（直通、命令贴干；交互长在交互枝）；「+能力」是它额外取养分的枝，悬停可见牵连。
+        按消息入口和平台能力查看插件关系：直通、命令通过主通道接入，交互通过交互 Bot 接入；「+能力」表示该插件还依赖的额外平台能力。
       </p>
 
       {/* 干与枝：值守时全树入冬（降饱和），树干状态行保持可读 */}
@@ -216,7 +216,7 @@ export function PlatformTreeView({
       >
         {groups.trunkLeaves.length > 0 ? (
           <div className="ptree-limb ptree-limb--flush">
-            <div className="pl-1 text-[11px] text-muted-foreground">贴干叶 · 消息直接来自树干</div>
+            <div className="pl-1 text-[11px] text-muted-foreground">直接接入 · 消息来自平台主通道</div>
             <div className="ptree-twigs mt-1.5">{groups.trunkLeaves.map(renderLeafRow)}</div>
           </div>
         ) : null}
@@ -264,12 +264,12 @@ export function PlatformTreeView({
                 {branch.forced_off ? <span className="text-destructive">强制关闭</span> : null}
                 <span className="text-muted-foreground/80">
                   {leaves.length > 0
-                    ? `${leaves.length} 叶`
+                    ? `${leaves.length} 个插件`
                     : branch.demanded_by.length > 0
-                      ? `被 ${branch.demanded_by.length} 叶取养分`
+                      ? `被 ${branch.demanded_by.length} 个插件调用`
                       : branch.can_turn_off
-                        ? "无叶需要 · 可关"
-                        : "无叶需要"}
+                        ? "当前无插件调用 · 可关闭"
+                        : "当前无插件调用"}
                 </span>
               </div>
               {leaves.length > 0 ? (
@@ -284,7 +284,7 @@ export function PlatformTreeView({
         {tree.leaves.length === 0 ? (
           <div className="ptree-limb ptree-limb--dead">
             <div className="inline-flex rounded-md border border-dashed px-3 py-1.5 text-muted-foreground">
-              当前没有已登记的插件叶。
+              当前没有已登记的插件。
             </div>
           </div>
         ) : null}
