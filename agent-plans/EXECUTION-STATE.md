@@ -22,7 +22,7 @@
 ## 当前计划：一致性核销与文档真实性审计 v1（agent-plans/2026-08-15-consistency-audit-plan.md）
 
 - [ ] WP-A 三通道一致性核销 — pending
-- [ ] WP-B 插件文档族真实性审计 — pending
+- [x] WP-B 插件文档族真实性审计 — done `edce2d94`
 
 ## 当前计划：内置 Codex Gateway / 全链路 Agent 接入 / LLM 错误语义收口 v1
 
