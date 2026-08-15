@@ -952,3 +952,73 @@ async def test_worker_capability_bootstrap_failure_is_fail_closed(monkeypatch) -
     assert await runtime._bootstrap_platform_capabilities(7, redis) is False
     log_call.assert_awaited_once()
     assert "fail-closed" in log_call.await_args.args[3]
+
+
+@pytest.mark.asyncio
+async def test_worker_capability_bootstrap_converges_ledger_runtime(monkeypatch) -> None:
+    from app.services import platform_capabilities
+
+    platform_capabilities._reset_for_tests()
+    try:
+        async def bootstrap() -> object:
+            platform_capabilities._DESIRED["ledger"] = True
+            platform_capabilities._RUNTIME["ledger"] = "starting"
+            platform_capabilities._CACHE_READY = True
+            return platform_capabilities.get_snapshot()
+
+        monkeypatch.setattr(platform_capabilities, "bootstrap_from_db", bootstrap)
+
+        assert await runtime._bootstrap_platform_capabilities(7, object()) is True
+        assert platform_capabilities.get_snapshot().runtime["ledger"] == "ready"
+        assert platform_capabilities.ledger_actions_enabled() is True
+    finally:
+        platform_capabilities._reset_for_tests()
+
+
+@pytest.mark.asyncio
+async def test_worker_capability_bootstrap_keeps_disabled_ledger_stopped(monkeypatch) -> None:
+    from app.services import platform_capabilities
+
+    platform_capabilities._reset_for_tests()
+    try:
+        async def bootstrap() -> object:
+            platform_capabilities._DESIRED["ledger"] = False
+            platform_capabilities._RUNTIME["ledger"] = "stopped"
+            platform_capabilities._CACHE_READY = True
+            return platform_capabilities.get_snapshot()
+
+        monkeypatch.setattr(platform_capabilities, "bootstrap_from_db", bootstrap)
+
+        assert await runtime._bootstrap_platform_capabilities(7, object()) is True
+        assert platform_capabilities.get_snapshot().runtime["ledger"] == "stopped"
+        assert platform_capabilities.ledger_actions_enabled() is False
+    finally:
+        platform_capabilities._reset_for_tests()
+
+
+@pytest.mark.asyncio
+async def test_worker_capability_bootstrap_does_not_clear_safe_watch_deny(monkeypatch) -> None:
+    from app.services import platform_capabilities, runtime_profile_service
+
+    platform_capabilities._reset_for_tests()
+    try:
+        async def bootstrap() -> object:
+            platform_capabilities._DESIRED["ledger"] = True
+            platform_capabilities._RUNTIME["ledger"] = "starting"
+            platform_capabilities._CACHE_READY = True
+            return platform_capabilities.get_snapshot()
+
+        monkeypatch.setattr(platform_capabilities, "bootstrap_from_db", bootstrap)
+        deny = platform_capabilities.register_ledger_action_deny(
+            runtime_profile_service.SAFE_WATCH_LEDGER_DENY_REASON,
+            owner=runtime_profile_service.SAFE_WATCH_LEDGER_DENY_OWNER,
+        )
+
+        assert await runtime._bootstrap_platform_capabilities(7, object()) is True
+        assert platform_capabilities.get_snapshot().runtime["ledger"] == "ready"
+        assert platform_capabilities.ledger_action_block_reasons() == (
+            runtime_profile_service.SAFE_WATCH_LEDGER_DENY_REASON,
+        )
+        deny.dispose()
+    finally:
+        platform_capabilities._reset_for_tests()

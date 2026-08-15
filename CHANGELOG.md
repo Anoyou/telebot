@@ -33,6 +33,7 @@
 
 ### 修复
 
+- 修复独立 UserBot worker 冷启动后资金能力运行态长期停留在 `starting`、导致 AI 红包与其他插件派奖被 `ledger_runtime_starting` 按 fail-closed 拒绝的问题；worker 现在会在能力缓存就绪后收敛本进程资金运行态，同时保留值守 deny 与关闭态。
 - 收敛 E1 Loader、E2 Delivery 与 E3 Worker RPC 的错误码词表和失败结果构造，统一非法发奖金额及显式纯空白发奖文案的处理；纯空白文案现在与缺失/空串一致回退为 `+amount`。
 
 ### 测试与文档

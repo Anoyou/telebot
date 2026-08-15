@@ -493,6 +493,11 @@ async def _bootstrap_platform_capabilities(account_id: int, redis: Any) -> bool:
         snapshot = await platform_capabilities.bootstrap_from_db()
         if not snapshot.cache_ready:
             raise RuntimeError("平台能力缓存未就绪")
+        # ``bootstrap_from_db`` 会把 desired 模块统一置为 ``starting``。
+        # worker 进程没有主进程的组件收敛回调，但 ledger 门禁就在本进程内
+        # 判定；若不在冷启动完成后显式收敛，worker 永远只能按
+        # ``ledger_runtime_starting`` fail-closed，所有 payout 都会被拒绝。
+        await platform_capabilities.mark_runtime_ready_if_starting("ledger")
     except Exception as exc:  # noqa: BLE001
         await _log(
             redis,
