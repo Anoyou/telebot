@@ -35,6 +35,8 @@ test.describe("移动端交互细节", () => {
       const pageHeader = main.querySelector<HTMLElement>("[data-page-header]");
       const resourceCard = main.querySelector<HTMLElement>("[data-resource-usage-card]");
       const resourceHeader = resourceCard?.firstElementChild as HTMLElement | null;
+      const topbar = document.querySelector<HTMLElement>(".app-topbar");
+      const topbarSafeArea = topbar ? getComputedStyle(topbar, "::before") : null;
       const mobileNav = document.querySelector<HTMLElement>("[data-mobile-navigation-dock]");
       const mobileNavBefore = mobileNav ? getComputedStyle(mobileNav, "::before") : null;
       const shellChildren = pageShell ? Array.from(pageShell.children) as HTMLElement[] : [];
@@ -52,14 +54,18 @@ test.describe("移动端交互细节", () => {
         pageHeaderPaddingLeft: pageHeader ? getComputedStyle(pageHeader).paddingLeft : "",
         sectionGap: shellChildren[1] ? getComputedStyle(shellChildren[1]).marginTop : "",
         cardHeaderPaddingLeft: resourceHeader ? getComputedStyle(resourceHeader).paddingLeft : "",
+        topbarBackground: topbar ? getComputedStyle(topbar).backgroundColor : "",
+        topbarSafeAreaBackground: topbarSafeArea?.backgroundColor ?? "",
+        topbarSafeAreaOpacity: topbarSafeArea?.opacity ?? "",
+        topbarSafeAreaBackdropFilter: topbarSafeArea?.backdropFilter ?? "",
       };
     });
     expect(spacing).toMatchObject({
-      mainPaddingLeft: "12px",
-      mainPaddingTop: "12px",
-      pageHeaderPaddingLeft: "12px",
-      sectionGap: "16px",
-      cardHeaderPaddingLeft: "16px",
+      mainPaddingLeft: "6px",
+      mainPaddingTop: "6px",
+      pageHeaderPaddingLeft: "6px",
+      sectionGap: "8px",
+      cardHeaderPaddingLeft: "8px",
     });
     expect(spacing.documentWidth).toBeLessThanOrEqual(spacing.viewportWidth);
     expect(spacing.mainPaddingBottom).toBeGreaterThan(spacing.mobileNavHeight);
@@ -67,6 +73,9 @@ test.describe("移动端交互细节", () => {
     expect(spacing.usesAppleWebKitMaterialTuning).toBe(false);
     expect(spacing.mobileNavBackdropFilter).toContain("blur(");
     expect(spacing.mobileNavBackgroundImage).toContain("linear-gradient");
+    expect(spacing.topbarSafeAreaBackground).toBe(spacing.topbarBackground);
+    expect(spacing.topbarSafeAreaOpacity).toBe("1");
+    expect(spacing.topbarSafeAreaBackdropFilter).toBe("none");
     fixture.assertClean();
   });
 
@@ -518,6 +527,18 @@ test.describe("移动端交互细节", () => {
     } else {
       const allBox = await allCategory.boundingBox();
       expect(allBox?.width || 999).toBeLessThan(150);
+      const searchBox = await page.getByPlaceholder("搜索名称、key、用途或分类").boundingBox();
+      const statusBox = await page.getByRole("combobox", { name: "状态" }).boundingBox();
+      expect(Math.abs((searchBox?.y ?? 0) - (statusBox?.y ?? 999))).toBeLessThanOrEqual(2);
+      const batchButtons = [
+        page.getByRole("button", { name: "选择当前结果" }),
+        page.getByRole("button", { name: "全局启用（0）" }),
+        page.getByRole("button", { name: "全局停用" }),
+      ];
+      const batchButtonTops = await Promise.all(batchButtons.map(async (button) => (await button.boundingBox())?.y ?? -1));
+      expect(Math.max(...batchButtonTops) - Math.min(...batchButtonTops)).toBeLessThanOrEqual(2);
+      const viewTabs = page.getByRole("tablist", { name: "切换插件视图" });
+      await expect(viewTabs.getByRole("tab")).toHaveCount(2);
     }
     await expect(page.locator("[data-plugin-card]")).toHaveCount(3);
     const gameCard = page.locator('[data-plugin-key="game_demo"]');

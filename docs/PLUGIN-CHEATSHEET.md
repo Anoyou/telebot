@@ -23,7 +23,7 @@
 - 标准事件信封优先读：`source`、`message`、`chat`、`sender`、`actor`、`source_actor`、`player`、`payment`、`reply_to`、`trigger`、`session`、`native_raw_meta`。
 - 新插件读取文本优先用 `payload["tp_event"]` 或 `event_from_interaction_payload(payload)`；不要用 `payload["text"]` / `payload["chat_id"]` / `payload.get("message")` 当主路径。
 - 互动玩法优先写成一个 `on_event(ctx, payload)`，在同一个入口里处理 `command`、`keyword`、`payment_confirmed`、`message`、`callback_query`、`session_expired`。
-- 会话状态放进 `session.data`，状态变更返回 `update_session`；不要再靠进程内 dict/lock 才能续局。
+- 会话状态放进 `session.data`，状态变更返回 `update_session`；Event Bus 订阅入口首次建局先返回 `start_session`，已有有效会话时才可直接更新。不要再靠进程内 dict/lock 才能续局。
 - `source` 描述事件类型和来源通道；`actor` 是当前行为主体；`sender` 是发出消息的人或 Bot；`source_actor` 可表示可信外部通知 Bot；`player` 是付款绑定玩家；`payment.status=confirmed` 才能作为到账依据。
 - `session.channel` 表示当前整段会话默认收发通道；普通发送动作不用手写 `send_via`，平台会继承会话通道。
 - 普通消息回复使用 `ctx.messages.send(...)` 或返回 `{"type": "send_message", ...}`；标题、任务列表、折叠详情、表格等原生格式使用 `ctx.messages.send_rich(html=...)` 或 `send_rich_message` action；图片题面可用 `ctx.messages.send_photo(..., save_message_id_key="round")`，后续用 `ctx.messages.edit_caption(message_id_key="round", caption="...")` 原地更新 caption。
@@ -92,7 +92,10 @@ async def on_event(self, ctx, payload):
     event = payload["tp_event"]
 
     if event.type == "command":
-        return [{"type": "update_session", "data": {"answer": "42"}}]
+        return [
+            {"type": "start_session", "chat_id": event.message.chat_id},
+            {"type": "update_session", "data": {"answer": "42"}},
+        ]
 
     if event.type == "message" and event.message.text == "42":
         return [

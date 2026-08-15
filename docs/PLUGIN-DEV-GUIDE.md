@@ -37,7 +37,7 @@ Event Bus、Trace 和 MessageOps 是两条标准消息链路共用的内部契�
 - 触发方式决定普通会话通道。带前缀命令开局，整段普通收发走 `userbot`；关键词、付款确认、按钮回调开局，整段普通收发走 `interaction_bot`。固定能力例外：`payout` 走 UserBot，且已安装插件必须在 `permissions` 中显式声明 `payout`，否则运行时拒绝执行；`send_rich_message` 默认走 Interaction Bot，显式 `userbot_reply` 才使用 Layer 228。
 - 账号级“允许会话”列表留空表示全部会话放行；列表非空时才只允许名单内会话。插件自己的 `allowed_chat_ids=[]` 是插件自定义配置，语义由插件自己定义，不能套用平台规则。
 - 新玩法优先实现一个 `on_event(ctx, payload)` 入口，在同一个入口里按 `tp_event.type` 或 `payload["source"]["type"]` 处理 `command`、`keyword`、`payment_confirmed`、`message`、`callback_query`、`session_expired`。
-- 单局状态优先写进 `session.data`，通过 `update_session` 持久化；不要再把游戏状态放进进程内全局字典、锁和自建超时任务。
+- 单局状态优先写进 `session.data`，通过 `update_session` 持久化；Event Bus 订阅入口首次建局必须先返回 `start_session`，裸 `update_session` 不会隐式创建会话。不要再把游戏状态放进进程内全局字典、锁和自建超时任务。
 - 普通 JSON 状态优先使用 `ctx.storage`；确需 SQLite、缓存文件或索引文件时写入 `ctx.data_dir`。禁止把运行数据写到插件代码目录或 `Path(__file__).parent`，因为安装和更新会整体替换该目录。
 - 免费参与、按钮加入、互动游戏可按自身玩法保存完整业务状态；仅从后续发奖锚点角度，保存玩家 `tgid` 并通过 `payout.reply_to_user_id` 交给平台即可。平台优先读取 UserBot 按账号、群、真实消息发送者保存的近期锚点，缓存缺失时再精确搜索并最多扫描 2000 条历史消息。发奖同时传公开名时，`payout.reply_to_display_name` 必须来自安全身份 facade，匿名管理员不得传 `reply_to_username`。匿名管理员和频道身份不会建立真实用户锚点；找不到锚点时平台默认提示，并允许插件用 `reply_anchor_missing_text` 自定义失败提示。
 - 按钮回调的 `payload.sender` 是实际点击账号，不能直接把其中的姓名写回群消息；群内公开姓名必须调用 `resolve_public_sender_identity()`。返回的 `display_name` 已由平台过滤 Unicode 控制符、零宽字符和不可见空白，并限制为 10 个字符；`is_admin` 表示平台已确认的本群管理员状态，插件不能通过是否存在 `tag` 猜测管理员身份。插件已有独立公开标签时可调用 `sanitize_public_display_name()` 使用同一规则。身份只通过 UserBot 核验；匿名管理员只显示管理员标签，普通成员标签不会覆盖姓名，查询失败时平台会隐藏姓名。

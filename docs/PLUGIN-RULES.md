@@ -6,7 +6,7 @@
 
 1. 新 Telegram 插件必须走 Event Bus + MessageOps：读取标准事件信封，输出 `ctx.messages` 操作或标准 action。
 2. 新互动玩法优先实现一个 `on_event(ctx, payload)`，在同一个入口里处理 `command`、`keyword`、`payment_confirmed`、`message`、`callback_query`、`session_expired`。
-3. 会话状态优先写进 `session.data`，并通过 `update_session` 持久化；不要再把单局状态只放在进程内 dict/lock 里。
+3. 会话状态优先写进 `session.data`，并通过 `update_session` 持久化；Event Bus 订阅入口首次建局必须先返回 `start_session`，后续才可更新会话。不要再把单局状态只放在进程内 dict/lock 里。
 4. 插件必须声明 `usage`、`event_subscriptions`、`capabilities`；没有高风险能力也要写 `capabilities={}`。
 5. `plugin.json.name`、`MANIFEST.key`、插件类 `key` 必须一致。
 6. 发送、原生 Rich Message、编辑、媒体 caption 编辑、删除、置顶、按钮 ACK、Inline answer、`payout`、`update_session`、`settlement` 必须通过 `ctx.messages` 或标准 action 交给平台执行。

@@ -33,7 +33,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db.models.feature import BUILTIN_FEATURES, AccountFeature, Feature
 from ..db.models.plugin import (
+    PLUGIN_SOURCE_GIT,
     PLUGIN_SOURCE_LEGACY,
+    PLUGIN_SOURCE_LOCAL,
+    PLUGIN_SOURCE_REPO,
     PLUGIN_SOURCE_ZIP,
     PLUGIN_TRUST_COMMUNITY,
     PLUGIN_TRUST_VERIFIED,
@@ -53,8 +56,16 @@ from .remote_plugin_service import (
 )
 
 log = logging.getLogger(__name__)
-# 历史 source 值只用于升级兼容；所有新仓库安装统一写入 repo。
+# ZIP 安装服务独占的来源，卸载仍必须与仓库/Git 插件分流。
 _PACKAGE_MANAGED_SOURCES = (PLUGIN_SOURCE_ZIP, PLUGIN_SOURCE_LEGACY)
+# 统一安装台账中可由管理页全局启停的插件来源。
+_MANAGED_SOURCES = (
+    PLUGIN_SOURCE_ZIP,
+    PLUGIN_SOURCE_LEGACY,
+    PLUGIN_SOURCE_GIT,
+    PLUGIN_SOURCE_REPO,
+    PLUGIN_SOURCE_LOCAL,
+)
 
 
 # ─────────────────────────────────────────────────────
@@ -540,7 +551,7 @@ async def set_enabled(
 ) -> InstalledPlugin:
     """设置 enabled 标志；调用方负责后续向 worker 广播 reload_config。"""
     row = await db.get(InstalledPlugin, key)
-    if row is None or row.source not in _PACKAGE_MANAGED_SOURCES:
+    if row is None or row.source not in _MANAGED_SOURCES:
         raise PluginInstallError("PLUGIN_NOT_FOUND", f"插件不存在: {key}")
     if enabled and row.signature_ok is False:
         # 签名失败时不允许直接 enable；前端要显式"我知道风险"再调，会先把 signature_ok 置 None
@@ -565,11 +576,11 @@ async def set_enabled(
 
 
 async def list_installed(db: AsyncSession) -> list[InstalledPlugin]:
-    """列出 zip 与旧 official 安装包，按 key 字典序。"""
+    """列出统一安装台账中的全部可管理插件，按 key 字典序。"""
     rows = (
         await db.execute(
             select(InstalledPlugin)
-            .where(InstalledPlugin.source.in_(_PACKAGE_MANAGED_SOURCES))
+            .where(InstalledPlugin.source.in_(_MANAGED_SOURCES))
             .order_by(InstalledPlugin.key)
         )
     ).scalars().all()

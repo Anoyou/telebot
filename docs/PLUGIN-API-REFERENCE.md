@@ -68,7 +68,7 @@ async def on_direct_message(self, ctx, event):
 
 1. 用一个 `on_event(ctx, payload)` 覆盖 `command`、`keyword`、`payment_confirmed`、`message`、`callback_query`、`session_expired`。
 2. 读取 `payload["tp_event"]` 或 `event_from_interaction_payload(payload)`，不要再围绕旧平铺字段写分支。
-3. 单局状态保存在 `session.data`，变更后返回 `update_session`；不要再依赖进程内全局状态才能继续游戏。
+3. 单局状态保存在 `session.data`，变更后返回 `update_session`；Event Bus 订阅入口首次建局必须先返回 `start_session`，只有当前事件已带有效会话时才可直接 `update_session`。不要再依赖进程内全局状态才能继续游戏。
 4. 普通发送类动作不要写 `send_via`，平台会继承 `session.channel`；只有跨通道公告、特殊管理消息或迁移桥兼容这类高级场景才显式覆盖。
 5. userbot 会话里的按钮会降级为文本编号面板；玩家回复编号后，平台会把它合成为 `callback_query`，并在 `source.synthetic="text_button"` 标记来源。
 

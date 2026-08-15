@@ -739,6 +739,50 @@ async def test_set_enabled_updates_installed_plugin_row(tmp_path, monkeypatch) -
 
 
 @pytest.mark.asyncio
+async def test_batch_install_state_supports_repo_and_zip_sources(monkeypatch) -> None:
+    db = _FakeDB()
+    db.installed_rows["repo_demo"] = InstalledPlugin(
+        key="repo_demo",
+        source="repo",
+        installed_path="/tmp/repo_demo",
+        version="1.0.0",
+        enabled=True,
+        signature_ok=None,
+        trust_tier="community",
+        lint_warnings=[],
+    )
+    db.installed_rows["zip_demo"] = InstalledPlugin(
+        key="zip_demo",
+        source="zip",
+        installed_path="/tmp/zip_demo",
+        version="1.0.0",
+        enabled=True,
+        signature_ok=True,
+        trust_tier="verified",
+        lint_warnings=[],
+    )
+    audit_events, previous_overrides = _install_api_overrides(db, monkeypatch)
+
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                "/api/plugins/install/batch-state",
+                headers=_csrf_headers(),
+                json={"keys": ["repo_demo", "zip_demo"], "enabled": False},
+            )
+    finally:
+        _restore_api_overrides(previous_overrides)
+
+    assert response.status_code == 200
+    assert response.json()["succeeded"] == 2
+    assert response.json()["failed"] == 0
+    assert db.installed_rows["repo_demo"].enabled is False
+    assert db.installed_rows["zip_demo"].enabled is False
+    assert audit_events == [("plugin.install_batch_disable", "plugins:batch")]
+
+
+@pytest.mark.asyncio
 async def test_uninstall_removes_row_and_dir(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(pis.settings, "plugins_installed_dir", str(tmp_path / "installed"))
     db = _FakeDB()

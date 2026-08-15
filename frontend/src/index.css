@@ -258,6 +258,82 @@
     }
   }
 
+  /* PWA 主内容密度：只收紧内容区的边距与间距，不改底部安全区和可点击控件高度。
+     按当前项目的 spacing token 统一减半，避免每个页面单独微调。 */
+  @media (max-width: 639px) {
+    [data-app-main] {
+      padding-top: 0.375rem !important;
+      padding-left: max(0.375rem, env(safe-area-inset-left)) !important;
+      padding-right: max(0.375rem, env(safe-area-inset-right)) !important;
+    }
+
+    [data-app-main] [class~="gap-0.5"] { gap: 0.125rem !important; }
+    [data-app-main] [class~="gap-1"] { gap: 0.125rem !important; }
+    [data-app-main] [class~="gap-1.5"] { gap: 0.1875rem !important; }
+    [data-app-main] [class~="gap-2"] { gap: 0.25rem !important; }
+    [data-app-main] [class~="gap-3"] { gap: 0.375rem !important; }
+    [data-app-main] [class~="gap-4"] { gap: 0.5rem !important; }
+    [data-app-main] [class~="gap-6"] { gap: 0.75rem !important; }
+    [data-app-main] [class~="gap-x-2"] { column-gap: 0.25rem !important; }
+    [data-app-main] [class~="gap-x-3"] { column-gap: 0.375rem !important; }
+    [data-app-main] [class~="gap-y-2"] { row-gap: 0.25rem !important; }
+    [data-app-main] [class~="gap-y-3"] { row-gap: 0.375rem !important; }
+
+    [data-app-main] [class~="space-y-1.5"] > :not([hidden]) ~ :not([hidden]) { margin-top: 0.1875rem !important; }
+    [data-app-main] [class~="space-y-2"] > :not([hidden]) ~ :not([hidden]) { margin-top: 0.25rem !important; }
+    [data-app-main] [class~="space-y-3"] > :not([hidden]) ~ :not([hidden]) { margin-top: 0.375rem !important; }
+    [data-app-main] [class~="space-y-4"] > :not([hidden]) ~ :not([hidden]) { margin-top: 0.5rem !important; }
+    [data-app-main] [class~="space-y-6"] > :not([hidden]) ~ :not([hidden]) { margin-top: 0.75rem !important; }
+    [data-page-shell] > :not([hidden]) ~ :not([hidden]) { margin-top: 0.5rem !important; }
+
+    [data-app-main] [class~="mt-1"] { margin-top: 0.125rem !important; }
+    [data-app-main] [class~="mt-1.5"] { margin-top: 0.1875rem !important; }
+    [data-app-main] [class~="mt-2"] { margin-top: 0.25rem !important; }
+    [data-app-main] [class~="mt-3"] { margin-top: 0.375rem !important; }
+    [data-app-main] [class~="mt-4"] { margin-top: 0.5rem !important; }
+    [data-app-main] [class~="mt-5"] { margin-top: 0.625rem !important; }
+    [data-app-main] [class~="mt-6"] { margin-top: 0.75rem !important; }
+    [data-app-main] [class~="mb-1"] { margin-bottom: 0.125rem !important; }
+    [data-app-main] [class~="mb-1.5"] { margin-bottom: 0.1875rem !important; }
+    [data-app-main] [class~="mb-2"] { margin-bottom: 0.25rem !important; }
+    [data-app-main] [class~="mb-3"] { margin-bottom: 0.375rem !important; }
+    [data-app-main] [class~="mb-4"] { margin-bottom: 0.5rem !important; }
+    [data-app-main] [class~="mb-5"] { margin-bottom: 0.625rem !important; }
+    [data-app-main] [class~="mb-6"] { margin-bottom: 0.75rem !important; }
+    [data-app-main] [class~="mx-2"] { margin-left: 0.25rem !important; margin-right: 0.25rem !important; }
+    [data-app-main] [class~="mx-3"] { margin-left: 0.375rem !important; margin-right: 0.375rem !important; }
+    [data-app-main] [class~="my-2"] { margin-top: 0.25rem !important; margin-bottom: 0.25rem !important; }
+    [data-app-main] [class~="my-3"] { margin-top: 0.375rem !important; margin-bottom: 0.375rem !important; }
+    [data-app-main] [class~="my-4"] { margin-top: 0.5rem !important; margin-bottom: 0.5rem !important; }
+
+    [data-app-main] [class~="p-1"] { padding: 0.125rem !important; }
+    [data-app-main] [class~="p-2"] { padding: 0.25rem !important; }
+    [data-app-main] [class~="p-2.5"] { padding: 0.3125rem !important; }
+    [data-app-main] [class~="p-3"] { padding: 0.375rem !important; }
+    [data-app-main] [class~="p-4"] { padding: 0.5rem !important; }
+    [data-app-main] [class~="p-5"] { padding: 0.625rem !important; }
+    [data-app-main] [class~="p-6"] { padding: 0.75rem !important; }
+    [data-app-main] [class~="px-1"] { padding-left: 0.125rem !important; padding-right: 0.125rem !important; }
+    [data-app-main] [class~="px-2"] { padding-left: 0.25rem !important; padding-right: 0.25rem !important; }
+    [data-app-main] [class~="px-2.5"] { padding-left: 0.3125rem !important; padding-right: 0.3125rem !important; }
+    [data-app-main] [class~="px-3"] { padding-left: 0.375rem !important; padding-right: 0.375rem !important; }
+    [data-app-main] [class~="px-4"] { padding-left: 0.5rem !important; padding-right: 0.5rem !important; }
+    [data-app-main] [class~="px-5"] { padding-left: 0.625rem !important; padding-right: 0.625rem !important; }
+    [data-app-main] [class~="py-1"] { padding-top: 0.125rem !important; padding-bottom: 0.125rem !important; }
+    [data-app-main] [class~="py-1.5"] { padding-top: 0.1875rem !important; padding-bottom: 0.1875rem !important; }
+    [data-app-main] [class~="py-2"] { padding-top: 0.25rem !important; padding-bottom: 0.25rem !important; }
+    [data-app-main] [class~="py-2.5"] { padding-top: 0.3125rem !important; padding-bottom: 0.3125rem !important; }
+    [data-app-main] [class~="py-3"] { padding-top: 0.375rem !important; padding-bottom: 0.375rem !important; }
+    [data-app-main] [class~="py-4"] { padding-top: 0.5rem !important; padding-bottom: 0.5rem !important; }
+    [data-app-main] [class~="py-5"] { padding-top: 0.625rem !important; padding-bottom: 0.625rem !important; }
+
+    /* 保留常用的零边距约束，避免 p-4 覆盖 CardContent 的 pt-0。 */
+    [data-app-main] [class~="pt-0"] { padding-top: 0 !important; }
+    [data-app-main] [class~="pb-0"] { padding-bottom: 0 !important; }
+    [data-app-main] [class~="pl-0"] { padding-left: 0 !important; }
+    [data-app-main] [class~="pr-0"] { padding-right: 0 !important; }
+  }
+
   /* 统一骨架底色和流光。动画只移动伪元素，不影响真实布局尺寸。 */
   .skeleton-shimmer {
     position: relative;
@@ -471,13 +547,24 @@
       backdrop-filter: none;
       box-shadow: none;
     }
+
+    /* iOS PWA 状态栏安全区单独用纯实色铺底。
+       不用 fixed / blur / alpha，并向下多覆盖 1px 消除小数安全区的合成接缝。 */
+    .app-topbar::before {
+      position: absolute;
+      inset: 0 0 auto;
+      height: calc(env(safe-area-inset-top) + 1px);
+      background: hsl(var(--app-chrome));
+      content: "";
+      opacity: 1;
+      pointer-events: none;
+      -webkit-backdrop-filter: none;
+      backdrop-filter: none;
+    }
   }
 
-  /* 不再在状态栏后方叠任何遮罩层。
-     曾用 .app-topbar::before 铺一层黑渐变兜浅色下白色状态栏文字的可读性，
-     但它同时把已切成浅色的 chrome 又抹黑（看着像「浅色没生效」），其淡出下边缘
-     还表现为顶部那条「线」。删掉后：顶栏背景 --app-chrome 明暗两套都如实显示，
-     切主题时顶部会真正跟着变浅/变深，也没有渐变边缘的线。 */
+  /* 顶部不再叠渐变或半透明遮罩；::before 只负责用 --app-chrome
+     纯色填充 safe-area，不影响明暗主题的真实背景。 */
 
   .dialog-center {
     position: fixed !important;

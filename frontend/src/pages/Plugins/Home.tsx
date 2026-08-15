@@ -47,6 +47,7 @@ import {
 } from "@/components/ui/card";
 import { Select } from "@/components/ui/select";
 import { Input } from "@/components/ui/input";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Dialog,
   DialogContent,
@@ -549,34 +550,26 @@ export function PluginsHome() {
               <div className="text-sm font-medium">插件视图</div>
               <div className="text-xs text-muted-foreground">按使用目的浏览卡片，或按平台能力查看树状依赖。</div>
             </div>
-            <div className="grid w-full gap-1 rounded-md border bg-background p-1 sm:inline-flex sm:w-auto" role="group" aria-label="切换插件视图">
-              <Button
-                type="button"
-                size="sm"
-                variant={pluginView === "cards" ? "secondary" : "ghost"}
-                className="min-w-0 w-full justify-center px-2.5 sm:w-auto sm:flex-none"
-                aria-pressed={pluginView === "cards"}
-                onClick={() => setPluginView("cards")}
-              >
-                <Rows3 className="mr-1 h-4 w-4" />
-                卡片视图（功能分类）
-              </Button>
-              <Button
-                type="button"
-                size="sm"
-                variant={pluginView === "tree" ? "secondary" : "ghost"}
-                className="min-w-0 w-full justify-center px-2.5 sm:w-auto sm:flex-none"
-                aria-pressed={pluginView === "tree"}
-                onClick={() => setPluginView("tree")}
-              >
-                <Waypoints className="mr-1 h-4 w-4" />
-                树状视图（能力分类）
-              </Button>
-            </div>
+            <Tabs
+              className="w-full sm:w-auto"
+              value={pluginView}
+              onValueChange={(value) => setPluginView(value as PluginView)}
+            >
+              <TabsList aria-label="切换插件视图">
+                <TabsTrigger value="cards" className="min-w-0 flex-1 gap-1.5 px-2.5 sm:flex-none">
+                  <Rows3 className="h-4 w-4" />
+                  卡片视图<span className="hidden sm:inline">（功能分类）</span>
+                </TabsTrigger>
+                <TabsTrigger value="tree" className="min-w-0 flex-1 gap-1.5 px-2.5 sm:flex-none">
+                  <Waypoints className="h-4 w-4" />
+                  树状视图<span className="hidden sm:inline">（能力分类）</span>
+                </TabsTrigger>
+              </TabsList>
+            </Tabs>
           </div>
           {pluginView === "cards" ? (
             <>
-          <div className="grid gap-3 rounded-lg border bg-muted/20 p-3 sm:grid-cols-[minmax(0,1fr)_160px] lg:grid-cols-[minmax(0,1fr)_160px_auto] lg:items-end">
+          <div className="grid grid-cols-[minmax(0,1fr)_minmax(7.25rem,0.55fr)] gap-3 rounded-lg border bg-muted/20 p-3 sm:grid-cols-[minmax(0,1fr)_160px] lg:grid-cols-[minmax(0,1fr)_160px_minmax(22rem,auto)] lg:items-end">
             <label className="space-y-1.5 text-sm">
               <span className="text-muted-foreground">全局搜索</span>
               <span className="relative block">
@@ -598,13 +591,13 @@ export function PluginsHome() {
                 <option value="failed">当前账号异常</option>
               </Select>
             </label>
-            <div className="grid grid-cols-1 gap-2 sm:grid-cols-3 lg:flex lg:flex-wrap">
+            <div className="col-span-2 grid min-w-0 grid-cols-3 gap-2 lg:col-span-1">
               <Button
                 type="button"
                 size="sm"
                 variant="outline"
-                disabled={!selectableKeys.length || batchInstallMutation.isPending}
-                className="w-full lg:w-auto"
+                disabled={installedQ.isLoading || installedQ.isError || !selectableKeys.length || batchInstallMutation.isPending}
+                className="min-w-0 w-full px-1 text-[11px] min-[390px]:text-xs"
                 onClick={() => setSelectedPluginKeys((current) => (
                   current.size === selectableKeys.length ? new Set() : new Set(selectableKeys)
                 ))}
@@ -615,7 +608,7 @@ export function PluginsHome() {
                 type="button"
                 size="sm"
                 disabled={!selectedPluginKeys.size || batchInstallMutation.isPending}
-                className="w-full lg:w-auto"
+                className="min-w-0 w-full px-1 text-[11px] min-[390px]:text-xs"
                 onClick={() => runBatchInstallAction(true)}
               >
                 全局启用（{selectedPluginKeys.size}）
@@ -625,18 +618,22 @@ export function PluginsHome() {
                 size="sm"
                 variant="outline"
                 disabled={!selectedPluginKeys.size || batchInstallMutation.isPending}
-                className="w-full lg:w-auto"
+                className="min-w-0 w-full px-1 text-[11px] min-[390px]:text-xs"
                 onClick={() => runBatchInstallAction(false)}
               >
                 全局停用
               </Button>
             </div>
-            <p className="text-xs text-muted-foreground sm:col-span-2 lg:col-span-1">
-              {selectableKeys.length === 0
-                ? "当前筛选没有可批量操作的已安装插件。"
-                : selectedPluginKeys.size === 0
-                  ? "先选择当前结果，再执行全局启用或停用。"
-                  : `已选择 ${selectedPluginKeys.size} 个插件，可批量启用或停用。`}
+            <p className="col-span-2 text-xs text-muted-foreground lg:col-span-1">
+              {installedQ.isLoading
+                ? "正在读取可批量操作的安装插件……"
+                : installedQ.isError
+                  ? "已安装插件清单加载失败，请刷新后重试。"
+                  : selectableKeys.length === 0
+                    ? "当前筛选没有可批量操作的已安装插件。"
+                    : selectedPluginKeys.size === 0
+                      ? "先选择当前结果，再执行全局启用或停用。"
+                      : `已选择 ${selectedPluginKeys.size} 个插件，可批量启用或停用。`}
             </p>
           </div>
           <div
