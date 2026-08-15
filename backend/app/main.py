@@ -39,6 +39,7 @@ from .logging_redaction import configure_dependency_log_levels, install_sensitiv
 from .services import (
     account_bot_runtime,
     event_trace,
+    feature_service,
     interaction_bot_runtime,
     notify_service,
     platform_capabilities,
@@ -224,6 +225,15 @@ async def lifespan(app: FastAPI):
     #    能看到 alembic.in_sync=False 的明确信号）；只在日志里 ERROR 醒目提示。
     if settings.auto_migrate_on_startup:
         await asyncio.to_thread(_run_alembic_upgrade)
+    try:
+        from .db.base import AsyncSessionLocal
+
+        async with AsyncSessionLocal() as db:
+            removed_plugins = await feature_service.cleanup_removed_bundled_plugins(db)
+            if removed_plugins:
+                await db.commit()
+    except Exception:  # noqa: BLE001
+        logging.exception("清理已移除的随包参考插件失败；服务继续启动")
     try:
         await event_trace.refresh_trace_settings()
     except Exception:  # noqa: BLE001

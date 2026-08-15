@@ -22,7 +22,6 @@ VALIDATOR_PATH = PROJECT_ROOT / "scripts" / "validate-installed-interaction-plug
 REQUIRED_INSTALLED_PLUGIN_KEYS = (
     "dice_grid_hunt",
     "guess_number",
-    "lottery_plus",
     "poetry_blank",
     "pt_promote",
     "redpack-byRBQ",
@@ -183,16 +182,6 @@ async def test_installed_interaction_plugins_keep_original_command_handlers() ->
     await dice_plugin._cmd_handler(None, dice_event, ["100"], 1, dice_ctx)
     assert dice_event.replies, "九宫格原命令仍应能回复"
 
-    lottery_module = _load_installed_module("lottery_plus", "plugin.py")
-    lottery_plugin = lottery_module.LotteryPlusPlugin()
-    lottery_event = _CmdEvent()
-    lottery_event.get_sender = AsyncMock(return_value=types.SimpleNamespace(id=111, first_name="AAA"))
-    lottery_ctx = PluginContext(account_id=1, feature_key="lottery_plus", log=AsyncMock())
-    await lottery_plugin.on_startup(lottery_ctx)
-
-    await lottery_plugin._cmd_handler(None, lottery_event, ["帮助"], 1, lottery_ctx)
-    assert lottery_event.replies, "彩票原命令仍应能回复"
-
     pt_module = _load_installed_module("pt_promote", "plugin.py")
     pt_plugin = pt_module.PTPromotePlugin()
     pt_event = _CmdEvent()
@@ -305,25 +294,6 @@ def test_dice_grid_hunt_manifest_declares_interaction_contract() -> None:
 
 
 @requires_installed_plugins
-def test_lottery_plus_manifest_declares_interaction_contract() -> None:
-    manifest_module = _load_installed_module("lottery_plus", "manifest.py")
-    manifest = manifest_module.MANIFEST
-
-    assert manifest.category == "interactive"
-    entry = manifest.interaction_entries[0]
-    assert entry["key"] == "start_lottery_plus"
-    assert entry["interaction_profile"] == "reward_pool"
-    assert entry["launch_mode"] == "hybrid"
-    assert entry["session_scope"] == "chat"
-    assert entry["events"] == ["payment_confirmed", "message", "session_close"]
-    assert entry["triggers"]["command"] == "lotto"
-    assert entry["preserve_command_trigger"] is True
-    assert entry["command_fallback"]["command"] == "lotto"
-    assert entry["result_contract"]["send_via"] == ["interaction_bot", "userbot_reply"]
-    assert "message" in entry["input_schema"]["properties"]
-
-
-@requires_installed_plugins
 def test_redpack_manifest_declares_interaction_contract() -> None:
     manifest_module = _load_installed_module("redpack-byRBQ", "manifest.py")
     manifest = manifest_module.MANIFEST
@@ -368,7 +338,6 @@ def test_installed_interaction_plugin_json_matches_manifest_contracts() -> None:
         "guess_number",
         "poetry_blank",
         "dice_grid_hunt",
-        "lottery_plus",
         "redpack-byRBQ",
         "pt_promote",
     ):

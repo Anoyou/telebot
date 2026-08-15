@@ -21,7 +21,7 @@ from app.worker.plugins import system_agent_tools as worker_plugin_tools
 def test_parse_exposed_tools_read_only_and_limit() -> None:
     warnings: list[str] = []
     tools = parse_exposed_tools(
-        "lottery_plus",
+        "demo_game",
         {
             "description": "彩票",
             "capabilities": {"agent_tools": {"enabled": True}},
@@ -53,7 +53,7 @@ def test_parse_exposed_tools_read_only_and_limit() -> None:
         warnings=warnings,
     )
     assert len(tools) == 1
-    assert tools[0]["full_name"] == "plugin_lottery_plus.list_recent_rounds"
+    assert tools[0]["full_name"] == "plugin_demo_game.list_recent_rounds"
     assert tools[0]["min_role"] == "admin"
     assert any("写语义" in w for w in warnings)
 

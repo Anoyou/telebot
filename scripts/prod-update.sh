@@ -672,12 +672,14 @@ persist_switched_services() {
 }
 
 sync_tracked_plugins() {
-  local stage old_list new_list old_tree path target
+  local stage old_list new_list old_tree preserved_roots path target relative plugin_root expected actual
   stage="$(mktemp -d "${TMPDIR:-/tmp}/telepilot-plugins.XXXXXX")"
   old_list="$stage/old-files"
   new_list="$stage/new-files"
   old_tree="$stage/old-tree"
+  preserved_roots="$stage/preserved-roots"
   mkdir -p "$old_tree"
+  : > "$preserved_roots"
   git ls-tree -r --name-only "$OLD_COMMIT" -- plugins/installed > "$old_list"
   git ls-tree -r --name-only "$NEW_COMMIT" -- plugins/installed > "$new_list"
   if [[ -s "$old_list" ]]; then
@@ -689,9 +691,29 @@ sync_tracked_plugins() {
   PLUGIN_ROLLBACK_STAGE="$stage"
   PLUGIN_SYNC_ACTIVE=1
 
+  # 删除前先按插件目录完成整包校验。只要用户改过其中任意一个旧跟踪文件，
+  # 就保留整个目录，避免逐文件删除把用户后来安装的同名插件拆坏。
+  while IFS= read -r path; do
+    [[ "$path" == plugins/installed/* && "$path" != *".."* ]] || continue
+    grep -Fxq "$path" "$new_list" && continue
+    relative="${path#plugins/installed/}"
+    plugin_root="plugins/installed/${relative%%/*}"
+    grep -Fxq "$plugin_root" "$preserved_roots" && continue
+    target="/app/$path"
+    expected="$(python3 -c 'from hashlib import sha256; from pathlib import Path; import sys; print(sha256(Path(sys.argv[1]).read_bytes()).hexdigest())' "$old_tree/$path")"
+    actual="$(docker compose exec -T web python -c 'from hashlib import sha256; from pathlib import Path; import sys; p=Path(sys.argv[1]); print(sha256(p.read_bytes()).hexdigest() if p.is_file() else "missing")' "$target")"
+    if [[ "$actual" != "missing" && "$actual" != "$expected" ]]; then
+      printf '%s\n' "$plugin_root" >> "$preserved_roots"
+      warn "检测到用户修改过 $plugin_root，保留整个插件目录"
+    fi
+  done < "$old_list"
+
   while IFS= read -r path; do
     [[ "$path" == plugins/installed/* && "$path" != *".."* ]] || continue
     if ! grep -Fxq "$path" "$new_list"; then
+      relative="${path#plugins/installed/}"
+      plugin_root="plugins/installed/${relative%%/*}"
+      grep -Fxq "$plugin_root" "$preserved_roots" && continue
       target="/app/$path"
       docker compose exec -T web python -c \
         'from pathlib import Path; import sys; Path(sys.argv[1]).unlink(missing_ok=True)' \
@@ -707,6 +729,8 @@ sync_tracked_plugins() {
       "$target"
     docker compose cp "$stage/$path" "web:$target"
   done < "$new_list"
+  docker compose restart web >/dev/null
+  wait_compose_healthy docker-compose.yml web 120
   ok "Git 跟踪插件已同步到持久卷；运行期配置与其它已安装插件保持不动"
 }
 

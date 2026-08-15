@@ -289,6 +289,17 @@ def test_incremental_script_syncs_backend_files_with_image_rollback() -> None:
     assert 'if (( WEB_SYNC_IMAGE_REF != "" )); then' not in script
 
 
+def test_tracked_plugin_sync_preserves_modified_user_directory_and_restarts_web() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    script = (repo_root / "scripts" / "prod-update.sh").read_text(encoding="utf-8")
+
+    assert 'preserved_roots="$stage/preserved-roots"' in script
+    assert 'if [[ "$actual" != "missing" && "$actual" != "$expected" ]]' in script
+    assert 'warn "检测到用户修改过 $plugin_root，保留整个插件目录"' in script
+    assert "docker compose restart web >/dev/null" in script
+    assert "wait_compose_healthy docker-compose.yml web 120" in script
+
+
 def test_production_defaults_to_prebuilt_images_with_explicit_source_fallback() -> None:
     repo_root = Path(__file__).resolve().parents[3]
     compose = (repo_root / "docker-compose.yml").read_text(encoding="utf-8")

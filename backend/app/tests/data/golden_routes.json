@@ -309,22 +309,22 @@
   },
   {
     "text": "查一下彩票最近开奖",
-    "expect": "plugin_lottery_plus"
+    "expect": "plugin_demo_game"
   },
   {
     "text": "lottery 最近几期结果",
-    "expect": "plugin_lottery_plus"
+    "expect": "plugin_demo_game"
   },
   {
     "text": "开奖历史摘要",
-    "expect": "plugin_lottery_plus"
+    "expect": "plugin_demo_game"
   },
   {
     "text": "奖池最近轮次",
-    "expect": "plugin_lottery_plus"
+    "expect": "plugin_demo_game"
   },
   {
     "text": "list recent lottery rounds",
-    "expect": "plugin_lottery_plus"
+    "expect": "plugin_demo_game"
   }
 ]

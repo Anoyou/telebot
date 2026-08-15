@@ -16,6 +16,7 @@ from app.services.feature_service import (
     _migrate_optional_builtin_features,
     _seed_local_installed_features,
     apply_required_config_defaults,
+    cleanup_removed_bundled_plugins,
     config_schema_for_scope,
     feature_matrix,
     get_effective_plugin_config,
@@ -23,6 +24,127 @@ from app.services.feature_service import (
     set_plugin_global_config,
     validate_config_against_schema,
 )
+
+
+@pytest.mark.asyncio
+async def test_cleanup_removed_bundled_plugin_removes_only_matching_stale_metadata(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    root = tmp_path / "installed"
+    root.mkdir()
+    monkeypatch.setattr("app.settings.settings.plugins_installed_dir", str(root))
+
+    installed = InstalledPlugin(
+        key="lottery_plus",
+        source="local",
+        source_url=None,
+        installed_path=str(root / "lottery_plus"),
+        version="1.0.5",
+        manifest_json={
+            "name": "lottery_plus",
+            "display_name": "彩票系统 Plus",
+            "author": "Anoyou",
+            "version": "1.0.5",
+        },
+        lint_warnings=[],
+    )
+    feature = Feature(
+        key="lottery_plus",
+        display_name="彩票系统 Plus",
+        is_builtin=False,
+        version="1.0.5",
+    )
+    account_feature = SimpleNamespace(feature_key="lottery_plus")
+    global_config = SimpleNamespace(plugin_key="lottery_plus")
+
+    class Result:
+        def scalars(self):
+            return self
+
+        def all(self):
+            return [account_feature]
+
+    db = AsyncMock()
+    db.get = AsyncMock(side_effect=[installed, feature, global_config])
+    db.execute = AsyncMock(return_value=Result())
+
+    removed = await cleanup_removed_bundled_plugins(db)
+
+    assert removed == ["lottery_plus"]
+    assert [call.args[0] for call in db.delete.await_args_list] == [
+        account_feature,
+        global_config,
+        feature,
+        installed,
+    ]
+    db.flush.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_removed_bundled_plugin_preserves_user_repo_install(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    root = tmp_path / "installed"
+    root.mkdir()
+    monkeypatch.setattr("app.settings.settings.plugins_installed_dir", str(root))
+    installed = InstalledPlugin(
+        key="lottery_plus",
+        source="repo",
+        source_url="https://example.com/user/plugins.git",
+        installed_path=str(root / "lottery_plus"),
+        version="1.0.5",
+        manifest_json={
+            "name": "lottery_plus",
+            "display_name": "彩票系统 Plus",
+            "author": "Anoyou",
+            "version": "1.0.5",
+        },
+        lint_warnings=[],
+    )
+    db = AsyncMock()
+    db.get = AsyncMock(return_value=installed)
+
+    removed = await cleanup_removed_bundled_plugins(db)
+
+    assert removed == []
+    db.delete.assert_not_awaited()
+    db.execute.assert_not_awaited()
+    db.flush.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_removed_bundled_plugin_removes_orphan_feature_without_install_row(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    root = tmp_path / "installed"
+    root.mkdir()
+    monkeypatch.setattr("app.settings.settings.plugins_installed_dir", str(root))
+    feature = Feature(
+        key="lottery_plus",
+        display_name="彩票系统 Plus",
+        is_builtin=False,
+        version="1.0.5",
+    )
+
+    class Result:
+        def scalars(self):
+            return self
+
+        def all(self):
+            return []
+
+    db = AsyncMock()
+    db.get = AsyncMock(side_effect=[None, feature, None])
+    db.execute = AsyncMock(return_value=Result())
+
+    removed = await cleanup_removed_bundled_plugins(db)
+
+    assert removed == ["lottery_plus"]
+    db.delete.assert_awaited_once_with(feature)
+    db.flush.assert_awaited_once()
 
 
 @pytest.mark.asyncio

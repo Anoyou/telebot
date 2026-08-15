@@ -365,7 +365,7 @@ live facade 当前没有 `send_photo`、`send_file`、`edit_rich`、`edit_captio
 约束（第一期）：
 
 1. **只读**：`read_only` 必须为 `true`（或缺省）。写语义条目会被拒绝暴露，并在安装/刷新时写警告日志。
-2. **命名**：系统助手侧工具名为 `plugin_{plugin_key}.{tool_name}`，例如 `plugin_lottery_plus.list_recent_rounds`。
+2. **命名**：系统助手侧工具名为 `plugin_{plugin_key}.{tool_name}`，例如 `plugin_demo_game.list_recent_rounds`。
 3. **数量**：每个插件最多暴露 5 个工具。
 4. **执行**：主进程经 worker IPC 调用；worker 侧需提供 handler：
    - 插件实例方法 `system_agent_{tool_name}(arguments, ctx)`，或
@@ -374,7 +374,7 @@ live facade 当前没有 `send_photo`、`send_file`、`edit_rich`、`edit_captio
 5. **安全**：调用前校验账号已启用该插件（`AccountFeature`）；结果文本经 `mark_external_text` 防注入；超时 10s 返回结构化错误且 `business_changed=false`。
 6. **权限**：仍需 `permissions` 含 `ai_agent`，且 `capabilities.agent_tools.enabled=true`。
 
-参考实现：`lottery_plus` 的只读工具 `list_recent_rounds`（近期开奖轮次摘要）。
+示例中的 `demo_game` 可暴露只读工具 `list_recent_rounds`（近期轮次摘要）；它只用于说明命名与契约，不代表 TelePilot 随包内置该插件。
 
 ### 完整示例
 

@@ -21,6 +21,7 @@ import json
 import logging
 from collections.abc import Iterable
 from copy import deepcopy
+from pathlib import Path
 from typing import Any
 
 from jsonschema import Draft7Validator
@@ -56,6 +57,13 @@ from .account_bot_service import normalize_interaction_entry_manifest
 
 log = logging.getLogger(__name__)
 _WARNED_ORPHAN_PLUGIN_KEYS: set[str] = set()
+_REMOVED_BUNDLED_PLUGIN_FINGERPRINTS: dict[str, dict[str, str]] = {
+    "lottery_plus": {
+        "display_name": "彩票系统 Plus",
+        "author": "Anoyou",
+        "version": "1.0.5",
+    },
+}
 _LEGACY_OPTIONAL_PLUGIN_KEYS: frozenset[str] = frozenset(
     {
         "auto_reply",
@@ -66,6 +74,98 @@ _LEGACY_OPTIONAL_PLUGIN_KEYS: frozenset[str] = frozenset(
         "math10",
     }
 )
+
+
+def _matches_removed_bundled_manifest(
+    installed_plugin: InstalledPlugin,
+    fingerprint: dict[str, str],
+) -> bool:
+    """只识别曾由 Core 随包携带、且没有外部来源的参考实现。"""
+
+    manifest = (
+        installed_plugin.manifest_json
+        if isinstance(installed_plugin.manifest_json, dict)
+        else {}
+    )
+    return (
+        str(installed_plugin.source or "") in {"builtin", "local", PLUGIN_SOURCE_LEGACY}
+        and not str(installed_plugin.source_url or "").strip()
+        and str(installed_plugin.version or "") == fingerprint["version"]
+        and str(manifest.get("name") or "") == installed_plugin.key
+        and str(manifest.get("display_name") or "") == fingerprint["display_name"]
+        and str(manifest.get("author") or "") == fingerprint["author"]
+        and str(manifest.get("version") or "") == fingerprint["version"]
+    )
+
+
+async def cleanup_removed_bundled_plugins(db: AsyncSession) -> list[str]:
+    """清理已从发行包移除的参考插件遗留元数据。
+
+    清理同时受三个条件约束：源码入口已经不存在、元数据与历史参考实现完全匹配、
+    安装记录没有仓库/ZIP 等外部来源。用户之后自行安装的同名插件因此不会被删除。
+    """
+
+    try:
+        from ..settings import settings
+
+        installed_root = settings.plugins_installed_path.resolve()
+    except Exception:  # noqa: BLE001
+        log.warning("定位 installed 插件目录失败，跳过随包参考插件清理", exc_info=True)
+        return []
+
+    removed: list[str] = []
+    for key, fingerprint in _REMOVED_BUNDLED_PLUGIN_FINGERPRINTS.items():
+        installed_plugin = await db.get(InstalledPlugin, key)
+        target = Path(
+            installed_plugin.installed_path
+            if installed_plugin is not None and installed_plugin.installed_path
+            else installed_root / key
+        ).resolve()
+        try:
+            target.relative_to(installed_root)
+        except ValueError:
+            continue
+        if (target / "plugin.json").is_file():
+            continue
+
+        stale_install = bool(
+            installed_plugin is not None
+            and _matches_removed_bundled_manifest(installed_plugin, fingerprint)
+        )
+        # 任何有明确外部来源的安装记录都属于用户资产，即使当前目录暂时缺失也保留。
+        if installed_plugin is not None and not stale_install:
+            continue
+
+        feature = await db.get(Feature, key)
+        stale_feature = bool(
+            feature is not None
+            and not bool(feature.is_builtin)
+            and str(feature.display_name or "") == fingerprint["display_name"]
+            and str(feature.version or "") == fingerprint["version"]
+        )
+        if not stale_install and not stale_feature:
+            continue
+
+        account_features = (
+            await db.execute(
+                select(AccountFeature).where(AccountFeature.feature_key == key)
+            )
+        ).scalars().all()
+        for row in account_features:
+            await db.delete(row)
+
+        global_config = await db.get(PluginGlobalConfig, key)
+        if global_config is not None:
+            await db.delete(global_config)
+        if stale_feature and feature is not None:
+            await db.delete(feature)
+        if stale_install and installed_plugin is not None:
+            await db.delete(installed_plugin)
+        await db.flush()
+        removed.append(key)
+        log.info("已清理随包参考插件遗留元数据: %s", key)
+
+    return removed
 
 
 def _feature_manifest_from_installed_plugin(

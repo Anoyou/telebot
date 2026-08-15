@@ -25,6 +25,10 @@
 - 可能存在用户或其他 agent 的未提交改动。不要 revert、checkout 或 reset 你没有明确负责的改动。
 - 手工编辑文件使用 `apply_patch`。
 
+## 插件目录边界
+
+- `plugins/installed/` 是本机运行时插件目录，必须保持 Git 忽略，禁止用 `git add -f` 将其中插件随 Core 发布；可分发参考实现放入 `examples/plugins/`，正式插件通过插件仓库或安装流程交付。
+
 ## 日志安全
 
 - 主进程或独立 worker 子进程调用 `logging.basicConfig()` 后，必须安装 `install_sensitive_log_filter()`；新增进程入口时要用回归测试确认 Telegram Bot API URL、Authorization 和代理凭据不会以明文进入日志。

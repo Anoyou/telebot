@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 from app import feature_registry
@@ -80,6 +81,36 @@ def test_optional_plugins_are_not_bundled_in_core() -> None:
     for key in ("auto_reply", "autorepeat", "game24", "math10"):
         assert not (builtin_root / key / "plugin.py").exists()
         assert not (builtin_root / key / "manifest.py").exists()
+
+
+def test_runtime_installed_plugins_are_not_tracked_in_git() -> None:
+    project_root = Path(__file__).resolve().parents[3]
+    result = subprocess.run(
+        ["git", "ls-files", "plugins/installed"],
+        cwd=project_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert result.stdout.strip() == ""
+
+    ignored = subprocess.run(
+        [
+            "git",
+            "check-ignore",
+            "--no-index",
+            "plugins/installed/runtime-probe/plugin.py",
+            "agent-plans/runtime-probe.md",
+        ],
+        cwd=project_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert ignored.stdout.splitlines() == [
+        "plugins/installed/runtime-probe/plugin.py",
+        "agent-plans/runtime-probe.md",
+    ]
 
 
 def test_builtin_registry_excludes_legacy_feature_keys() -> None:

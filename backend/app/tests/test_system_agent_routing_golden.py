@@ -16,9 +16,9 @@ _GOLDEN = Path(__file__).resolve().parent / "data" / "golden_routes.json"
 
 
 def _ensure_plugin_sample_domain() -> set[str]:
-    # 插件插槽样例域（与 lottery_plus 参考实现一致）；每测前重注册，避免被其它用例覆盖
+    # 插件插槽样例域；每测前重注册，避免被其它用例覆盖。
     register_dynamic_domain(
-        "plugin_lottery_plus",
+        "plugin_demo_game",
         "彩票开奖与期次摘要",
         ("彩票", "开奖", "lottery", "奖池", "下注", "期号", "rounds"),
     )
@@ -62,7 +62,7 @@ def test_golden_routes_match_expectations() -> None:
         domains = {
             "ledger", "logs", "accounts", "interaction", "system_ops", "providers",
             "plugins", "plugin_repos", "scheduler", "features", "commands", "routing",
-            "rules", "system", "memory", "product", "plugin_lottery_plus",
+            "rules", "system", "memory", "product", "plugin_demo_game",
         }
         if expect in domains:
             if got != expect:
