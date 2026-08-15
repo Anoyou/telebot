@@ -104,6 +104,7 @@ from ...services.event_trace import (
     trace_log_context,
     update_plugin_runtime_status,
 )
+from ...services.interaction.action_core import build_failure_result
 from ...services.interaction.contracts import (
     SEND_CHANNEL_DEPRECATED_REASON_CODE,
     action_send_via_options,
@@ -2342,8 +2343,8 @@ async def _apply_userbot_event_bus_actions(
         await record_action(
             action.get("context"),
             action,
-            TRACE_STATUS_SKIPPED,
-            error_code="unsupported_send_via",
+            TRACE_STATUS_FAILED,
+            error_code="unsupported_action",
             error=f"unsupported action type: {action_type}",
         )
         return False
@@ -2743,7 +2744,7 @@ async def _acquire_userbot_action_rate_limit(
         await record_action(
             action.get("context"),
             action,
-            TRACE_STATUS_SKIPPED,
+            TRACE_STATUS_FAILED,
             actual_send_via=channel,
             error_code="rate_limited",
             error=error,
@@ -2888,19 +2889,17 @@ def _userbot_action_failure_result(
     reply_to_user_id: int | None = None,
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    result = _userbot_action_context(
-        action,
-        target_chat_id=target_chat_id,
-        reply_to_message_id=reply_to_message_id,
-        reply_to_user_id=reply_to_user_id,
+    return build_failure_result(
+        _userbot_action_context(
+            action,
+            target_chat_id=target_chat_id,
+            reply_to_message_id=reply_to_message_id,
+            reply_to_user_id=reply_to_user_id,
+        ),
+        error=error,
+        error_code=error_code,
+        extra=extra,
     )
-    result["error"] = error
-    result["error_code"] = error_code
-    result["worker_offline"] = error_code == "userbot_offline"
-    result["reply_anchor_missing"] = error_code == "reply_anchor_missing"
-    if extra:
-        result.update(extra)
-    return result
 
 
 def _userbot_action_context(
@@ -3341,16 +3340,7 @@ async def _apply_userbot_payout_action(state: _AccountState, event: Any, action:
         )
         return False
     payout_key = payout_compensation.ensure_payout_key(action)
-    text = str(action.get("text") or f"+{amount}").strip()
-    if not text:
-        await _record_userbot_action_failure(
-            state,
-            action,
-            error_code="empty_message_text",
-            error="payout text is empty",
-            target_chat_id=target_chat_id,
-        )
-        return False
+    text = str(action.get("text") or f"+{amount}").strip() or f"+{amount}"
     if _action_dev_mode_dry_run_enabled(state, action):
         await _record_userbot_dry_run(
             state,

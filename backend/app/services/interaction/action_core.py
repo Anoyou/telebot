@@ -59,6 +59,49 @@ SEND_TEXT_OR_MEDIA_ACTIONS = frozenset(
 )
 INTERACTION_ACTION_LIMIT = 10
 
+
+class ActionErrorCode(StrEnum):
+    """Canonical error-code vocabulary shared by all interaction executors."""
+
+    INVALID_PAYOUT_AMOUNT = "invalid_payout_amount"
+    EMPTY_MESSAGE_TEXT = "empty_message_text"
+    SESSION_NOT_FOUND = "session_not_found"
+    INTERACTION_SESSION_ERROR = "interaction_session_error"
+    RATE_LIMITED = "rate_limited"
+    UNSUPPORTED_ACTION = "unsupported_action"
+    ACTION_LIMIT_EXCEEDED = "action_limit_exceeded"
+    SEND_CHANNEL_DEPRECATED = SEND_CHANNEL_DEPRECATED_REASON_CODE
+
+
+CANONICAL_ACTION_ERROR_CODES = frozenset(item.value for item in ActionErrorCode)
+
+
+def build_failure_result(
+    context: dict[str, Any],
+    *,
+    error: Any,
+    error_code: str,
+    result: dict[str, Any] | None = None,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build the stable failure-result shape used by E1/E2/E3 adapters.
+
+    Adapters may contribute channel-specific context and optional detail, but
+    error fields and derived flags are generated here so new fields cannot
+    drift between execution paths.
+    """
+
+    detail = dict(context)
+    if isinstance(result, dict):
+        detail.update(result)
+    if isinstance(extra, dict):
+        detail.update(extra)
+    detail["error"] = str(error or "")
+    detail["error_code"] = str(error_code or "action_failed")
+    detail["worker_offline"] = detail["error_code"] == "userbot_offline"
+    detail["reply_anchor_missing"] = detail["error_code"] == "reply_anchor_missing"
+    return detail
+
 ActionHandler = Callable[[dict[str, Any]], Awaitable[bool]]
 # True = success (or handled); False = failed (batch continues)
 
@@ -219,10 +262,9 @@ async def run_action_batch(
             if handlers.on_unsupported is not None and kind != ActionKind.UNSUPPORTED:
                 ok = await handlers.on_unsupported(action)
             else:
-                ok = True
-                result.skipped += 1
-                result.executed += 1
-                continue
+                # An unknown action is a contract failure, never a silent
+                # success.  Keep the batch moving while exposing it in failed.
+                ok = False
         else:
             ok = await handler(action)
         result.executed += 1
@@ -239,7 +281,10 @@ async def run_action_batch(
 
 
 __all__ = [
+    "ActionErrorCode",
+    "CANONICAL_ACTION_ERROR_CODES",
     "CANONICAL_ACTION_TYPES",
+    "build_failure_result",
     "INTERACTION_ACTION_LIMIT",
     "SEND_CHANNEL_DEPRECATED_REASON_CODE",
     "SEND_MEDIA_ACTIONS",

@@ -74,6 +74,25 @@ async def on_direct_message(self, ctx, event):
 
 `interaction_trigger_modes`、`default_trigger_modes`、`callback_fast_ack` 是当前运行时契约。插件发布前应在目标 TelePilot 版本上运行示例校验和真实账号 smoke test，不要为旧分支猜测兼容行为。
 
+### 2.1 动作 × 执行体分工表
+
+标准 action 会按入口进入三类执行体：E1 是 Event Bus 的 UserBot 直执行（[loader.py](../backend/app/worker/plugins/loader.py)），E2 是 Interaction Bot 的投递编排（[delivery.py](../backend/app/services/interaction/delivery.py)），E3 是 E2 调用的 UserBot RPC 动作面（[runtime.py](../backend/app/worker/runtime.py)）。下表是插件作者可依赖的边界；不是三个执行体都必须具备同一种能力。回归覆盖见 [三方 parity 矩阵](../backend/app/tests/test_interaction_executor_parity.py)。
+
+| 动作/情形 | E1 Event Bus UserBot | E2 Interaction Bot delivery | E3 Worker RPC | 插件作者应知的契约 |
+| --- | --- | --- | --- | --- |
+| `send_message`、媒体、编辑、删除、置顶（`userbot_reply`） | 直接以账号身份执行 | 编排、审计后委派 | 实际 UserBot RPC | UserBot 会话中 inline 按钮降级为文本编号；不要依赖原始 `reply_markup`。 |
+| `send_message`、媒体、编辑（`interaction_bot`） | 仅在该入口已具备 Bot token 时按 Bot API 发送 | Bot API 实际发送 | 不进入 | `reply_markup` 是 Interaction Bot 富消息能力；不要把它当 E3/UserBot 富消息能力。 |
+| `send_rich_message` | 可走 UserBot 富消息路径，但不承诺 Bot API inline markup 等能力 | `interaction_bot` 时走 Bot API | `userbot_reply` 时实际执行 | 选择通道时以富消息能力边界为准，不能假定三端渲染相同。 |
+| `click_callback_button` | 支持，以 UserBot 点击第三方 Bot 按钮 | 有意不代点，记录 `skipped/unsupported_send_via` | 不支持 | 这是 E1 专属能力，不是待修的不一致。 |
+| `answer_callback` / `answer_inline_query` | 调用 Interaction Bot API | 调用 Interaction Bot API | 不进入 | 回答回调/Inline 必须视为 Bot API 动作，不能期待账号 UserBot RPC 代答。 |
+| `payout` | 固定 UserBot 路径 | 编排、审计、补偿后委派 | 实际 UserBot RPC | 始终经过 T3 资金闸与补偿/幂等语义；`message_id=None` 不能安全关联时仍按既有边界放行。 |
+| `start_session` | 内联创建/续用会话 | `apply` 仅记录控制动作，外层入口负责建会话 | 不进入 | Event Bus 需要先显式 `start_session`；关键词、付款等既有入口会按自己的已修流程预建会话。 |
+| `update_session` | 更新已有会话 | 更新已有会话 | 不进入 | Event Bus 不会隐式建会话：裸 `update_session` 失败为 `session_not_found`，必须先 `start_session`。 |
+| `result`、`end_session`、`close_session`、`no_session` | 控制类动作 | 控制类动作 | 不进入 | 会话结束/结果的外层编排归入口负责；这些动作不是普通 UserBot RPC。 |
+| 未知 action type | `failed/unsupported_action` | `failed/unsupported_action` | RPC 拒绝为 `unsupported_action` | 未知动作会计入批处理 `failed`，不得把它当作可忽略的向前兼容。 |
+
+限流拒绝统一记录为 `failed/rate_limited`；插件可据错误码和可选等待信息决定是否延迟重试，平台不会隐式重放。按 `rule_id` 隔离去重键的既有边界保持不变。
+
 ## 3. Plugin 基类（兼容层）
 
 ```python

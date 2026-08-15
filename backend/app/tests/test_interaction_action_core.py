@@ -5,9 +5,12 @@ from __future__ import annotations
 import pytest
 
 from app.services.interaction.action_core import (
+    CANONICAL_ACTION_ERROR_CODES,
     CANONICAL_ACTION_TYPES,
+    ActionErrorCode,
     ActionHandlers,
     ActionKind,
+    build_failure_result,
     classify_action,
     run_action_batch,
 )
@@ -64,6 +67,57 @@ async def test_run_action_batch_dispatches_and_counts() -> None:
     assert "update_session" in seen
     assert "payout" in seen
     assert "weird" in seen
+
+
+@pytest.mark.asyncio
+async def test_run_action_batch_unknown_action_counts_failed() -> None:
+    seen: list[str] = []
+
+    async def reject(action: dict) -> bool:
+        seen.append(str(action.get("type")))
+        return False
+
+    result = await run_action_batch(
+        [{"type": "future_action"}],
+        ActionHandlers(on_unsupported=reject),
+    )
+
+    assert seen == ["future_action"]
+    assert result.executed == 1
+    assert result.failed == 1
+    assert result.skipped == 0
+
+
+def test_canonical_failure_result_and_error_vocabulary() -> None:
+    expected_codes = {
+        "invalid_payout_amount",
+        "empty_message_text",
+        "session_not_found",
+        "interaction_session_error",
+        "rate_limited",
+        "unsupported_action",
+        "action_limit_exceeded",
+        "send_channel_deprecated",
+    }
+    assert expected_codes <= CANONICAL_ACTION_ERROR_CODES
+    assert {item.value for item in ActionErrorCode} == CANONICAL_ACTION_ERROR_CODES
+
+    detail = build_failure_result(
+        {"chat_id": -100},
+        error="missing anchor",
+        error_code="reply_anchor_missing",
+        result={"message_id": 7, "error_code": "must-not-win"},
+        extra={"audit_status": "denied"},
+    )
+    assert detail == {
+        "chat_id": -100,
+        "message_id": 7,
+        "audit_status": "denied",
+        "error": "missing anchor",
+        "error_code": "reply_anchor_missing",
+        "worker_offline": False,
+        "reply_anchor_missing": True,
+    }
 
 
 @pytest.mark.asyncio

@@ -57,6 +57,7 @@ from ..services.event_trace import (
     refresh_trace_settings,
     stop_trace_writer,
 )
+from ..services.interaction.action_core import build_failure_result
 from ..services.interaction.delivery import namespaced_action_save_message_id_key
 from ..services.llm_dto import LLMProviderDTO
 from ..services.payout_limit import PayoutLimitExceeded
@@ -1603,12 +1604,11 @@ def _interaction_action_failure_result(
     error: Any,
     error_code: str,
 ) -> dict[str, Any]:
-    detail = _interaction_action_context(payload)
-    detail["error"] = str(error or "")
-    detail["error_code"] = error_code
-    detail["worker_offline"] = error_code == "userbot_offline"
-    detail["reply_anchor_missing"] = error_code == "reply_anchor_missing"
-    return detail
+    return build_failure_result(
+        _interaction_action_context(payload),
+        error=error,
+        error_code=error_code,
+    )
 
 
 def _interaction_action_context(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1684,6 +1684,8 @@ def _interaction_action_error_code(error: Any) -> str:
         return "target_message_id_missing"
     if "base64" in text or "媒体" in text:
         return "media_payload_invalid"
+    if "不支持的交互动作" in text or "unsupported action" in text:
+        return "unsupported_action"
     if "unsupported" in text or "不支持" in text:
         return "unsupported_send_via"
     return "telegram_api_error"

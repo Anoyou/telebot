@@ -7608,7 +7608,7 @@ async def test_userbot_callback_click_rate_limit_rejection_does_not_claim_dedupe
     assert redis.values == {}
     assert client.get_messages.await_count == 1
     client.assert_not_awaited()
-    assert record_action.await_args.args[2] == loader_mod.TRACE_STATUS_SKIPPED
+    assert record_action.await_args.args[2] == loader_mod.TRACE_STATUS_FAILED
     assert record_action.await_args.kwargs["actual_send_via"] == "userbot_callback"
     assert action_tap.await_args.kwargs["channel"] == "userbot_callback"
 
@@ -7888,7 +7888,7 @@ async def test_userbot_callback_local_rate_limit_rejection_is_audited(
 
     assert allowed is False
     record_action.assert_awaited_once()
-    assert record_action.await_args.args[2] == loader_mod.TRACE_STATUS_SKIPPED
+    assert record_action.await_args.args[2] == loader_mod.TRACE_STATUS_FAILED
     assert record_action.await_args.kwargs["actual_send_via"] == "userbot_callback"
     assert record_action.await_args.kwargs["result"]["rate_limit_backend"] == "local_fallback"
     action_tap.assert_awaited_once()

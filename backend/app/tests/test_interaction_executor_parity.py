@@ -8,13 +8,13 @@
 快照口径：执行器与插件 facade 必须保持相同的会话抓取与去重语义：
 - 快照拍“当前代码现状”。已知有意差异与漂移都直接编码成 ``expect_worker`` / ``expect_bot``
   两列不同期望——**快照即规格**；任一侧行为变化会以表格 diff 显式暴露。
-- 断言归一：从两侧 ``record_action`` 的 ``await_args_list`` 抽
-  ``(status, error_code, actual_send_via)`` 比对（``action_type`` 用于定位记录）。
+- 断言归一：E1/E2 从 ``record_action`` 的 ``await_args_list`` 抽审计快照；E3 从真实 RPC
+  返回/异常归一同一组字段，摘要仍比对 ``(status, error_code, actual_send_via)``。
 - E1 驱动：直调 ``_apply_userbot_event_bus_actions``；``state.engine=None`` 隔离限速，
   mock client / redis / record_action，``payout_limit.check_and_consume`` → (True, None)。
-- E2+E3 全链路：executor 的 ``run_worker_action`` 用 in-process lambda 直调
-  ``_run_interaction_userbot_action``（等价复刻 RPC 落点 ``_handle_run_interaction_action_command``
-  的 (ok, error, result) 映射，无真 pubsub）；patch delivery 命名空间的 ``record_action``。
+- E2 独立驱动：``run_worker_action`` 使用契约桩，不把 E3 执行结果混入 E2 断言。
+- E3 独立驱动：直调 ``_run_interaction_userbot_action``，单独断言 RPC 动作结果；组合链由
+  ``_make_run_worker_action`` 保留为额外回归工具，不作为主 parity 证明。
 - 全 mock、毫秒级，不依赖真实 Redis / Telegram。
 """
 
@@ -83,6 +83,14 @@ _RULE: dict[str, Any] = {
 from app.services.interaction.action_core import CANONICAL_ACTION_TYPES  # noqa: E402
 
 Expect = tuple  # (status, error_code, actual_send_via)
+
+
+@dataclass
+class Observation:
+    """一条执行体观测：旧快照摘要 + 第 15/16/17 维宽审计字段。"""
+
+    summary: Expect
+    audit: dict[str, Any]
 
 
 # ---------------------------------------------------------------------------
@@ -223,6 +231,33 @@ class ParityCase:
     engine_denies: bool = False
     seed_session: bool = False
     xfail_reason: str | None = None
+    expect_e3: Expect | None = None
+
+    def __post_init__(self) -> None:
+        if self.expect_e3 is not None:
+            return
+        action_type = str(self.actions[0].get("type") or "").strip() if self.actions else ""
+        e3_supported = {
+            "send_message",
+            "send_rich_message",
+            "send_photo",
+            "send_file",
+            "edit_message",
+            "edit_caption",
+            "delete_message",
+            "pin_message",
+            "payout",
+        }
+        send_via = str(self.actions[0].get("send_via") or "").strip() if self.actions else ""
+        if action_type in e3_supported and send_via != "interaction_bot" and self.case_id != "send_message_deprecated_channel":
+            status, error_code, actual_send_via = self.expect_bot
+            # E3 owns the UserBot RPC boundary, so even preflight failures
+            # carry the attempted channel; E1/E2 may reject before dispatch.
+            self.expect_e3 = (status, error_code, actual_send_via or "userbot_reply")
+        elif action_type == "click_callback_button":
+            self.expect_e3 = (TRACE_STATUS_FAILED, "unsupported_action", None)
+        else:
+            self.expect_e3 = ("not_applicable", None, None)
 
 
 def _row(*args: Any, **kwargs: Any) -> ParityCase:
@@ -233,7 +268,16 @@ PARITY_MATRIX: list[ParityCase] = [
     # ── 13 个语义动作类型 + 会话控制类型的“成功/代表路” ──────────────────
     _row(
         "send_message_userbot_ok",
-        [{"type": "send_message", "send_via": "userbot_reply", "text": "hi", "chat_id": CHAT}],
+        [{
+            "type": "send_message",
+            "send_via": "userbot_reply",
+            "text": "hi",
+            "chat_id": CHAT,
+            "reply_to_message_id": 7,
+            "reply_to_user_id": 9,
+            "reply_to_search_limit": 15,
+            "context": {"plugin_key": "guess", "entry_key": "play"},
+        }],
         "send_message",
         (TRACE_STATUS_OK, None, "userbot_reply"),
         (TRACE_STATUS_OK, None, "userbot_reply"),
@@ -430,6 +474,20 @@ PARITY_MATRIX: list[ParityCase] = [
         (TRACE_STATUS_FAILED, "empty_message_text", None),
     ),
     _row(
+        "send_message_reply_anchor_missing",
+        [{
+            "type": "send_message",
+            "send_via": "userbot_reply",
+            "text": "hi",
+            "chat_id": CHAT,
+            "reply_to_user_id": 999,
+            "reply_to_search_limit": 1,
+        }],
+        "send_message",
+        (TRACE_STATUS_FAILED, "reply_anchor_missing", None),
+        (TRACE_STATUS_FAILED, "reply_anchor_missing", "userbot_reply"),
+    ),
+    _row(
         "edit_message_missing_message_id",
         [{"type": "edit_message", "send_via": "userbot_reply", "text": "e", "chat_id": CHAT}],
         "edit_message",
@@ -454,46 +512,41 @@ PARITY_MATRIX: list[ParityCase] = [
         "unknown_action_type",
         [{"type": "frobnicate", "chat_id": CHAT}],
         "frobnicate",
-        (TRACE_STATUS_SKIPPED, "unsupported_send_via", None),
-        (TRACE_STATUS_SKIPPED, "unsupported_send_via", None),
-        drift="⑨ 记录级一致，但 E1 置 failed=True 进 plugin_runtime_status、E2 仅日志（聚合不对称，本归一不可见）",
+        (TRACE_STATUS_FAILED, "unsupported_action", None),
+        (TRACE_STATUS_FAILED, "unsupported_action", None),
     ),
-    # payout 金额错误码分叉（漂移④a）
+    # payout 非法金额统一 canonical 错误码。
     _row(
         "payout_zero_amount",
         [{"type": "payout", "amount": 0, "text": "+0", "chat_id": CHAT}],
         "payout",
         (TRACE_STATUS_FAILED, "invalid_payout_amount", "userbot_reply"),
-        (TRACE_STATUS_FAILED, "action_failed", "userbot_reply"),
-        drift="④ payout 金额错误码分叉（E1 invalid_payout_amount vs E2 action_failed）",
+        (TRACE_STATUS_FAILED, "invalid_payout_amount", "userbot_reply"),
     ),
-    # payout 空白文本行为分叉（漂移④b）：E1 直接 FAILED，E2 自动回退 "+{amount}" 成功
+    # payout 纯空白文本统一回退 "+{amount}"。
     _row(
         "payout_blank_text",
         [{"type": "payout", "amount": 50, "text": "   ", "chat_id": CHAT}],
         "payout",
-        (TRACE_STATUS_FAILED, "empty_message_text", "userbot_reply"),
         (TRACE_STATUS_OK, None, "userbot_reply"),
-        drift="④ payout 空白文本行为分叉（E1 FAILED vs E2 回退成功）",
+        (TRACE_STATUS_OK, None, "userbot_reply"),
     ),
-    # update_session 校验严格度/错误码族分叉（漂移⑥/⑦）：缺 session_key
+    # Event Bus 裸 update_session 统一要求先 start_session，缺 session_key 明示不存在。
     _row(
         "update_session_missing_key",
         [{"type": "update_session", "data": {"n": 1}}],
         "update_session",
         (TRACE_STATUS_FAILED, "session_not_found", None),
-        (TRACE_STATUS_FAILED, "interaction_session_error", "interaction_session"),
-        drift="⑥/⑦ update_session 错误码族 + actual_send_via 分叉",
+        (TRACE_STATUS_FAILED, "session_not_found", "interaction_session"),
     ),
-    # 限流拒绝：E1 SKIPPED rate_limited；E3 raise rate_limited → E2 FAILED rate_limited（波次一已对齐错误码）
+    # 限流拒绝统一 FAILED；动作未执行，调用方可按 error_code 决定重试。
     _row(
         "send_message_rate_limited",
         [{"type": "send_message", "send_via": "userbot_reply", "text": "hi", "chat_id": CHAT}],
         "send_message",
-        (TRACE_STATUS_SKIPPED, "rate_limited", "userbot_reply"),
+        (TRACE_STATUS_FAILED, "rate_limited", "userbot_reply"),
         (TRACE_STATUS_FAILED, "rate_limited", "userbot_reply"),
         engine_denies=True,
-        drift="⑤ 限流拒绝状态分叉（E1 SKIPPED vs E2 FAILED；error_code 均为 rate_limited）",
     ),
     # 超 10 条截断：第 11 条被丢弃，两侧均记 action_limit_exceeded
     _row(
@@ -522,6 +575,114 @@ def _extract(rec: AsyncMock, action_type: str) -> Expect:
     call = matched[-1]
     status = call.args[2] if len(call.args) >= 3 else call.kwargs.get("status", "pending")
     return (status, call.kwargs.get("error_code"), call.kwargs.get("actual_send_via"))
+
+
+AUDIT_FIELDS = (
+    "status",
+    "error_code",
+    "actual_send_via",
+    "channel",
+    "audit_status",
+    "deny_reasons",
+    "reply_anchor_missing",
+    "reply_to_message_id",
+    "reply_to_user_id",
+    "reply_to_search_limit",
+    "message_id",
+    "saved_message_id",
+    "replacement_message_id",
+    "compensation_queued",
+    "payout_key",
+    "plugin_key",
+    "entry_key",
+)
+
+
+def _extract_audit(rec: AsyncMock, action_type: str) -> dict[str, Any]:
+    """Extract the widened parity/audit contract from a record_action mock."""
+
+    matched = []
+    for call in rec.await_args_list:
+        args = call.args
+        if len(args) >= 2 and isinstance(args[1], dict) and str(args[1].get("type") or "").strip() == action_type:
+            matched.append(call)
+    if not matched:
+        return {
+            key: [] if key == "deny_reasons" else None
+            for key in AUDIT_FIELDS
+        }
+    call = matched[-1]
+    action = call.args[1]
+    kwargs = dict(call.kwargs)
+    result = kwargs.get("result") if isinstance(kwargs.get("result"), dict) else {}
+    context = action.get("context") if isinstance(action.get("context"), dict) else {}
+    status = call.args[2] if len(call.args) >= 3 else kwargs.get("status", "pending")
+    deny_reasons = result.get("deny_reasons", kwargs.get("deny_reasons", []))
+    if not isinstance(deny_reasons, list):
+        deny_reasons = list(deny_reasons) if isinstance(deny_reasons, (tuple, set)) else []
+    return {
+        "status": status,
+        "error_code": kwargs.get("error_code") or result.get("error_code"),
+        # actual_send_via 是执行结果字段；动作请求里的 send_via 单独留在 channel，
+        # 不能把预检失败伪装成已派发到通道（保持既有快照语义）。
+        "actual_send_via": kwargs.get("actual_send_via"),
+        "channel": kwargs.get("channel") or kwargs.get("actual_send_via") or action.get("send_via"),
+        "audit_status": kwargs.get("audit_status") or result.get("audit_status"),
+        "deny_reasons": deny_reasons,
+        "reply_anchor_missing": result.get("reply_anchor_missing", kwargs.get("reply_anchor_missing")),
+        "reply_to_message_id": action.get("reply_to_message_id"),
+        "reply_to_user_id": action.get("reply_to_user_id"),
+        "reply_to_search_limit": action.get("reply_to_search_limit"),
+        "message_id": kwargs.get("telegram_message_id") or result.get("message_id") or action.get("message_id"),
+        "saved_message_id": result.get("saved_message_id") or kwargs.get("saved_message_id"),
+        "replacement_message_id": result.get("replacement_message_id") or kwargs.get("replacement_message_id"),
+        "compensation_queued": result.get("compensation_queued", kwargs.get("compensation_queued")),
+        "payout_key": result.get("payout_key") or kwargs.get("payout_key") or action.get("payout_key"),
+        "plugin_key": kwargs.get("plugin_key") or context.get("plugin_key"),
+        "entry_key": kwargs.get("entry_key") or context.get("entry_key"),
+    }
+
+
+def _summary_from_audit(audit: dict[str, Any]) -> Expect:
+    return (audit.get("status"), audit.get("error_code"), audit.get("actual_send_via"))
+
+
+def _empty_audit() -> dict[str, Any]:
+    return {key: [] if key == "deny_reasons" else None for key in AUDIT_FIELDS}
+
+
+def _extract_e3_audit(payload: dict[str, Any], *, status: str, result: dict[str, Any] | None = None, error_code: str | None = None) -> dict[str, Any]:
+    """E3 是裸 RPC：从真实返回/异常归一审计快照，不伪造 record_action。"""
+
+    result = result if isinstance(result, dict) else {}
+    action_type = str(payload.get("type") or payload.get("action_type") or "").strip()
+    channel = "userbot_reply" if action_type in {
+        "send_message", "send_rich_message", "send_photo", "send_file",
+        "edit_message", "edit_caption", "delete_message", "pin_message", "payout",
+    } else None
+    context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+    deny_reasons = result.get("deny_reasons", [])
+    if not isinstance(deny_reasons, list):
+        deny_reasons = list(deny_reasons) if isinstance(deny_reasons, (tuple, set)) else []
+    return {
+        "status": status,
+        "error_code": error_code or result.get("error_code"),
+        "actual_send_via": channel,
+        "channel": channel,
+        "audit_status": result.get("audit_status"),
+        "deny_reasons": deny_reasons,
+        "reply_anchor_missing": result.get("reply_anchor_missing"),
+        "reply_to_message_id": payload.get("reply_to_message_id"),
+        "reply_to_user_id": payload.get("reply_to_user_id"),
+        "reply_to_search_limit": payload.get("reply_to_search_limit"),
+        "message_id": result.get("message_id"),
+        "saved_message_id": result.get("saved_message_id"),
+        "replacement_message_id": result.get("replacement_message_id"),
+        "compensation_queued": result.get("compensation_queued"),
+        "payout_key": result.get("payout_key") or payload.get("payout_key"),
+        "plugin_key": context.get("plugin_key"),
+        "entry_key": context.get("entry_key"),
+    }
 
 
 def _make_run_worker_action(client: _FakeClient, engine: Any, mem: _MemRedis):
@@ -557,7 +718,20 @@ def _make_run_worker_action(client: _FakeClient, engine: Any, mem: _MemRedis):
     return run
 
 
-async def _drive_worker(monkeypatch: pytest.MonkeyPatch, case: ParityCase) -> Expect:
+def _make_e2_worker_contract_stub(case: ParityCase):
+    """E2-only boundary stub; E3 is exercised separately by ``_drive_e3``."""
+
+    async def run(_incoming: Any, *, payload: dict[str, Any]):
+        status, error_code, _channel = case.expect_bot
+        if status == TRACE_STATUS_FAILED:
+            error = str(error_code or "action_failed")
+            return False, error, {"error": error, "error_code": error_code}
+        return True, None, {"message_id": 101, "chat_id": CHAT}
+
+    return run
+
+
+async def _drive_worker(monkeypatch: pytest.MonkeyPatch, case: ParityCase) -> Observation:
     rec = AsyncMock()
     monkeypatch.setattr(loader_mod, "record_action", rec)
     monkeypatch.setattr(loader_mod, "_interaction_bot_token_for_account", AsyncMock(return_value="tok"))
@@ -602,7 +776,8 @@ async def _drive_worker(monkeypatch: pytest.MonkeyPatch, case: ParityCase) -> Ex
         session_key=None,
         session=None,
     )
-    return _extract(rec, case.assert_type)
+    audit = _extract_audit(rec, case.assert_type)
+    return Observation(_summary_from_audit(audit), audit)
 
 
 class _AllowEngine:
@@ -618,7 +793,7 @@ class _AllowEngine:
         return None
 
 
-async def _drive_bot(monkeypatch: pytest.MonkeyPatch, case: ParityCase) -> Expect:
+async def _drive_e2(monkeypatch: pytest.MonkeyPatch, case: ParityCase) -> Observation:
     rec = AsyncMock()
     monkeypatch.setattr(delivery_mod, "record_action", rec)
     monkeypatch.setattr(account_bot_service, "answer_callback", AsyncMock(return_value={}))
@@ -633,17 +808,9 @@ async def _drive_bot(monkeypatch: pytest.MonkeyPatch, case: ParityCase) -> Expec
         "send_rich_message",
         AsyncMock(return_value={"message_id": 104, "chat_id": CHAT}),
     )
-    # E3 通过 from-import 绑定 _check_payout_limit，必须在 worker_runtime 命名空间打桩。
-    monkeypatch.setattr(worker_runtime, "_check_payout_limit", AsyncMock(return_value=(True, None)))
-    _mock_payout_delivery(monkeypatch)
-
     mem = _MemRedis()
     if case.seed_session:
         mem.data[SESSION_KEY] = json.dumps(SEED_SESSION)
-    client = _FakeClient()
-    # engine is None 会走本地降级 fail-closed（payout）或本地桶，污染非限流用例快照。
-    engine = _DenyEngine() if case.engine_denies else _AllowEngine()
-
     incoming = account_bot_runtime.Incoming(
         account_id=1,
         token="123:token",
@@ -656,13 +823,48 @@ async def _drive_bot(monkeypatch: pytest.MonkeyPatch, case: ParityCase) -> Expec
     executor = InteractionDeliveryExecutor(
         incoming=incoming,
         write_log=AsyncMock(),
-        run_worker_action=_make_run_worker_action(client, engine, mem),
+        run_worker_action=_make_e2_worker_contract_stub(case),
         log_context=account_bot_runtime._interaction_log_context,  # noqa: SLF001
         trace_context=account_bot_runtime._interaction_trace_context,  # noqa: SLF001
         get_redis_client=lambda: mem,
     )
     await executor.apply(copy.deepcopy(case.actions))
-    return _extract(rec, case.assert_type)
+    audit = _extract_audit(rec, case.assert_type)
+    return Observation(_summary_from_audit(audit), audit)
+
+
+async def _drive_e3(monkeypatch: pytest.MonkeyPatch, case: ParityCase) -> Observation:
+    expected = case.expect_e3
+    assert expected is not None
+    if expected[0] == "not_applicable":
+        return Observation(expected, _empty_audit())
+    monkeypatch.setattr(worker_runtime, "_check_payout_limit", AsyncMock(return_value=(True, None)))
+    _mock_payout_delivery(monkeypatch)
+    mem = _MemRedis()
+    client = _FakeClient()
+    engine = _DenyEngine() if case.engine_denies else _AllowEngine()
+    payload = copy.deepcopy(case.actions[0])
+    payload["action_type"] = payload.get("type")
+    try:
+        result = await worker_runtime._run_interaction_userbot_action(  # noqa: SLF001
+            client,
+            payload,
+            account_id=1,
+            engine=engine,
+            redis=mem,
+        )
+    except Exception as exc:  # noqa: BLE001
+        error = f"{type(exc).__name__}: {exc}"
+        code = worker_runtime._interaction_action_error_code(error)  # noqa: SLF001
+        failure = worker_runtime._interaction_action_failure_result(  # noqa: SLF001
+            payload, error=error, error_code=code
+        )
+        audit = _extract_e3_audit(
+            payload, status=TRACE_STATUS_FAILED, result=failure, error_code=code
+        )
+        return Observation(_summary_from_audit(audit), audit)
+    audit = _extract_e3_audit(payload, status=TRACE_STATUS_OK, result=result)
+    return Observation(_summary_from_audit(audit), audit)
 
 
 # ---------------------------------------------------------------------------
@@ -673,13 +875,73 @@ async def test_executor_parity_snapshot(monkeypatch: pytest.MonkeyPatch, case: P
     if case.xfail_reason:
         pytest.xfail(case.xfail_reason)
     worker_actual = await _drive_worker(monkeypatch, case)
-    bot_actual = await _drive_bot(monkeypatch, case)
-    assert worker_actual == case.expect_worker, (
-        f"[{case.case_id}] worker(E1) 快照漂移: got={worker_actual} expected={case.expect_worker}"
+    e2_actual = await _drive_e2(monkeypatch, case)
+    e3_actual = await _drive_e3(monkeypatch, case)
+    assert set(worker_actual.audit) == set(AUDIT_FIELDS)
+    assert set(e2_actual.audit) == set(AUDIT_FIELDS)
+    assert set(e3_actual.audit) == set(AUDIT_FIELDS)
+    assert worker_actual.summary == case.expect_worker, (
+        f"[{case.case_id}] worker(E1) 快照漂移: got={worker_actual.summary} expected={case.expect_worker}"
     )
-    assert bot_actual == case.expect_bot, (
-        f"[{case.case_id}] bot(E2+E3) 快照漂移: got={bot_actual} expected={case.expect_bot}"
+    assert e2_actual.summary == case.expect_bot, (
+        f"[{case.case_id}] E2 快照漂移: got={e2_actual.summary} expected={case.expect_bot}"
     )
+    assert e3_actual.summary == case.expect_e3, (
+        f"[{case.case_id}] E3 快照漂移: got={e3_actual.summary} expected={case.expect_e3}"
+    )
+    if case.case_id == "send_message_userbot_ok":
+        for label, actual in (("E1", worker_actual), ("E2", e2_actual), ("E3", e3_actual)):
+            assert actual.audit["reply_to_message_id"] == 7, label
+            assert actual.audit["reply_to_user_id"] == 9, label
+            assert actual.audit["reply_to_search_limit"] == 15, label
+            assert actual.audit["message_id"] == 101, label
+            assert actual.audit["plugin_key"] == "guess", label
+            assert actual.audit["entry_key"] == "play", label
+    if case.case_id == "send_message_reply_anchor_missing":
+        for label, actual in (("E1", worker_actual), ("E2", e2_actual), ("E3", e3_actual)):
+            assert actual.audit["reply_anchor_missing"] is True, label
+
+
+async def test_e2_e3_userbot_combined_regression(monkeypatch: pytest.MonkeyPatch) -> None:
+    """组合链仍保留回归：独立矩阵不再把它误当三方证明。"""
+
+    rec = AsyncMock()
+    tap = AsyncMock()
+    monkeypatch.setattr(delivery_mod, "record_action", rec)
+    monkeypatch.setattr(delivery_mod, "emit_action_event", tap)
+    mem = _MemRedis()
+    client = _FakeClient()
+    incoming = account_bot_runtime.Incoming(
+        account_id=1,
+        token="123:token",
+        update_id=1,
+        user_id=5,
+        chat_id=CHAT,
+        message_id=10,
+        text="",
+    )
+    executor = InteractionDeliveryExecutor(
+        incoming=incoming,
+        write_log=AsyncMock(),
+        run_worker_action=_make_run_worker_action(client, _AllowEngine(), mem),
+        log_context=account_bot_runtime._interaction_log_context,  # noqa: SLF001
+        trace_context=account_bot_runtime._interaction_trace_context,  # noqa: SLF001
+        get_redis_client=lambda: mem,
+    )
+
+    await executor.apply(
+        [{
+            "type": "send_message",
+            "send_via": "userbot_reply",
+            "chat_id": CHAT,
+            "text": "combined",
+            "context": {"plugin_key": "guess", "entry_key": "play"},
+        }]
+    )
+
+    assert _extract(rec, "send_message") == (TRACE_STATUS_OK, None, "userbot_reply")
+    assert client.calls[-1][0] == "send_message"
+    assert tap.await_count == 1
 
 
 # ---------------------------------------------------------------------------
@@ -714,10 +976,9 @@ def test_guard_canonical_action_coverage() -> None:
 # completeness guard ②：三份 failure_result 复制体形状一致（先锁形状后合并）
 # ---------------------------------------------------------------------------
 def test_guard_failure_result_shapes_consistent() -> None:
-    """E1/E2/E3 三份 failure_result 构造器喂同一伪输入，键集合必须一致。
+    """E1/E2/E3 适配器喂同一伪输入，失败结果键集合必须一致。
 
-    这三份如今是各写一份的复制体（漂移⑧）。本守卫锁住它们的“形状”，为将来合并
-    成单一实现兜底：任何一侧新增/删减字段都会立刻失败。
+    这里锁住共享构造器迁移后的稳定“形状”：任何一侧新增/删减字段都会立刻失败。
     """
     payload = {
         "type": "payout",
@@ -756,6 +1017,62 @@ def test_guard_failure_result_shapes_consistent() -> None:
     for detail in (e1, e2, e3):
         assert detail["worker_offline"] is False
         assert detail["reply_anchor_missing"] is False
+
+
+async def test_extract_audit_wide_contract_covers_anchor_message_and_compensation() -> None:
+    """The audit extractor must not collapse dimensions 15/16/17 into a triple."""
+
+    rec = AsyncMock()
+    await rec(
+        {"trace_id": "t1"},
+        {
+            "type": "payout",
+            "send_via": "userbot_reply",
+            "reply_to_message_id": 7,
+            "reply_to_user_id": 9,
+            "reply_to_search_limit": 15,
+            "context": {"plugin_key": "guess", "entry_key": "play"},
+        },
+        TRACE_STATUS_FAILED,
+        actual_send_via="userbot_reply",
+        error_code="reply_anchor_missing",
+        result={
+            "message_id": 101,
+            "saved_message_id": 101,
+            "replacement_message_id": 88,
+            "reply_anchor_missing": True,
+            "compensation_queued": True,
+            "payout_key": "p-1",
+            "audit_status": "denied",
+            "deny_reasons": ["ledger_paused"],
+        },
+    )
+
+    audit = _extract_audit(rec, "payout")
+    assert set(audit) == set(AUDIT_FIELDS)
+    assert audit == {
+        "status": TRACE_STATUS_FAILED,
+        "error_code": "reply_anchor_missing",
+        "actual_send_via": "userbot_reply",
+        "channel": "userbot_reply",
+        "audit_status": "denied",
+        "deny_reasons": ["ledger_paused"],
+        "reply_anchor_missing": True,
+        "reply_to_message_id": 7,
+        "reply_to_user_id": 9,
+        "reply_to_search_limit": 15,
+        "message_id": 101,
+        "saved_message_id": 101,
+        "replacement_message_id": 88,
+        "compensation_queued": True,
+        "payout_key": "p-1",
+        "plugin_key": "guess",
+        "entry_key": "play",
+    }
+
+    missing = _extract_audit(AsyncMock(), "payout")
+    assert missing["deny_reasons"] == []
+    assert all(missing[key] is None for key in AUDIT_FIELDS if key != "deny_reasons")
 
 
 # ---------------------------------------------------------------------------

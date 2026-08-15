@@ -25,6 +25,21 @@
 
 ## [Unreleased]
 
+### 行为变化
+
+- **行为变化：**UserBot 动作触发限流拒绝时，动作状态由 `SKIPPED` 统一改为 `FAILED`，并继续返回 `rate_limited`；插件可据该错误码及可选等待信息决定是否重试。
+- **行为变化：**未知 action type 不再按跳过后的成功批次处理，三执行体统一返回 `unsupported_action`，且该动作计入批处理 `failed`。
+- **行为变化：**Event Bus 的裸 `update_session` 不再容许隐式会话语义；订阅入口必须先显式 `start_session`，否则 E1/E2 统一返回 `session_not_found`。
+
+### 修复
+
+- 收敛 E1 Loader、E2 Delivery 与 E3 Worker RPC 的错误码词表和失败结果构造，统一非法发奖金额及显式纯空白发奖文案的处理；纯空白文案现在与缺失/空串一致回退为 `+amount`。
+
+### 测试与文档
+
+- 将三通道 parity 矩阵拆为 E1/E2/E3 独立驱动，并扩大回复锚点、消息 ID、补偿与审计字段的抽取覆盖。
+- 在插件 API 参考中新增“动作 × 执行体分工表”，公开 UserBot 专属动作、Bot API 动作、会话外层编排和富消息 markup 边界。
+
 ## [0.97.0-beta.5] - 2026-08-15 · patch（补丁预发布） · 插件树账号联动与窄屏修复
 
 ### 修复

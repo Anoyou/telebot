@@ -23,6 +23,7 @@ from ..action_tap import (
     emit_action_event,
 )
 from ..event_trace import TRACE_STATUS_FAILED, TRACE_STATUS_OK, TRACE_STATUS_SKIPPED, record_action
+from .action_core import build_failure_result
 from .contracts import (
     INTERACTION_SEND_VIA,
     SEND_CHANNEL_DEPRECATED_REASON_CODE,
@@ -105,7 +106,7 @@ class InteractionDeliveryExecutor:
     ) -> None:
         """E2 adapter: delivery handlers + shared ``run_action_batch`` core."""
 
-        from .action_core import ActionHandlers, run_action_batch
+        from .action_core import ActionHandlers, ActionKind, classify_action, run_action_batch
 
         replace_holder: dict[str, int | None] = {"id": replace_message_id}
 
@@ -143,8 +144,7 @@ class InteractionDeliveryExecutor:
 
         async def _on_update_session(action: dict[str, Any]) -> bool:
             await self._record_settlement(action)
-            await self._apply_update_session(action)
-            return True
+            return await self._apply_update_session(action)
 
         async def _on_session_control(action: dict[str, Any]) -> bool:
             await self._record_settlement(action)
@@ -229,14 +229,13 @@ class InteractionDeliveryExecutor:
                 )
                 return False
             await self._record_settlement(action)
-            await self._apply_payout(
+            return await self._apply_payout(
                 action,
                 reply_to_message_id=_int_or_none(action.get("reply_to_message_id")),
                 reply_to_user_id=_reply_to_user_id_from_action(action),
                 reply_to_search_limit=_int_or_none(action.get("reply_to_search_limit")),
                 parse_mode=_action_parse_mode(action),
             )
-            return True
 
         async def _on_answer_callback(action: dict[str, Any]) -> bool:
             await self._record_settlement(action)
@@ -321,27 +320,39 @@ class InteractionDeliveryExecutor:
         async def _on_unsupported(action: dict[str, Any]) -> bool:
             await self._record_settlement(action)
             action_type = str(action.get("type") or "").strip()
-            log.info(
-                "interaction action ignored: unsupported type=%s aid=%s",
+            if classify_action(action) is not ActionKind.UNSUPPORTED:
+                # Canonical actions with an intentionally absent adapter (for
+                # example click_callback_button) remain documented capability
+                # boundaries, not unknown-plugin contract failures.
+                await record_action(
+                    action.get("context"),
+                    action,
+                    TRACE_STATUS_SKIPPED,
+                    error_code="unsupported_send_via",
+                    error=f"unsupported by delivery executor: {action_type}",
+                )
+                return True
+            log.warning(
+                "interaction action failed: unsupported type=%s aid=%s",
                 action_type,
                 self.incoming.account_id,
             )
             await record_action(
                 action.get("context"),
                 action,
-                TRACE_STATUS_SKIPPED,
-                error_code="unsupported_send_via",
+                TRACE_STATUS_FAILED,
+                error_code="unsupported_action",
                 error=f"unsupported type: {action_type}",
             )
             await self.write_log(
                 self.incoming,
-                "info",
-                f"interaction action ignored: unsupported type={action_type}",
+                "warn",
+                f"interaction action failed: unsupported type={action_type}",
                 action_type=action_type,
                 action=action,
                 **self.log_context(self.incoming),
             )
-            return True
+            return False
 
         if len(actions) > INTERACTION_ACTION_LIMIT:
             dropped_actions = actions[INTERACTION_ACTION_LIMIT:]
@@ -906,7 +917,7 @@ class InteractionDeliveryExecutor:
         reply_to_user_id: int | None,
         reply_to_search_limit: int | None,
         parse_mode: str,
-    ) -> None:
+    ) -> bool:
         action = self._with_incoming_ledger_context(action)
         amount = _int_or_none(action.get("amount"))
         if amount is None or amount <= 0:
@@ -915,10 +926,10 @@ class InteractionDeliveryExecutor:
                 action,
                 TRACE_STATUS_FAILED,
                 actual_send_via="userbot_reply",
-                error_code="action_failed",
+                error_code="invalid_payout_amount",
                 error="payout amount must be > 0",
             )
-            return
+            return False
         chat_id = _int_or_none(action.get("chat_id"))
         target_chat_id = self._target_chat_id(chat_id)
         if target_chat_id is None:
@@ -930,7 +941,7 @@ class InteractionDeliveryExecutor:
                 error_code="scope_not_matched",
                 error="payout target chat_id missing",
             )
-            return
+            return False
         text = str(action.get("text") or f"+{amount}").strip()
         if not text:
             text = f"+{amount}"
@@ -954,7 +965,7 @@ class InteractionDeliveryExecutor:
                 "payout_key": payout_key,
             }
             await self._record_dry_run(action, channel="userbot_reply", result=dry_result)
-            return
+            return True
         if reply_to_user_id is not None:
             payload["reply_to_user_id"] = reply_to_user_id
         if action.get("reply_to_display_name") not in (None, ""):
@@ -1038,6 +1049,7 @@ class InteractionDeliveryExecutor:
                 error=error,
                 **log_detail,
             )
+        return ok
 
 
     def _with_incoming_ledger_context(self, action: dict[str, Any]) -> dict[str, Any]:
@@ -1373,7 +1385,7 @@ class InteractionDeliveryExecutor:
             )
         return replace_message_id
 
-    async def _apply_update_session(self, action: dict[str, Any]) -> None:
+    async def _apply_update_session(self, action: dict[str, Any]) -> bool:
         raw_data = action.get("data")
         if raw_data is None:
             session_data_update: dict[str, Any] = {}
@@ -1388,7 +1400,7 @@ class InteractionDeliveryExecutor:
                 error_code="interaction_session_error",
                 error="update_session data must be an object",
             )
-            return
+            return False
 
         raw_extend_seconds = action.get("extend_seconds")
         extend_seconds = _int_or_none(raw_extend_seconds)
@@ -1401,7 +1413,7 @@ class InteractionDeliveryExecutor:
                 error_code="interaction_session_error",
                 error="update_session extend_seconds must be an integer",
             )
-            return
+            return False
         if extend_seconds is not None and extend_seconds < 0:
             await record_action(
                 action.get("context"),
@@ -1411,7 +1423,7 @@ class InteractionDeliveryExecutor:
                 error_code="interaction_session_error",
                 error="update_session extend_seconds must be >= 0",
             )
-            return
+            return False
 
         session_key = _session_key_from_action(action)
         if not session_key:
@@ -1420,10 +1432,10 @@ class InteractionDeliveryExecutor:
                 action,
                 TRACE_STATUS_FAILED,
                 actual_send_via="interaction_session",
-                error_code="interaction_session_error",
+                error_code="session_not_found",
                 error="update_session session_key missing",
             )
-            return
+            return False
 
         expected_revision = _int_or_none(action.get("expected_revision"))
         try:
@@ -1431,7 +1443,6 @@ class InteractionDeliveryExecutor:
                 DEFAULT_SESSION_TTL_GRACE_SECONDS,
                 SessionNotFoundError,
                 SessionRevisionConflictError,
-                SessionUpdateError,
                 update_interaction_session,
             )
 
@@ -1464,8 +1475,27 @@ class InteractionDeliveryExecutor:
                 error=str(exc),
                 **self.log_context(self.incoming),
             )
-            return
-        except (SessionNotFoundError, SessionUpdateError, Exception) as exc:  # noqa: BLE001
+            return False
+        except SessionNotFoundError as exc:
+            await record_action(
+                action.get("context"),
+                action,
+                TRACE_STATUS_FAILED,
+                actual_send_via="interaction_session",
+                error_code="session_not_found",
+                error=str(exc),
+            )
+            await self.write_log(
+                self.incoming,
+                "warn",
+                "interaction session update failed",
+                action_type="update_session",
+                session_key=session_key,
+                error=str(exc),
+                **self.log_context(self.incoming),
+            )
+            return False
+        except Exception as exc:  # noqa: BLE001
             await record_action(
                 action.get("context"),
                 action,
@@ -1483,7 +1513,7 @@ class InteractionDeliveryExecutor:
                 error=f"{type(exc).__name__}: {exc}",
                 **self.log_context(self.incoming),
             )
-            return
+            return False
 
         await record_action(
             action.get("context"),
@@ -1498,6 +1528,7 @@ class InteractionDeliveryExecutor:
                 "revision": updated.revision,
             },
         )
+        return True
 
     async def _read_saved_message_id(self, key: str | None) -> int | None:
         if not key:
@@ -2419,14 +2450,12 @@ def _userbot_action_failure_result(
     error_code: str,
     result: Any = None,
 ) -> dict[str, Any]:
-    detail = _userbot_action_context(payload)
-    if isinstance(result, dict):
-        detail.update(result)
-    detail["error"] = str(error or "")
-    detail["error_code"] = error_code
-    detail["worker_offline"] = error_code == "userbot_offline"
-    detail["reply_anchor_missing"] = error_code == "reply_anchor_missing"
-    return detail
+    return build_failure_result(
+        _userbot_action_context(payload),
+        error=error,
+        error_code=error_code,
+        result=result if isinstance(result, dict) else None,
+    )
 
 
 def _userbot_action_context(payload: dict[str, Any]) -> dict[str, Any]:

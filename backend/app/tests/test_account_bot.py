@@ -2108,6 +2108,17 @@ async def test_interaction_delivery_update_session_failure_records_action_trace(
     )
     record_action = AsyncMock()
     monkeypatch.setattr("app.services.interaction.delivery.record_action", record_action)
+    from app.services.interaction import action_core
+
+    real_run_action_batch = action_core.run_action_batch
+    batch_results = []
+
+    async def capture_batch_result(*args, **kwargs):
+        result = await real_run_action_batch(*args, **kwargs)
+        batch_results.append(result)
+        return result
+
+    monkeypatch.setattr(action_core, "run_action_batch", capture_batch_result)
     executor = InteractionDeliveryExecutor(
         incoming=incoming,
         write_log=AsyncMock(),
@@ -2121,7 +2132,9 @@ async def test_interaction_delivery_update_session_failure_records_action_trace(
 
     assert record_action.await_args.args[2] == account_bot_runtime.TRACE_STATUS_FAILED
     assert record_action.await_args.kwargs["actual_send_via"] == "interaction_session"
-    assert record_action.await_args.kwargs["error_code"] == "interaction_session_error"
+    assert record_action.await_args.kwargs["error_code"] == "session_not_found"
+    assert batch_results[0].executed == 1
+    assert batch_results[0].failed == 1
 
 
 @pytest.mark.asyncio
@@ -9320,7 +9333,7 @@ async def test_opening_update_session_with_end_session_leaves_no_session(monkeyp
     assert session_key not in redis.data
     update_call = next(call for call in record_action.await_args_list if call.args[1]["type"] == "update_session")
     assert update_call.args[2] == account_bot_runtime.TRACE_STATUS_FAILED
-    assert update_call.kwargs["error_code"] == "interaction_session_error"
+    assert update_call.kwargs["error_code"] == "session_not_found"
 
 
 @pytest.mark.asyncio
@@ -9518,7 +9531,7 @@ async def test_event_bus_wide_update_session_without_session_still_fails(monkeyp
     assert not any(key.startswith("account_bot:interaction_session:") for key in redis.data)
     update_call = next(call for call in record_action.await_args_list if call.args[1]["type"] == "update_session")
     assert update_call.args[2] == account_bot_runtime.TRACE_STATUS_FAILED
-    assert update_call.kwargs["error_code"] == "interaction_session_error"
+    assert update_call.kwargs["error_code"] == "session_not_found"
 
 
 @pytest.mark.asyncio
@@ -16367,7 +16380,7 @@ async def test_interaction_action_unknown_type_writes_runtime_log(monkeypatch) -
     payload = redis.items[0].decode("utf-8") if isinstance(redis.items[0], bytes) else redis.items[0]
     assert "runtime_log_stream" not in payload
     assert "unsupported type=wait_answer" in payload
-    assert '"level":"info"' in payload
+    assert '"level":"warn"' in payload
 
 
 
