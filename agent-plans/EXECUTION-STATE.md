@@ -24,12 +24,12 @@
 - [x] WP-A 三通道一致性核销 — done `9669daf7`
 - [x] WP-B 插件文档族真实性审计 — done `edce2d94`
 
-## 当前计划：三通道一致性修复轮（agent-plans/2026-08-15-three-channel-consistency-fix-plan.md，草案已批，待开工令）
+## 当前计划：三通道一致性修复轮（agent-plans/2026-08-15-three-channel-consistency-fix-plan.md，已完成）
 
-- [ ] P1 结果/错误语义收口 — pending
-- [ ] P2 纯空白 payout 文案统一回退 — pending
-- [ ] P3 三方独立 parity 与可观测字段补强 — pending
-- [ ] P4 插件 API 执行体分工表 — pending
+- [x] P1 结果/错误语义收口 — done `3e121d8d`
+- [x] P2 纯空白 payout 文案统一回退 — done `3e121d8d`
+- [x] P3 三方独立 parity 与可观测字段补强 — done `3e121d8d`
+- [x] P4 插件 API 执行体分工表 — done `3e121d8d`
 
 ## 当前计划：内置 Codex Gateway / 全链路 Agent 接入 / LLM 错误语义收口 v1
 

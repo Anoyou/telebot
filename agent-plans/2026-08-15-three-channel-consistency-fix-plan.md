@@ -1,8 +1,8 @@
 # 三通道一致性修复轮
 
-> 状态：草案，待人审确认；本文件只立项，不代表修复轮开工。
+> 状态：已完成；实现提交 `3e121d8d`，P1～P4 与项目级验证均已收口。
 >
-> 前置审计：agent-plans/2026-08-15-consistency-audit-plan.md WP-A 已完成核销表与 parity 矩阵确认。WP-A 在草案获确认前保持 in_progress。
+> 前置审计：agent-plans/2026-08-15-consistency-audit-plan.md WP-A 已完成核销表与 parity 矩阵确认。
 
 ## 目标与范围
 
@@ -161,5 +161,5 @@
 2. 后端 focused parity、会话、payout compensation 测试通过，并补跑项目要求的相关验证；
 3. PLUGIN-API-REFERENCE.md 分工表合入；
 4. P1 的三处插件可见行为变化（限流状态 SKIPPED→FAILED、未知动作计入 failed、Event Bus 裸 update_session 改为强制 start_session 契约）必须在 CHANGELOG 中文条目中逐条明示“行为变化”，并由 P4 分工表同步覆盖；两者缺一不得合入；
-5. 另行提交中文变更日志与版本发布材料（不属于本草案）；
+5. 中文变更日志已写入 `Unreleased`；版本号与发布材料留待后续 beta 检查点，不作为本开发轮完成阻塞；
 6. 修复轮是否开工、优先级或目标语义若需改变，另行裁定。
