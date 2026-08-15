@@ -26,7 +26,7 @@ test.describe("移动端交互细节", () => {
     fixture.assertClean();
   });
 
-  test("PWA 页面与卡片使用紧凑间距", async ({ page }, testInfo) => {
+  test("PWA 页面与卡片使用适中紧凑间距", async ({ page }, testInfo) => {
     test.skip(testInfo.project.name !== "mobile", "仅 PWA 视口");
     const fixture = await installApiFixture(page);
     await page.goto("/overview", { waitUntil: "networkidle" });
@@ -61,11 +61,11 @@ test.describe("移动端交互细节", () => {
       };
     });
     expect(spacing).toMatchObject({
-      mainPaddingLeft: "6px",
-      mainPaddingTop: "6px",
-      pageHeaderPaddingLeft: "6px",
-      sectionGap: "8px",
-      cardHeaderPaddingLeft: "8px",
+      mainPaddingLeft: "9px",
+      mainPaddingTop: "9px",
+      pageHeaderPaddingLeft: "9px",
+      sectionGap: "12px",
+      cardHeaderPaddingLeft: "12px",
     });
     expect(spacing.documentWidth).toBeLessThanOrEqual(spacing.viewportWidth);
     expect(spacing.mainPaddingBottom).toBeGreaterThan(spacing.mobileNavHeight);

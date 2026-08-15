@@ -250,82 +250,82 @@
 
   @media (max-width: 639px) {
     .nested-surface {
-      --nested-inset: 0.5rem;
+      --nested-inset: 0.75rem;
     }
 
     .nested-surface-inset-4 {
-      --nested-inset: 0.75rem;
+      --nested-inset: 1.125rem;
     }
   }
 
   /* PWA 主内容密度：只收紧内容区的边距与间距，不改底部安全区和可点击控件高度。
-     按当前项目的 spacing token 统一减半，避免每个页面单独微调。 */
+     在上一版紧凑映射基础上统一放大 1.5 倍，兼顾信息密度与内容呼吸感。 */
   @media (max-width: 639px) {
     [data-app-main] {
-      padding-top: 0.375rem !important;
-      padding-left: max(0.375rem, env(safe-area-inset-left)) !important;
-      padding-right: max(0.375rem, env(safe-area-inset-right)) !important;
+      padding-top: 0.5625rem !important;
+      padding-left: max(0.5625rem, env(safe-area-inset-left)) !important;
+      padding-right: max(0.5625rem, env(safe-area-inset-right)) !important;
     }
 
-    [data-app-main] [class~="gap-0.5"] { gap: 0.125rem !important; }
-    [data-app-main] [class~="gap-1"] { gap: 0.125rem !important; }
-    [data-app-main] [class~="gap-1.5"] { gap: 0.1875rem !important; }
-    [data-app-main] [class~="gap-2"] { gap: 0.25rem !important; }
-    [data-app-main] [class~="gap-3"] { gap: 0.375rem !important; }
-    [data-app-main] [class~="gap-4"] { gap: 0.5rem !important; }
-    [data-app-main] [class~="gap-6"] { gap: 0.75rem !important; }
-    [data-app-main] [class~="gap-x-2"] { column-gap: 0.25rem !important; }
-    [data-app-main] [class~="gap-x-3"] { column-gap: 0.375rem !important; }
-    [data-app-main] [class~="gap-y-2"] { row-gap: 0.25rem !important; }
-    [data-app-main] [class~="gap-y-3"] { row-gap: 0.375rem !important; }
+    [data-app-main] [class~="gap-0.5"] { gap: 0.1875rem !important; }
+    [data-app-main] [class~="gap-1"] { gap: 0.1875rem !important; }
+    [data-app-main] [class~="gap-1.5"] { gap: 0.28125rem !important; }
+    [data-app-main] [class~="gap-2"] { gap: 0.375rem !important; }
+    [data-app-main] [class~="gap-3"] { gap: 0.5625rem !important; }
+    [data-app-main] [class~="gap-4"] { gap: 0.75rem !important; }
+    [data-app-main] [class~="gap-6"] { gap: 1.125rem !important; }
+    [data-app-main] [class~="gap-x-2"] { column-gap: 0.375rem !important; }
+    [data-app-main] [class~="gap-x-3"] { column-gap: 0.5625rem !important; }
+    [data-app-main] [class~="gap-y-2"] { row-gap: 0.375rem !important; }
+    [data-app-main] [class~="gap-y-3"] { row-gap: 0.5625rem !important; }
 
-    [data-app-main] [class~="space-y-1.5"] > :not([hidden]) ~ :not([hidden]) { margin-top: 0.1875rem !important; }
-    [data-app-main] [class~="space-y-2"] > :not([hidden]) ~ :not([hidden]) { margin-top: 0.25rem !important; }
-    [data-app-main] [class~="space-y-3"] > :not([hidden]) ~ :not([hidden]) { margin-top: 0.375rem !important; }
-    [data-app-main] [class~="space-y-4"] > :not([hidden]) ~ :not([hidden]) { margin-top: 0.5rem !important; }
-    [data-app-main] [class~="space-y-6"] > :not([hidden]) ~ :not([hidden]) { margin-top: 0.75rem !important; }
-    [data-page-shell] > :not([hidden]) ~ :not([hidden]) { margin-top: 0.5rem !important; }
+    [data-app-main] [class~="space-y-1.5"] > :not([hidden]) ~ :not([hidden]) { margin-top: 0.28125rem !important; }
+    [data-app-main] [class~="space-y-2"] > :not([hidden]) ~ :not([hidden]) { margin-top: 0.375rem !important; }
+    [data-app-main] [class~="space-y-3"] > :not([hidden]) ~ :not([hidden]) { margin-top: 0.5625rem !important; }
+    [data-app-main] [class~="space-y-4"] > :not([hidden]) ~ :not([hidden]) { margin-top: 0.75rem !important; }
+    [data-app-main] [class~="space-y-6"] > :not([hidden]) ~ :not([hidden]) { margin-top: 1.125rem !important; }
+    [data-page-shell] > :not([hidden]) ~ :not([hidden]) { margin-top: 0.75rem !important; }
 
-    [data-app-main] [class~="mt-1"] { margin-top: 0.125rem !important; }
-    [data-app-main] [class~="mt-1.5"] { margin-top: 0.1875rem !important; }
-    [data-app-main] [class~="mt-2"] { margin-top: 0.25rem !important; }
-    [data-app-main] [class~="mt-3"] { margin-top: 0.375rem !important; }
-    [data-app-main] [class~="mt-4"] { margin-top: 0.5rem !important; }
-    [data-app-main] [class~="mt-5"] { margin-top: 0.625rem !important; }
-    [data-app-main] [class~="mt-6"] { margin-top: 0.75rem !important; }
-    [data-app-main] [class~="mb-1"] { margin-bottom: 0.125rem !important; }
-    [data-app-main] [class~="mb-1.5"] { margin-bottom: 0.1875rem !important; }
-    [data-app-main] [class~="mb-2"] { margin-bottom: 0.25rem !important; }
-    [data-app-main] [class~="mb-3"] { margin-bottom: 0.375rem !important; }
-    [data-app-main] [class~="mb-4"] { margin-bottom: 0.5rem !important; }
-    [data-app-main] [class~="mb-5"] { margin-bottom: 0.625rem !important; }
-    [data-app-main] [class~="mb-6"] { margin-bottom: 0.75rem !important; }
-    [data-app-main] [class~="mx-2"] { margin-left: 0.25rem !important; margin-right: 0.25rem !important; }
-    [data-app-main] [class~="mx-3"] { margin-left: 0.375rem !important; margin-right: 0.375rem !important; }
-    [data-app-main] [class~="my-2"] { margin-top: 0.25rem !important; margin-bottom: 0.25rem !important; }
-    [data-app-main] [class~="my-3"] { margin-top: 0.375rem !important; margin-bottom: 0.375rem !important; }
-    [data-app-main] [class~="my-4"] { margin-top: 0.5rem !important; margin-bottom: 0.5rem !important; }
+    [data-app-main] [class~="mt-1"] { margin-top: 0.1875rem !important; }
+    [data-app-main] [class~="mt-1.5"] { margin-top: 0.28125rem !important; }
+    [data-app-main] [class~="mt-2"] { margin-top: 0.375rem !important; }
+    [data-app-main] [class~="mt-3"] { margin-top: 0.5625rem !important; }
+    [data-app-main] [class~="mt-4"] { margin-top: 0.75rem !important; }
+    [data-app-main] [class~="mt-5"] { margin-top: 0.9375rem !important; }
+    [data-app-main] [class~="mt-6"] { margin-top: 1.125rem !important; }
+    [data-app-main] [class~="mb-1"] { margin-bottom: 0.1875rem !important; }
+    [data-app-main] [class~="mb-1.5"] { margin-bottom: 0.28125rem !important; }
+    [data-app-main] [class~="mb-2"] { margin-bottom: 0.375rem !important; }
+    [data-app-main] [class~="mb-3"] { margin-bottom: 0.5625rem !important; }
+    [data-app-main] [class~="mb-4"] { margin-bottom: 0.75rem !important; }
+    [data-app-main] [class~="mb-5"] { margin-bottom: 0.9375rem !important; }
+    [data-app-main] [class~="mb-6"] { margin-bottom: 1.125rem !important; }
+    [data-app-main] [class~="mx-2"] { margin-left: 0.375rem !important; margin-right: 0.375rem !important; }
+    [data-app-main] [class~="mx-3"] { margin-left: 0.5625rem !important; margin-right: 0.5625rem !important; }
+    [data-app-main] [class~="my-2"] { margin-top: 0.375rem !important; margin-bottom: 0.375rem !important; }
+    [data-app-main] [class~="my-3"] { margin-top: 0.5625rem !important; margin-bottom: 0.5625rem !important; }
+    [data-app-main] [class~="my-4"] { margin-top: 0.75rem !important; margin-bottom: 0.75rem !important; }
 
-    [data-app-main] [class~="p-1"] { padding: 0.125rem !important; }
-    [data-app-main] [class~="p-2"] { padding: 0.25rem !important; }
-    [data-app-main] [class~="p-2.5"] { padding: 0.3125rem !important; }
-    [data-app-main] [class~="p-3"] { padding: 0.375rem !important; }
-    [data-app-main] [class~="p-4"] { padding: 0.5rem !important; }
-    [data-app-main] [class~="p-5"] { padding: 0.625rem !important; }
-    [data-app-main] [class~="p-6"] { padding: 0.75rem !important; }
-    [data-app-main] [class~="px-1"] { padding-left: 0.125rem !important; padding-right: 0.125rem !important; }
-    [data-app-main] [class~="px-2"] { padding-left: 0.25rem !important; padding-right: 0.25rem !important; }
-    [data-app-main] [class~="px-2.5"] { padding-left: 0.3125rem !important; padding-right: 0.3125rem !important; }
-    [data-app-main] [class~="px-3"] { padding-left: 0.375rem !important; padding-right: 0.375rem !important; }
-    [data-app-main] [class~="px-4"] { padding-left: 0.5rem !important; padding-right: 0.5rem !important; }
-    [data-app-main] [class~="px-5"] { padding-left: 0.625rem !important; padding-right: 0.625rem !important; }
-    [data-app-main] [class~="py-1"] { padding-top: 0.125rem !important; padding-bottom: 0.125rem !important; }
-    [data-app-main] [class~="py-1.5"] { padding-top: 0.1875rem !important; padding-bottom: 0.1875rem !important; }
-    [data-app-main] [class~="py-2"] { padding-top: 0.25rem !important; padding-bottom: 0.25rem !important; }
-    [data-app-main] [class~="py-2.5"] { padding-top: 0.3125rem !important; padding-bottom: 0.3125rem !important; }
-    [data-app-main] [class~="py-3"] { padding-top: 0.375rem !important; padding-bottom: 0.375rem !important; }
-    [data-app-main] [class~="py-4"] { padding-top: 0.5rem !important; padding-bottom: 0.5rem !important; }
-    [data-app-main] [class~="py-5"] { padding-top: 0.625rem !important; padding-bottom: 0.625rem !important; }
+    [data-app-main] [class~="p-1"] { padding: 0.1875rem !important; }
+    [data-app-main] [class~="p-2"] { padding: 0.375rem !important; }
+    [data-app-main] [class~="p-2.5"] { padding: 0.46875rem !important; }
+    [data-app-main] [class~="p-3"] { padding: 0.5625rem !important; }
+    [data-app-main] [class~="p-4"] { padding: 0.75rem !important; }
+    [data-app-main] [class~="p-5"] { padding: 0.9375rem !important; }
+    [data-app-main] [class~="p-6"] { padding: 1.125rem !important; }
+    [data-app-main] [class~="px-1"] { padding-left: 0.1875rem !important; padding-right: 0.1875rem !important; }
+    [data-app-main] [class~="px-2"] { padding-left: 0.375rem !important; padding-right: 0.375rem !important; }
+    [data-app-main] [class~="px-2.5"] { padding-left: 0.46875rem !important; padding-right: 0.46875rem !important; }
+    [data-app-main] [class~="px-3"] { padding-left: 0.5625rem !important; padding-right: 0.5625rem !important; }
+    [data-app-main] [class~="px-4"] { padding-left: 0.75rem !important; padding-right: 0.75rem !important; }
+    [data-app-main] [class~="px-5"] { padding-left: 0.9375rem !important; padding-right: 0.9375rem !important; }
+    [data-app-main] [class~="py-1"] { padding-top: 0.1875rem !important; padding-bottom: 0.1875rem !important; }
+    [data-app-main] [class~="py-1.5"] { padding-top: 0.28125rem !important; padding-bottom: 0.28125rem !important; }
+    [data-app-main] [class~="py-2"] { padding-top: 0.375rem !important; padding-bottom: 0.375rem !important; }
+    [data-app-main] [class~="py-2.5"] { padding-top: 0.46875rem !important; padding-bottom: 0.46875rem !important; }
+    [data-app-main] [class~="py-3"] { padding-top: 0.5625rem !important; padding-bottom: 0.5625rem !important; }
+    [data-app-main] [class~="py-4"] { padding-top: 0.75rem !important; padding-bottom: 0.75rem !important; }
+    [data-app-main] [class~="py-5"] { padding-top: 0.9375rem !important; padding-bottom: 0.9375rem !important; }
 
     /* 保留常用的零边距约束，避免 p-4 覆盖 CardContent 的 pt-0。 */
     [data-app-main] [class~="pt-0"] { padding-top: 0 !important; }
