@@ -23,6 +23,7 @@ import type {
   SystemAgentMessage,
   SystemAgentProviderSwitch,
   SystemAgentToolApproval,
+  SystemAgentImageAttachment,
 } from "@/api/systemAgent";
 import { ActionCard } from "@/components/assistant/ActionCard";
 import { ModelRunMeta } from "@/components/ai/ModelRunMeta";
@@ -136,7 +137,40 @@ export type LiveBubble = {
   toolApproval?: SystemAgentToolApproval;
   /** 最终回答的 usage 元数据（tokens、run_id 等） */
   usage?: Record<string, unknown> | null;
+  images?: SystemAgentImageAttachment[];
 };
+
+function safeImageSrc(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const src = value.trim();
+  return /^(?:data:image\/(?:jpeg|png|webp|gif);base64,[A-Za-z0-9+/=\s]+|https?:\/\/)/i.test(src) ? src : null;
+}
+
+function ImageGallery({ images }: { images?: SystemAgentImageAttachment[] }) {
+  const sources = (images || [])
+    .map((item) => safeImageSrc(item.data_url || item.url))
+    .filter((value): value is string => Boolean(value));
+  if (!sources.length) return null;
+  return (
+    <div className="my-1 flex flex-wrap gap-2" aria-label="消息图片">
+      {sources.map((src, index) => (
+        <a key={`${src}-${index}`} href={src} target="_blank" rel="noreferrer">
+          <img
+            src={src}
+            alt={`图片 ${index + 1}`}
+            loading="lazy"
+            className="max-h-[32rem] max-w-full rounded-lg border border-border/60 object-contain"
+          />
+        </a>
+      ))}
+    </div>
+  );
+}
+
+function messageImages(msg: SystemAgentMessage): SystemAgentImageAttachment[] {
+  const images = msg.content?.images ?? msg.content?.attachments;
+  return Array.isArray(images) ? images.filter((item): item is SystemAgentImageAttachment => Boolean(item && typeof item === "object")) : [];
+}
 
 function messageText(msg: SystemAgentMessage): string {
   const content = msg.content || {};
@@ -207,6 +241,10 @@ export const AssistantMarkdown = memo(function AssistantMarkdown({
               {children}
             </a>
           ),
+          img: ({ src, alt }) => {
+            const safe = safeImageSrc(src);
+            return safe ? <img src={safe} alt={alt || "图片"} loading="lazy" className="my-2 max-h-[32rem] max-w-full rounded-lg border border-border/60 object-contain" /> : null;
+          },
           table: ({ children }) => (
             <div className="my-2 max-w-full overflow-x-auto overscroll-x-contain">
               <table className="w-max min-w-full table-auto border-collapse text-left text-xs">
@@ -280,6 +318,7 @@ export function Conversation({
           ? m.role
           : "system") as LiveBubble["role"],
         text: messageText(m),
+        images: messageImages(m),
         reasoning: messageReasoning(m),
         createdAt: m.created_at,
         messageId: m.id,
@@ -300,7 +339,7 @@ export function Conversation({
       }),
     );
   const items: LiveBubble[] = mergeConversationItems(persistedItems, live || []).filter(
-    (item) => item.text || item.pending || item.usage,
+    (item) => item.text || item.images?.length || item.pending || item.usage,
   );
   const latestUserMessage = [...messages].reverse().find((message) => message.role === "user");
   const latestAssistantMessage = latestUserMessage
@@ -442,6 +481,7 @@ export function Conversation({
                     item.pending && "opacity-70",
                   )}
                 >
+                  <ImageGallery images={item.images} />
                   {isEditing ? (
                     <form
                       className="flex flex-col gap-2"
@@ -535,20 +575,22 @@ export function Conversation({
                     expected={expectedSelection}
                   />
                 ) : null}
-                {!isUser && !isTool && !item.streaming && !item.pending && item.text.trim() ? (
+                {!isUser && !isTool && !item.streaming && !item.pending && (item.text.trim() || item.images?.length) ? (
                   <div className="flex min-h-8 w-full max-w-[min(75ch,100%)] items-center gap-1 border-t border-border/45 pr-14 pt-1 text-[10px] text-muted-foreground sm:pr-0 xl:max-w-[min(96ch,100%)] 2xl:max-w-[min(112ch,100%)]">
                     {timestamp ? <time dateTime={item.createdAt || undefined} className="mr-auto tabular-nums">{timestamp}</time> : <span className="mr-auto" />}
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon"
-                      className="h-8 w-8 text-muted-foreground"
-                      title="复制回答"
-                      aria-label="复制回答"
-                      onClick={() => void copyAssistantReply(item.text)}
-                    >
-                      <Copy className="h-3.5 w-3.5" />
-                    </Button>
+                    {item.text.trim() ? (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8 text-muted-foreground"
+                        title="复制回答"
+                        aria-label="复制回答"
+                        onClick={() => void copyAssistantReply(item.text)}
+                      >
+                        <Copy className="h-3.5 w-3.5" />
+                      </Button>
+                    ) : null}
                     {isLatestEditableAssistant && onRegenerateMessage ? (
                       <Button
                         type="button"

@@ -51,12 +51,13 @@ import {
   type SystemAgentSession,
   type SystemAgentStreamEvent,
   type SystemAgentUserMemory,
+  type SystemAgentImageAttachment,
 } from "@/api/systemAgent";
 import { listLLMProviders } from "@/api/commands";
 import { listAccounts } from "@/api/accounts";
 import type { LLMProviderOut } from "@/api/types";
 import { matrixToPickerItems, type ModelPickerValue } from "@/components/ai/ModelPicker";
-import { Composer, type ComposerAction } from "@/components/assistant/Composer";
+import { Composer, type ComposerAction, type ComposerAttachment } from "@/components/assistant/Composer";
 import { AgentMark } from "@/components/assistant/AgentMark";
 import { useAssistantDock } from "@/components/assistant/AssistantDock";
 import { Conversation, type LiveBubble } from "@/components/assistant/Conversation";
@@ -924,6 +925,9 @@ export function AssistantIndex() {
       }
       const finalText = String(event.content || "");
       const finalReasoning = String(event.reasoning || "");
+      const finalImages = Array.isArray(event.images)
+        ? event.images.filter((item): item is SystemAgentImageAttachment => Boolean(item && typeof item === "object"))
+        : [];
       liveText.syncSnapshot(finalText);
       liveReasoning.syncSnapshot(finalReasoning);
       streamingBubbleCreatedRef.current = false;
@@ -943,6 +947,7 @@ export function AssistantIndex() {
                   ...bubble,
                   text: finalText,
                   reasoning: finalReasoning,
+                  images: finalImages,
                   createdAt: typeof event.ts === "string" ? event.ts : new Date().toISOString(),
                   streaming: false,
                   streamFallback: Boolean(event.stream_fallback || usage?.stream_fallback),
@@ -958,6 +963,7 @@ export function AssistantIndex() {
             role: "assistant" as const,
             text: finalText,
             reasoning: finalReasoning,
+            images: finalImages,
             createdAt: typeof event.ts === "string" ? event.ts : new Date().toISOString(),
             streaming: false,
             streamFallback: Boolean(event.stream_fallback || usage?.stream_fallback),
@@ -1153,12 +1159,14 @@ export function AssistantIndex() {
 
   const runTurn = async ({
     text,
+    attachments = [],
     retryMessageId,
     regenerate,
     fallbackProviderId,
     approvedTools,
   }: {
     text?: string;
+    attachments?: ComposerAttachment[];
     retryMessageId?: number;
     regenerate?: {
       userMessageId: number;
@@ -1192,9 +1200,18 @@ export function AssistantIndex() {
             id: `live-user-${Date.now()}`,
             role: "user",
             text,
+            images: attachments,
             createdAt: new Date().toISOString(),
           }
-        : null;
+        : attachments.length
+          ? {
+              id: `live-user-${Date.now()}`,
+              role: "user",
+              text: "",
+              images: attachments,
+              createdAt: new Date().toISOString(),
+            }
+          : null;
     const pending: LiveBubble = {
       id: regenerate
         ? `m-${regenerate.assistantMessageId}`
@@ -1217,8 +1234,9 @@ export function AssistantIndex() {
       const model_selection = toApiModelSelection(sessionModel);
       const run = regenerate
         ? await startSystemAgentRegenerateRun(sessionId, regenerate.userMessageId, {
-            assistant_message_id: regenerate.assistantMessageId,
-            content: regenerate.editedText,
+          assistant_message_id: regenerate.assistantMessageId,
+          content: regenerate.editedText,
+          attachments,
             ...accountPayload,
             client_request_id: requestId(),
             model_selection,
@@ -1233,6 +1251,7 @@ export function AssistantIndex() {
           })
         : await startSystemAgentRun(sessionId, {
             content: text || "",
+            attachments,
             ...accountPayload,
             client_request_id: requestId(),
             model_selection,
@@ -1269,10 +1288,10 @@ export function AssistantIndex() {
     }
   };
 
-  const onSend = async (text: string) => {
+  const onSend = async (text: string, attachments: ComposerAttachment[]) => {
     try {
       if (!hasOpenRun) {
-        await runTurn({ text });
+        await runTurn({ text, attachments });
         return;
       }
       if (!enabled) {
@@ -1282,7 +1301,7 @@ export function AssistantIndex() {
       const sessionId = await ensureSession();
       const target = currentRun || activeRunSnapshot;
       if (!target) {
-        await runTurn({ text });
+        await runTurn({ text, attachments });
         return;
       }
       if (composerAction === "steer") {
@@ -1292,6 +1311,7 @@ export function AssistantIndex() {
         }
         await steerSystemAgentRun(target.id, {
           content: text,
+          attachments,
           client_request_id: requestId(),
         });
         toast.success("已提交调整，会在下一个安全边界应用");
@@ -1304,6 +1324,7 @@ export function AssistantIndex() {
         }
         const replacement = await stopAndReplaceSystemAgentRun(target.id, {
           content: text,
+          attachments,
           client_request_id: requestId(),
           model_selection: toApiModelSelection(sessionModel),
         });
@@ -1321,6 +1342,7 @@ export function AssistantIndex() {
             id: `live-user-${Date.now()}`,
             role: "user",
             text,
+            images: attachments,
             createdAt: new Date().toISOString(),
           },
           {
@@ -1336,6 +1358,7 @@ export function AssistantIndex() {
       }
       const queued = await startSystemAgentRun(sessionId, {
         content: text,
+        attachments,
         account_id: accountId === "" ? null : Number(accountId),
         client_request_id: requestId(),
         model_selection: toApiModelSelection(sessionModel),

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
-import { ListPlus, Menu, Route, Send, Square, StepForward } from "lucide-react";
+import { ImagePlus, ListPlus, Menu, Route, Send, Square, StepForward, X } from "lucide-react";
+import { toast } from "sonner";
 
 import {
   ModelPicker,
@@ -11,8 +12,10 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { composerEnterAction } from "./composerState";
+import type { SystemAgentImageAttachment } from "@/api/systemAgent";
 
 export type ComposerAction = "queue" | "steer" | "replace";
+export type ComposerAttachment = SystemAgentImageAttachment;
 
 const ACTION_COPY: Record<
   ComposerAction,
@@ -62,7 +65,7 @@ export function Composer({
   runStatus,
 }: {
   disabled?: boolean;
-  onSend: (text: string) => void | Promise<void>;
+  onSend: (text: string, attachments: ComposerAttachment[]) => void | Promise<void>;
   streaming?: boolean;
   onStop?: () => void;
   placeholder?: string;
@@ -90,7 +93,9 @@ export function Composer({
 }) {
   const [internalValue, setInternalValue] = useState("");
   const [sending, setSending] = useState(false);
+  const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const composingRef = useRef(false);
   const suppressNextEnterRef = useRef(false);
   const suppressTimerRef = useRef<number | null>(null);
@@ -117,13 +122,33 @@ export function Composer({
     [],
   );
 
+  const addFiles = async (files: File[]) => {
+    const accepted = files.filter((file) => ["image/jpeg", "image/png", "image/webp", "image/gif"].includes(file.type));
+    if (accepted.length !== files.length) toast.error("仅支持 JPG、PNG、WEBP 或 GIF 图片");
+    const available = Math.max(0, 4 - attachments.length);
+    if (accepted.length > available) toast.error("每条消息最多附带 4 张图片");
+    const next = accepted.slice(0, available);
+    const loaded = await Promise.all(next.map((file) => new Promise<ComposerAttachment | null>((resolve) => {
+      if (file.size > 6 * 1024 * 1024) { toast.error(`${file.name} 超过 6 MiB`); resolve(null); return; }
+      const reader = new FileReader();
+      reader.onload = () => resolve({ kind: "image", source: "data_url", mime_type: file.type, data_url: String(reader.result || ""), name: file.name });
+      reader.onerror = () => { toast.error(`${file.name} 读取失败`); resolve(null); };
+      reader.readAsDataURL(file);
+    })));
+    setAttachments((current) => [
+      ...current,
+      ...loaded.filter((item): item is ComposerAttachment => Boolean(item)),
+    ].slice(0, 4));
+  };
+
   const submit = async () => {
     const text = value.trim();
-    if (!text || disabled || sending) return;
+    if ((!text && attachments.length === 0) || disabled || sending) return;
     setSending(true);
     try {
-      await onSend(text);
+      await onSend(text, attachments);
       updateValue("");
+      setAttachments([]);
     } finally {
       setSending(false);
     }
@@ -157,6 +182,8 @@ export function Composer({
     <form
       data-assistant-composer
       onSubmit={onSubmit}
+      onDragOver={(event) => event.preventDefault()}
+      onDrop={(event) => { event.preventDefault(); void addFiles(Array.from(event.dataTransfer.files)); }}
       className="shrink-0 border-t bg-background/90 p-2 backdrop-blur sm:p-3"
     >
       <div className="mx-auto max-w-3xl rounded-xl border border-border/80 bg-input-bg/70 p-2 shadow-sm focus-within:border-primary/50 focus-within:ring-2 focus-within:ring-ring/15 xl:max-w-5xl 2xl:max-w-6xl">
@@ -219,11 +246,27 @@ export function Composer({
             </p>
           </div>
         ) : null}
+        {attachments.length > 0 ? (
+          <div className="mb-2 flex flex-wrap gap-2" aria-label="待发送图片">
+            {attachments.map((item, index) => (
+              <div key={`${item.name || "image"}-${index}`} className="group relative h-16 w-16 overflow-hidden rounded-md border border-border bg-muted">
+                <img src={item.data_url || item.url || ""} alt={item.name || `图片 ${index + 1}`} className="h-full w-full object-cover" />
+                <button type="button" className="absolute right-0.5 top-0.5 rounded-full bg-background/85 p-0.5 opacity-0 transition-opacity group-hover:opacity-100" onClick={() => setAttachments((current) => current.filter((_, i) => i !== index))} aria-label="移除图片">
+                  <X className="h-3 w-3" />
+                </button>
+              </div>
+            ))}
+          </div>
+        ) : null}
         <Textarea
           ref={textareaRef}
           value={value}
           onChange={(e) => updateValue(e.target.value)}
           onKeyDown={onKeyDown}
+          onPaste={(event) => {
+            const files = Array.from(event.clipboardData.items).map((item) => item.kind === "file" ? item.getAsFile() : null).filter((file): file is File => Boolean(file));
+            if (files.length) { event.preventDefault(); void addFiles(files); }
+          }}
           onCompositionStart={() => {
             composingRef.current = true;
             suppressNextEnterRef.current = false;
@@ -243,6 +286,10 @@ export function Composer({
           className="min-h-[4.5rem] resize-none border-0 bg-transparent px-1 py-1 shadow-none focus-visible:border-transparent focus-visible:ring-0"
         />
         <div className="mt-1 flex min-w-0 flex-nowrap items-end justify-end gap-1 border-t border-border/40 pt-2 sm:gap-1.5">
+          <input ref={fileInputRef} type="file" accept="image/jpeg,image/png,image/webp,image/gif" multiple className="hidden" onChange={(event) => { void addFiles(Array.from(event.target.files || [])); event.currentTarget.value = ""; }} />
+          <Button type="button" variant="ghost" size="icon" className="mr-1 h-8 w-8 shrink-0" onClick={() => fileInputRef.current?.click()} disabled={disabled || sending} title="添加图片">
+            <ImagePlus className="h-4 w-4" /><span className="sr-only">添加图片</span>
+          </Button>
           {onOpenSessions ? (
             <Button
               type="button"
@@ -290,7 +337,7 @@ export function Composer({
               <Button
                 type="submit"
                 size="sm"
-                disabled={disabled || sending || !value.trim()}
+                disabled={disabled || sending || (!value.trim() && attachments.length === 0)}
                 className="h-9 shrink-0 gap-1.5 px-2.5 text-xs sm:px-3"
                 title={selectedAction.description}
               >
@@ -320,7 +367,7 @@ export function Composer({
             <Button
               type="submit"
               size="icon"
-              disabled={disabled || sending || !value.trim()}
+              disabled={disabled || sending || (!value.trim() && attachments.length === 0)}
               className="h-9 w-9 shrink-0 rounded-full"
               title="发送消息"
             >

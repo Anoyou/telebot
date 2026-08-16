@@ -15469,6 +15469,78 @@
         "title": "SystemAgentConfigPatch",
         "type": "object"
       },
+      "SystemAgentImageAttachment": {
+        "description": "Agent 输入/输出使用的受控图片附件。",
+        "properties": {
+          "data_url": {
+            "anyOf": [
+              {
+                "maxLength": 8500000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Data Url"
+          },
+          "kind": {
+            "const": "image",
+            "default": "image",
+            "title": "Kind",
+            "type": "string"
+          },
+          "mime_type": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mime Type"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "source": {
+            "enum": [
+              "data_url",
+              "remote_url"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "maxLength": 2048,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          }
+        },
+        "required": [
+          "source"
+        ],
+        "title": "SystemAgentImageAttachment",
+        "type": "object"
+      },
       "SystemAgentMessageCreate": {
         "properties": {
           "account_id": {
@@ -15482,9 +15554,17 @@
             ],
             "title": "Account Id"
           },
+          "attachments": {
+            "items": {
+              "$ref": "#/components/schemas/SystemAgentImageAttachment"
+            },
+            "maxItems": 4,
+            "title": "Attachments",
+            "type": "array"
+          },
           "content": {
+            "default": "",
             "maxLength": 32000,
-            "minLength": 1,
             "title": "Content",
             "type": "string"
           },
@@ -15499,9 +15579,6 @@
             ]
           }
         },
-        "required": [
-          "content"
-        ],
         "title": "SystemAgentMessageCreate",
         "type": "object"
       },
@@ -15897,6 +15974,14 @@
             "title": "Assistant Message Id",
             "type": "integer"
           },
+          "attachments": {
+            "items": {
+              "$ref": "#/components/schemas/SystemAgentImageAttachment"
+            },
+            "maxItems": 4,
+            "title": "Attachments",
+            "type": "array"
+          },
           "client_request_id": {
             "maxLength": 64,
             "minLength": 8,
@@ -16015,6 +16100,14 @@
             ],
             "title": "Account Id"
           },
+          "attachments": {
+            "items": {
+              "$ref": "#/components/schemas/SystemAgentImageAttachment"
+            },
+            "maxItems": 4,
+            "title": "Attachments",
+            "type": "array"
+          },
           "client_request_id": {
             "maxLength": 64,
             "minLength": 8,
@@ -16022,8 +16115,8 @@
             "type": "string"
           },
           "content": {
+            "default": "",
             "maxLength": 32000,
-            "minLength": 1,
             "title": "Content",
             "type": "string"
           },
@@ -16039,7 +16132,6 @@
           }
         },
         "required": [
-          "content",
           "client_request_id"
         ],
         "title": "SystemAgentRunCreate",
@@ -16100,6 +16192,14 @@
             },
             "maxItems": 64,
             "title": "Approved Tools",
+            "type": "array"
+          },
+          "attachments": {
+            "items": {
+              "$ref": "#/components/schemas/SystemAgentImageAttachment"
+            },
+            "maxItems": 4,
+            "title": "Attachments",
             "type": "array"
           },
           "client_request_id": {
@@ -16619,6 +16719,14 @@
       },
       "SystemAgentStopReplaceCreate": {
         "properties": {
+          "attachments": {
+            "items": {
+              "$ref": "#/components/schemas/SystemAgentImageAttachment"
+            },
+            "maxItems": 4,
+            "title": "Attachments",
+            "type": "array"
+          },
           "client_request_id": {
             "maxLength": 64,
             "minLength": 8,
@@ -16626,8 +16734,8 @@
             "type": "string"
           },
           "content": {
+            "default": "",
             "maxLength": 32000,
-            "minLength": 1,
             "title": "Content",
             "type": "string"
           },
@@ -16643,8 +16751,7 @@
           }
         },
         "required": [
-          "client_request_id",
-          "content"
+          "client_request_id"
         ],
         "title": "SystemAgentStopReplaceCreate",
         "type": "object"
@@ -18428,7 +18535,7 @@
   },
   "info": {
     "title": "TelePilot",
-    "version": "0.98.0-beta.1"
+    "version": "0.99.0-beta.1"
   },
   "openapi": "3.1.0",
   "paths": {

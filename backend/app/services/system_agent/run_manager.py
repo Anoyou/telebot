@@ -82,6 +82,7 @@ class _RunRequest:
     role: str
     text: str
     kind: str
+    attachments: tuple[dict[str, Any], ...] = ()
     retry_message_id: int | None = None
     regenerate_message_id: int | None = None
     regenerate_assistant_message_id: int | None = None
@@ -538,6 +539,7 @@ class SystemAgentRunManager:
         web_user_id: int | None,
         client_request_id: str,
         text: str,
+        attachments: list[dict[str, Any]] | None = None,
         account_id: int | None = None,
         bot_tg_user_id: int | None = None,
         channel: str = CHANNEL_WEB,
@@ -572,7 +574,8 @@ class SystemAgentRunManager:
             else AGENT_RUN_KIND_MESSAGE
         )
         clean_text = str(text or "").strip()
-        if kind == AGENT_RUN_KIND_MESSAGE and not clean_text:
+        clean_attachments = tuple(dict(item) for item in (attachments or []) if isinstance(item, dict))
+        if kind == AGENT_RUN_KIND_MESSAGE and not clean_text and not clean_attachments:
             raise RunConflictError("助手消息不能为空")
         normalized_role = str(role or "viewer").strip().lower() or "viewer"
         approved = tuple(str(item) for item in (approved_tools or []) if str(item))
@@ -580,6 +583,7 @@ class SystemAgentRunManager:
         request_hash = _request_hash(
             kind=kind,
             text=clean_text,
+            attachments=clean_attachments,
             channel=channel,
             role=normalized_role,
             account_id=account_id,
@@ -736,6 +740,7 @@ class SystemAgentRunManager:
                     "model_selection": selection,
                     "read_only_only": bool(read_only_only),
                     "role": normalized_role,
+                    "attachments": list(clean_attachments),
                 },
                 dispatch_run_id=run_id,
             )
@@ -917,6 +922,11 @@ class SystemAgentRunManager:
                 request_hash = _request_hash(
                     kind=row.kind,
                     text=text,
+                    attachments=tuple(
+                        item
+                        for item in payload.get("attachments", [])
+                        if isinstance(item, dict)
+                    ),
                     channel=row.channel,
                     role=str(payload.get("role") or "viewer"),
                     account_id=row.account_id,
@@ -1319,8 +1329,13 @@ class SystemAgentRunManager:
             raise RunConflictError("不支持的运行输入类型")
         payload = dict(payload or {})
         content = str(payload.get("content") or "").strip()
-        if kind == RUN_INPUT_STEER and not content:
-            raise RunConflictError("Steer 内容不能为空")
+        attachments = [
+            dict(item)
+            for item in payload.get("attachments", [])
+            if isinstance(item, dict)
+        ][:4]
+        if kind == RUN_INPUT_STEER and not content and not attachments:
+            raise RunConflictError("Steer 内容不能为空；请提供调整说明或图片")
         if kind == RUN_INPUT_USER and not content and payload.get("fallback_provider_id") is None:
             raise RunConflictError("请提供补充说明或备用模型供应商")
         if kind == RUN_INPUT_APPROVAL:
@@ -1336,6 +1351,8 @@ class SystemAgentRunManager:
             payload["approved_tools"] = approved_tools
         if "content" in payload:
             payload["content"] = content
+        if attachments:
+            payload["attachments"] = attachments
         canonical_payload = json.dumps(
             payload,
             ensure_ascii=False,
@@ -1439,13 +1456,17 @@ class SystemAgentRunManager:
         web_user_id: int,
         client_request_id: str,
         text: str,
+        attachments: list[dict[str, Any]] | None = None,
         model_selection: dict[str, Any] | None = None,
     ) -> SystemAgentRun:
         """原子地请求停止当前 Run，并将替代消息插到同会话队首。"""
 
         await self.ensure_ready()
         clean_text = str(text or "").strip()
-        if not clean_text:
+        clean_attachments = tuple(
+            dict(item) for item in (attachments or []) if isinstance(item, dict)
+        )
+        if not clean_text and not clean_attachments:
             raise RunConflictError("替代消息不能为空")
         selection = dict(model_selection) if isinstance(model_selection, dict) else None
         replacement_id = str(uuid.uuid4())
@@ -1481,6 +1502,7 @@ class SystemAgentRunManager:
             request_hash = _request_hash(
                 kind=AGENT_RUN_KIND_MESSAGE,
                 text=clean_text,
+                attachments=clean_attachments,
                 channel=current.channel,
                 role="admin",
                 account_id=None,
@@ -1569,6 +1591,7 @@ class SystemAgentRunManager:
                         "model_selection": selection,
                         "read_only_only": False,
                         "role": "admin",
+                        "attachments": list(clean_attachments),
                     },
                     dispatch_run_id=replacement_id,
                 )
@@ -1883,6 +1906,7 @@ class SystemAgentRunManager:
                     db,
                     session=session,
                     text=request.text,
+                    attachments=request.attachments,
                     role=request.role,
                     channel=request.channel,
                     web_user_id=request.web_user_id,
@@ -2147,8 +2171,8 @@ class SystemAgentRunManager:
             if not next_task.done():
                 next_task.cancel()
 
-    async def _consume_steers(self, run_id: str) -> list[str]:
-        values: list[str] = []
+    async def _consume_steers(self, run_id: str) -> list[str | dict[str, Any]]:
+        values: list[str | dict[str, Any]] = []
         async with self._session_factory() as db:
             snapshot = await db.get(SystemAgentRun, run_id)
             if snapshot is None or snapshot.pending_turn_id is None:
@@ -2200,19 +2224,45 @@ class SystemAgentRunManager:
                 except (ValueError, json.JSONDecodeError):
                     payload = {}
                 text = str(payload.get("content") or "").strip()
-                if text:
+                attachments = [
+                    dict(item)
+                    for item in payload.get("attachments", [])
+                    if isinstance(item, dict)
+                ][:4]
+                if attachments:
+                    values.append({"content": text, "attachments": attachments})
+                elif text:
                     values.append(text)
                 row.status = RUN_INPUT_APPLIED
                 row.applied_at = now
             if rows:
                 if values:
                     original = decrypt_str(pending.content_enc)
-                    steer_context = "\n\n".join(
-                        f"运行中调整：{value}" for value in values
-                    )
+                    summaries: list[str] = []
+                    for value in values:
+                        if isinstance(value, str):
+                            summary = value
+                        else:
+                            summary = str(value.get("content") or "").strip()
+                            if not summary:
+                                summary = f"[图片 {len(value.get('attachments') or [])} 张]"
+                        summaries.append(f"运行中调整：{summary}")
+                    steer_context = "\n\n".join(summaries)
                     pending.content_enc = encrypt_str(
                         f"{original}\n\n{steer_context}" if original else steer_context
                     )
+                    pending_payload = dict(pending.request_payload or {})
+                    existing_attachments = [
+                        dict(item)
+                        for item in pending_payload.get("attachments", [])
+                        if isinstance(item, dict)
+                    ]
+                    for value in values:
+                        if isinstance(value, dict):
+                            existing_attachments.extend(value.get("attachments") or [])
+                    if existing_attachments:
+                        pending_payload["attachments"] = existing_attachments
+                        pending.request_payload = pending_payload
                     pending.updated_at = now
                 await db.commit()
         return values
@@ -2661,6 +2711,11 @@ def _request_from_pending(pending: SystemAgentPendingTurn) -> _RunRequest:
         role=str(payload.get("role") or "viewer"),
         text=text,
         kind=pending.kind,
+        attachments=tuple(
+            item
+            for item in payload.get("attachments", [])
+            if isinstance(item, dict)
+        ),
         retry_message_id=_optional_int(payload.get("retry_message_id")),
         regenerate_message_id=_optional_int(payload.get("regenerate_message_id")),
         regenerate_assistant_message_id=_optional_int(
@@ -2737,6 +2792,7 @@ def _request_hash(
     *,
     kind: str,
     text: str,
+    attachments: tuple[dict[str, Any], ...],
     channel: str,
     role: str,
     account_id: int | None = None,
@@ -2754,6 +2810,7 @@ def _request_hash(
         {
             "kind": kind,
             "text": text,
+            "attachments": list(attachments),
             "channel": channel,
             "role": role,
             "account_id": account_id,

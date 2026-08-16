@@ -19,15 +19,13 @@ const OPTIONS: Array<{
   identity?: AgentClientIdentity;
 }> = [
   { value: "provider", label: "跟随 Provider", executionBackend: "provider" },
-  { value: "direct:auto", label: "标准 API 直连", executionBackend: "direct", identity: "auto" },
-  { value: "direct:minimal", label: "最小请求", executionBackend: "direct", identity: "minimal" },
-  { value: "direct:openai_sdk", label: "OpenAI SDK", executionBackend: "direct", identity: "openai_sdk" },
+  { value: "direct:auto", label: "标准 API（自动身份）", executionBackend: "direct", identity: "auto" },
   { value: "direct:codex_tui", label: "Codex TUI（基础身份）", executionBackend: "direct", identity: "codex_tui" },
   { value: "direct:codex_desktop", label: "Codex Desktop（基础身份）", executionBackend: "direct", identity: "codex_desktop" },
   { value: "direct:claude_code", label: "Claude Code", executionBackend: "direct", identity: "claude_code" },
   { value: "direct:claude_desktop", label: "Claude Desktop", executionBackend: "direct", identity: "claude_desktop" },
   { value: "direct:grok_cli", label: "Grok CLI", executionBackend: "direct", identity: "grok_cli" },
-  { value: "codex_gateway", label: "Codex 客户端兼容模式", executionBackend: "codex_gateway" },
+  { value: "codex_gateway", label: "Codex Gateway", executionBackend: "codex_gateway" },
 ];
 
 export function ClientPicker({
@@ -53,8 +51,8 @@ export function ClientPicker({
         className="pointer-events-none absolute left-2 top-1/2 z-10 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground"
       />
       <Select
-        aria-label="本轮调用客户端"
-        title="选择本会话下一轮请求使用的调用客户端"
+        aria-label="本轮调用路径"
+        title="选择本会话下一轮请求使用的调用路径；客户端身份覆盖请在 Provider 配置中设置"
         value={selected}
         disabled={disabled}
         className="h-8 w-[6.75rem] min-w-0 truncate pl-7 pr-5 text-xs sm:w-[9.5rem]"

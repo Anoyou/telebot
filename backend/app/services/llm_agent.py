@@ -12,6 +12,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from .llm_protocol import (
+    ImageContent,
     MessageRole,
     ModelMessage,
     ModelRequest,
@@ -70,6 +71,7 @@ class AgentResult:
     tool_calls: int
     stop_reason: StopReason
     reasoning_content: str | None = None
+    images: tuple[ImageContent, ...] = ()
     execution_backend: str = "direct"
     gateway_version: str | None = None
     gateway_request_id: str | None = None
@@ -334,7 +336,7 @@ async def run_agent(
                     await _notify(callbacks.on_text_reset)
                     continue
         if not response.tool_calls:
-            if not response.text:
+            if not response.text and not response.images:
                 raise RuntimeError("模型既未返回文本，也未调用工具")
             if (
                 request.metadata.get("repair_text_tool_protocol") is True
@@ -380,6 +382,7 @@ async def run_agent(
                 tool_calls=tool_call_count,
                 stop_reason=response.stop_reason,
                 reasoning_content="\n\n".join(reasoning_parts) or None,
+                images=response.images,
                 execution_backend=response.execution_backend,
                 gateway_version=response.gateway_version,
                 gateway_request_id=response.gateway_request_id,
@@ -456,7 +459,7 @@ async def run_agent(
     _apply_limit_budget(final_response.usage)
     if final_response.tool_calls:
         raise AgentLimitError("Agent 最终总结轮仍尝试调用工具")
-    if not final_response.text:
+    if not final_response.text and not final_response.images:
         raise RuntimeError("Agent 最终总结轮未返回文本")
     if (
         request.metadata.get("repair_text_tool_protocol") is True
@@ -473,6 +476,7 @@ async def run_agent(
         tool_calls=tool_call_count,
         stop_reason=final_response.stop_reason,
         reasoning_content="\n\n".join(reasoning_parts) or None,
+        images=final_response.images,
         execution_backend=final_response.execution_backend,
         gateway_version=final_response.gateway_version,
         gateway_request_id=final_response.gateway_request_id,

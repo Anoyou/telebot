@@ -880,6 +880,46 @@ def _openai_message_visible_text(message: Mapping[str, Any] | dict[str, Any]) ->
     return _openai_message_reasoning_text(message)
 
 
+def _image_contents_from_blocks(value: Any) -> tuple[ImageContent, ...]:
+    """只从明确的图片块提取媒体；普通字符串永远不当作图片。"""
+    images: list[ImageContent] = []
+    items = value if isinstance(value, list) else [value]
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        item_type = str(item.get("type") or "").lower()
+        image_value: Any = None
+        if item_type in {"image_url", "image", "output_image", "input_image", "image_generation"}:
+            image_value = item.get("image_url") or item.get("url")
+            if isinstance(image_value, dict):
+                image_value = image_value.get("url")
+        source = item.get("source")
+        if isinstance(source, dict) and str(source.get("type") or "") == "url":
+            source_url = source.get("url")
+            if isinstance(source_url, str) and source_url.strip().lower().startswith(("http://", "https://")):
+                images.append(ImageContent(url=source_url.strip()))
+                continue
+        if isinstance(source, dict) and str(source.get("type") or "") == "base64":
+            raw = source.get("data")
+            mime = str(source.get("media_type") or "").lower()
+            if isinstance(raw, str) and mime.startswith("image/"):
+                try:
+                    decoded = base64.b64decode(raw, validate=True)
+                except (ValueError, base64.binascii.Error):
+                    decoded = b""
+                if decoded:
+                    images.append(ImageContent(data=decoded, mime_type=mime))
+                    continue
+        if isinstance(image_value, str):
+            image_value = image_value.strip()
+            image = _image_from_data_url(image_value)
+            if image is not None:
+                images.append(image)
+            elif image_value.lower().startswith(("http://", "https://")):
+                images.append(ImageContent(url=image_value))
+    return tuple(images)
+
+
 def _request_thinking_mode(request: ModelRequest) -> str | None:
     """Optional DeepSeek-style thinking switch from request metadata.
 
@@ -951,9 +991,10 @@ def _openai_structured_response(
         raise LLMError(f"OpenAI 返回结束状态异常: {str(finish_reason)[:200]}")
     reasoning = _openai_message_reasoning_text(message) or None
     visible = _openai_message_visible_text(message)
+    image_blocks = _image_contents_from_blocks(message.get("content"))
     return ModelResponse(
         model=str(data.get("model") or request.model),
-        content=(TextContent(visible),) if visible else (),
+        content=((TextContent(visible),) if visible else ()) + image_blocks,
         tool_calls=tool_calls,
         usage=usage_from_chat(usage),
         stop_reason=(
@@ -1029,6 +1070,7 @@ def _anthropic_structured_response(
     """Normalize an Anthropic Messages payload for both JSON and SSE terminals."""
 
     content: list[TextContent] = []
+    image_blocks: list[ImageContent] = []
     tool_calls: list[ToolCall] = []
     thinking_parts: list[str] = []
     for item in data.get("content") or []:
@@ -1037,6 +1079,8 @@ def _anthropic_structured_response(
         if item.get("type") == "text" and isinstance(item.get("text"), str):
             if item["text"]:
                 content.append(TextContent(item["text"]))
+        elif item.get("type") == "image":
+            image_blocks.extend(_image_contents_from_blocks([item]))
         elif item.get("type") == "thinking":
             thinking = item.get("thinking")
             if isinstance(thinking, str) and thinking.strip():
@@ -1067,7 +1111,7 @@ def _anthropic_structured_response(
         raise LLMError(f"Anthropic 返回结束状态异常: {str(stop_reason)[:200]}")
     return ModelResponse(
         model=str(data.get("model") or request.model),
-        content=tuple(content),
+        content=tuple(content) + tuple(image_blocks),
         tool_calls=tuple(tool_calls),
         usage=usage_from_anthropic(usage),
         stop_reason=(StopReason.TOOL_CALLS if tool_calls else normalized_stop_reason),
@@ -1214,6 +1258,7 @@ def _responses_structured_response(
             )
         )
     text_parts: list[str] = []
+    image_blocks: list[ImageContent] = []
     reasoning_parts: list[str] = []
     tool_calls: list[ToolCall] = []
     has_refusal = False
@@ -1240,6 +1285,9 @@ def _responses_structured_response(
             if not isinstance(content, dict):
                 continue
             content_type = str(content.get("type") or "")
+            if content_type in {"image", "output_image", "image_url"}:
+                image_blocks.extend(_image_contents_from_blocks([content]))
+                continue
             if content_type == "refusal" and content.get("refusal"):
                 has_refusal = True
             if content_type in {"output_text", "text"} and isinstance(content.get("text"), str):
@@ -1262,9 +1310,10 @@ def _responses_structured_response(
     if not isinstance(usage, dict):
         usage = {}
     provider_reason = incomplete_reason or status
+    image_blocks.extend(_image_contents_from_response(data))
     return ModelResponse(
         model=str(data.get("model") or request.model),
-        content=(TextContent("".join(text_parts)),) if text_parts else (),
+        content=((TextContent("".join(text_parts)),) if text_parts else ()) + _dedupe_image_contents(image_blocks),
         tool_calls=tuple(tool_calls),
         usage=usage_from_responses(usage),
         stop_reason=(
@@ -1381,6 +1430,31 @@ def _extract_response_image_outputs(data: Any) -> tuple[list[str], list[str], st
         return out
 
     return unique(image_data), unique(image_urls), "".join(text_parts).strip()
+
+
+def _image_contents_from_response(data: Any) -> tuple[ImageContent, ...]:
+    image_data, image_urls, _ = _extract_response_image_outputs(data)
+    out: list[ImageContent] = []
+    for value in image_data:
+        image = _image_from_data_url(value)
+        if image is not None:
+            out.append(image)
+    for value in image_urls:
+        if isinstance(value, str) and value.lower().startswith(("http://", "https://")):
+            out.append(ImageContent(url=value))
+    return tuple(out)
+
+
+def _dedupe_image_contents(images: list[ImageContent] | tuple[ImageContent, ...]) -> tuple[ImageContent, ...]:
+    seen: set[tuple[str, str, str]] = set()
+    out: list[ImageContent] = []
+    for image in images:
+        key = (image.url or "", image.mime_type or "", base64.b64encode(image.data or b"").decode("ascii") if image.data is not None else "")
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(image)
+    return tuple(out)
 
 
 def _extract_response_sources(data: Any) -> list[dict[str, str]]:

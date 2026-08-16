@@ -9,6 +9,7 @@ from app.services.llm_agent import AgentResult
 from app.services.llm_client import LLMError
 from app.services.llm_dto import LLMProviderDTO
 from app.services.llm_protocol import (
+    ImageContent,
     ModelResponse,
     ModelStreamEvent,
     ModelUsage,
@@ -789,6 +790,7 @@ async def test_runtime_redacts_secret_added_by_steer_from_all_events(monkeypatch
         steering = await callbacks.on_safe_boundary()
         assert len(steering) == 1
         assert secret in steering[0].text_content()
+        assert any(isinstance(item, ImageContent) for item in steering[0].content)
         await callbacks.on_tool_start(
             ToolCall(
                 id="call-steer-secret",
@@ -820,10 +822,21 @@ async def test_runtime_redacts_secret_added_by_steer_from_all_events(monkeypatch
             stop_reason=StopReason.COMPLETED,
         )
 
-    async def provide_steer() -> list[str]:
+    async def provide_steer() -> list[str | dict]:
         nonlocal provider_calls
         provider_calls += 1
-        return [f"改用备用配置，token={secret}"] if provider_calls == 1 else []
+        return [
+            {
+                "content": f"改用备用配置，token={secret}",
+                "attachments": [
+                    {
+                        "kind": "image",
+                        "source": "data_url",
+                        "data_url": "data:image/png;base64,iVBORw0KGgo=",
+                    }
+                ],
+            }
+        ] if provider_calls == 1 else []
 
     monkeypatch.setattr(runtime_module, "run_agent", run)
     events = [

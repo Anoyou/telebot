@@ -36,6 +36,10 @@ from .config import (
     resolve_agent_providers,
     save_config,
 )
+from .media import (
+    image_urls_from_text,
+    materialize_attachments,
+)
 from .memory import clear_session_memory, should_compress_summary, update_session_memory
 from .memory_compress import schedule_summary_compression
 from .prompts import session_title_from_message
@@ -510,6 +514,7 @@ class SystemAgentService:
         *,
         session: SystemAgentSession,
         text: str,
+        attachments: tuple[dict[str, Any], ...] | list[dict[str, Any]] | None = None,
         role: str,
         channel: str,
         web_user_id: int | None = None,
@@ -520,7 +525,7 @@ class SystemAgentService:
         fallback_provider_id: int | None = None,
         approved_tools: list[str] | None = None,
         run_id: str | None = None,
-        run_input_provider: Callable[[], Awaitable[list[str]]] | None = None,
+        run_input_provider: Callable[[], Awaitable[list[str | dict[str, Any]]]] | None = None,
         model_selection: dict[str, Any] | None = None,
         read_only_only: bool = False,
     ) -> AsyncIterator[dict[str, Any]]:
@@ -572,7 +577,29 @@ class SystemAgentService:
             )
         else:
             raw_text = incoming_text
-        if not raw_text:
+        raw_attachments: list[dict[str, Any]] = [
+            dict(item) for item in (attachments or []) if isinstance(item, dict)
+        ]
+        if regenerating or retry_message is not None:
+            source_content = content if isinstance(content, dict) else {}
+            if not raw_attachments and isinstance(source_content.get("attachments"), list):
+                raw_attachments = [
+                    dict(item) for item in source_content["attachments"] if isinstance(item, dict)
+                ]
+        for url in image_urls_from_text(raw_text):
+            if not any(str(item.get("url") or "") == url for item in raw_attachments):
+                raw_attachments.append({"kind": "image", "source": "remote_url", "url": url})
+        try:
+            normalized_attachments, user_images = await materialize_attachments(raw_attachments)
+        except ValueError as exc:
+            yield {
+                "type": "error",
+                "code": "INVALID_IMAGE_ATTACHMENT",
+                "message": str(exc),
+                "session_id": session.id,
+            }
+            return
+        if not raw_text and not normalized_attachments:
             yield {
                 "type": "error",
                 "code": "EMPTY_MESSAGE",
@@ -617,12 +644,16 @@ class SystemAgentService:
             if incoming_text:
                 user_msg.content = {
                     "text": persisted_user_text,
+                    **({"attachments": normalized_attachments} if normalized_attachments else {}),
                 }
         elif retry_message is None:
             user_msg = SystemAgentMessage(
                 session_id=session.id,
                 role=MESSAGE_ROLE_USER,
-                content={"text": persisted_user_text},
+                content={
+                    "text": persisted_user_text,
+                    **({"attachments": normalized_attachments} if normalized_attachments else {}),
+                },
                 usage={"run_started_at": run_started_at},
                 run_status=MESSAGE_RUN_PENDING,
             )
@@ -632,6 +663,7 @@ class SystemAgentService:
             if explicit_retry_message and incoming_text:
                 user_msg.content = {
                     "text": persisted_user_text,
+                    **({"attachments": normalized_attachments} if normalized_attachments else {}),
                 }
             previous_usage = user_msg.usage if isinstance(user_msg.usage, dict) else {}
             previous_approved = previous_usage.get("approved_tools")
@@ -702,6 +734,7 @@ class SystemAgentService:
 
         assistant_text = ""
         assistant_reasoning = ""
+        assistant_images: list[dict[str, Any]] = []
         usage: dict[str, Any] | None = None
         tool_events: list[dict[str, Any]] = []
         memory_tool_events: list[dict[str, Any]] = []
@@ -724,6 +757,7 @@ class SystemAgentService:
                 web_user_id=web_user_id,
                 bot_tg_user_id=bot_tg_user_id,
                 history_messages=history_for_model,
+                user_images=user_images,
                 chat_secrets=chat_secrets,
                 fallback_provider_id=fallback_provider_id,
                 approved_tools=approved_tools,
@@ -742,6 +776,9 @@ class SystemAgentService:
                         chat_secrets,
                     )
                     event["reasoning"] = assistant_reasoning
+                    assistant_images = [
+                        dict(item) for item in (event.get("images") or []) if isinstance(item, dict)
+                    ]
                     usage = event.get("usage") if isinstance(event.get("usage"), dict) else None
                     if usage is not None and usage.get("stream_fallback"):
                         event["stream_fallback"] = True
@@ -833,7 +870,7 @@ class SystemAgentService:
             # 失败轮次不持久化助手答案，也不应把未提交的最终答案发给客户端。
             buffered_events = [event for event in buffered_events if event.get("type") != "assistant_message"]
 
-        if assistant_text and done_ok:
+        if (assistant_text or assistant_images) and done_ok:
             usage_payload = dict(usage or {})
             # 关联 Durable Run + 耗时（零迁移，写进既有 usage JSON）
             if run_id:
@@ -863,6 +900,7 @@ class SystemAgentService:
             assistant_content = {
                 "text": redact_known_secrets(assistant_text, chat_secrets),
                 **({"reasoning": assistant_reasoning} if assistant_reasoning else {}),
+                **({"images": assistant_images} if assistant_images else {}),
             }
             if regenerating:
                 assert regenerate_assistant_message is not None
@@ -911,13 +949,14 @@ class SystemAgentService:
                         "call_id": tev.get("call_id"),
                         "is_error": tev.get("is_error"),
                         "result_summary": summary,
+                        **({"images": tev.get("images")} if tev.get("images") else {}),
                     },
                     run_status=MESSAGE_RUN_COMPLETED if done_ok else MESSAGE_RUN_FAILED,
                 ))
             memory_event = dict(tev)
             memory_event["result_summary"] = summary
             memory_tool_events.append(memory_event)
-        if assistant_text and done_ok:
+        if (assistant_text or assistant_images) and done_ok:
             user_msg.run_status = MESSAGE_RUN_SUCCEEDED
             user_msg.error_code = None
             user_msg.error_message = None

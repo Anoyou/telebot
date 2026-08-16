@@ -135,11 +135,32 @@ class SystemAgentModelSelection(BaseModel):
         return self
 
 
+class SystemAgentImageAttachment(BaseModel):
+    """Agent 输入/输出使用的受控图片附件。"""
+
+    kind: Literal["image"] = "image"
+    source: Literal["data_url", "remote_url"]
+    mime_type: str | None = Field(default=None, max_length=64)
+    url: str | None = Field(default=None, max_length=2048)
+    data_url: str | None = Field(default=None, max_length=8_500_000)
+    name: str | None = Field(default=None, max_length=128)
+
+    @model_validator(mode="after")
+    def _validate_source(self) -> SystemAgentImageAttachment:
+        if self.source == "data_url" and not self.data_url:
+            raise ValueError("data_url 图片附件缺少 data_url")
+        if self.source == "remote_url" and not self.url:
+            raise ValueError("remote_url 图片附件缺少 url")
+        if self.mime_type and not self.mime_type.lower().startswith("image/"):
+            raise ValueError("图片附件 mime_type 必须是 image/*")
+        return self
+
+
 class SystemAgentMessageCreate(BaseModel):
-    content: str = Field(min_length=1, max_length=32_000)
+    content: str = Field(default="", max_length=32_000)
     account_id: int | None = None
     model_selection: SystemAgentModelSelection | None = None
-
+    attachments: list[SystemAgentImageAttachment] = Field(default_factory=list, max_length=4)
 
 class SystemAgentMessageRetry(BaseModel):
     account_id: int | None = None
@@ -161,6 +182,7 @@ class SystemAgentRegenerateRunCreate(SystemAgentMessageRetry):
     client_request_id: str = Field(min_length=8, max_length=64)
     assistant_message_id: int = Field(ge=1)
     content: str | None = Field(default=None, min_length=1, max_length=32_000)
+    attachments: list[SystemAgentImageAttachment] = Field(default_factory=list, max_length=4)
 
 
 class SystemAgentQueueItemPatch(BaseModel):
@@ -195,6 +217,7 @@ class SystemAgentQueueMutationOut(BaseModel):
 class SystemAgentRunInputCreate(BaseModel):
     client_request_id: str = Field(min_length=8, max_length=64)
     content: str | None = Field(default=None, min_length=1, max_length=32_000)
+    attachments: list[SystemAgentImageAttachment] = Field(default_factory=list, max_length=4)
     fallback_provider_id: int | None = Field(default=None, ge=1)
     approved_tools: list[str] = Field(default_factory=list, max_length=64)
     approved: bool | None = None
@@ -214,9 +237,9 @@ class SystemAgentRunInputOut(BaseModel):
 
 class SystemAgentStopReplaceCreate(BaseModel):
     client_request_id: str = Field(min_length=8, max_length=64)
-    content: str = Field(min_length=1, max_length=32_000)
+    content: str = Field(default="", max_length=32_000)
+    attachments: list[SystemAgentImageAttachment] = Field(default_factory=list, max_length=4)
     model_selection: SystemAgentModelSelection | None = None
-
 
 class SystemAgentRunOut(BaseModel):
     id: str

@@ -11,7 +11,10 @@ export function stabilizeStreamingMarkdown(text: string): string {
 export function visibleConversationMessages(
   messages: SystemAgentMessage[],
 ): SystemAgentMessage[] {
-  return messages.filter((message) => message.role !== "tool");
+  return messages.filter((message) =>
+    message.role !== "tool" ||
+    (Array.isArray(message.content?.images) && message.content.images.length > 0),
+  );
 }
 
 /** 带消息 ID 的实时气泡原位覆盖历史项，其余实时状态继续追加显示。 */

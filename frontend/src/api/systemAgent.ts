@@ -88,6 +88,15 @@ export interface SystemAgentMessage {
   created_at: string | null;
 }
 
+export interface SystemAgentImageAttachment {
+  kind: "image";
+  source: "data_url" | "remote_url";
+  mime_type?: string | null;
+  url?: string | null;
+  data_url?: string | null;
+  name?: string | null;
+}
+
 export interface SystemAgentProviderSwitchCandidate {
   provider_id: number;
   provider_name: string;
@@ -166,6 +175,7 @@ export type SystemAgentStreamEvent = {
   call_id?: string;
   is_error?: boolean;
   result_summary?: unknown;
+  images?: SystemAgentImageAttachment[];
   arguments_summary?: unknown;
   usage?: Record<string, unknown>;
   ok?: boolean;
@@ -439,6 +449,7 @@ export async function startSystemAgentRun(
   sessionId: string,
   payload: {
     content: string;
+    attachments?: SystemAgentImageAttachment[];
     account_id?: number | null;
     client_request_id: string;
     model_selection?: SystemAgentModelSelection | null;
@@ -460,6 +471,7 @@ export async function startSystemAgentRetryRun(
     approved_tools?: string[];
     client_request_id: string;
     model_selection?: SystemAgentModelSelection | null;
+    attachments?: SystemAgentImageAttachment[];
   },
 ): Promise<SystemAgentRun> {
   const { data } = await api.post<SystemAgentRun>(
@@ -480,6 +492,7 @@ export async function startSystemAgentRegenerateRun(
     approved_tools?: string[];
     client_request_id: string;
     model_selection?: SystemAgentModelSelection | null;
+    attachments?: SystemAgentImageAttachment[];
   },
 ): Promise<SystemAgentRun> {
   const { data } = await api.post<SystemAgentRun>(
@@ -501,7 +514,11 @@ export async function cancelSystemAgentRun(runId: string): Promise<SystemAgentRu
 
 export async function steerSystemAgentRun(
   runId: string,
-  payload: { content: string; client_request_id: string },
+  payload: {
+    content?: string;
+    attachments?: SystemAgentImageAttachment[];
+    client_request_id: string;
+  },
 ): Promise<SystemAgentRunInput> {
   const { data } = await api.post<SystemAgentRunInput>(
     `/api/system-agent/runs/${runId}/steer`,
@@ -544,7 +561,8 @@ export async function approveSystemAgentRun(
 export async function stopAndReplaceSystemAgentRun(
   runId: string,
   payload: {
-    content: string;
+    content?: string;
+    attachments?: SystemAgentImageAttachment[];
     client_request_id: string;
     model_selection?: SystemAgentModelSelection | null;
   },

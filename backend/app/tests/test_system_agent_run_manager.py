@@ -888,13 +888,31 @@ async def test_pending_turn_and_run_inputs_are_encrypted_and_steer_is_consumed_o
         run.id,
         kind=RUN_INPUT_STEER,
         client_request_id="request-steer-once",
-        payload={"content": steer_text},
+        payload={
+            "content": steer_text,
+            "attachments": [
+                {
+                    "kind": "image",
+                    "source": "data_url",
+                    "data_url": "data:image/png;base64,iVBORw0KGgo=",
+                }
+            ],
+        },
     )
     duplicate = await manager.add_run_input(
         run.id,
         kind=RUN_INPUT_STEER,
         client_request_id="request-steer-once",
-        payload={"content": steer_text},
+        payload={
+            "content": steer_text,
+            "attachments": [
+                {
+                    "kind": "image",
+                    "source": "data_url",
+                    "data_url": "data:image/png;base64,iVBORw0KGgo=",
+                }
+            ],
+        },
     )
     assert duplicate.id == first_input.id
     with pytest.raises(RunConflictError, match="不能提交不同"):
@@ -912,11 +930,15 @@ async def test_pending_turn_and_run_inputs_are_encrypted_and_steer_is_consumed_o
         assert secret_text not in pending.content_enc
         assert steer_text not in stored_input.payload_enc
         assert decrypt_str(pending.content_enc) == secret_text
-        assert json.loads(decrypt_str(stored_input.payload_enc)) == {
-            "content": steer_text
-        }
+        stored_payload = json.loads(decrypt_str(stored_input.payload_enc))
+        assert stored_payload["content"] == steer_text
+        assert len(stored_payload["attachments"]) == 1
 
-    assert await manager._consume_steers(run.id) == [steer_text]
+    consumed = await manager._consume_steers(run.id)
+    assert len(consumed) == 1
+    assert isinstance(consumed[0], dict)
+    assert consumed[0]["content"] == steer_text
+    assert len(consumed[0]["attachments"]) == 1
     assert await manager._consume_steers(run.id) == []
     async with run_db() as db:
         pending = await db.get(SystemAgentPendingTurn, run.pending_turn_id)
@@ -926,6 +948,7 @@ async def test_pending_turn_and_run_inputs_are_encrypted_and_steer_is_consumed_o
         assert decrypt_str(pending.content_enc) == (
             f"{secret_text}\n\n运行中调整：{steer_text}"
         )
+        assert len(pending.request_payload["attachments"]) == 1
         assert stored_input.status == RUN_INPUT_APPLIED
         assert stored_input.applied_at is not None
 

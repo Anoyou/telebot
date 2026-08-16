@@ -236,6 +236,10 @@ class ModelResponse:
             block.text for block in self.content if isinstance(block, TextContent)
         ).strip()
 
+    @property
+    def images(self) -> tuple[ImageContent, ...]:
+        return tuple(block for block in self.content if isinstance(block, ImageContent))
+
 
 @dataclass(frozen=True)
 class ModelStreamEvent:

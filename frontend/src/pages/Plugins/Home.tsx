@@ -1035,12 +1035,12 @@ function FeatureZone({
                   />
                   {installByKey.has(f.key) ? (
                     <label
-                      className="absolute left-2 top-2.5 z-10 flex h-6 w-6 cursor-pointer items-center justify-center rounded border bg-background/90"
+                      className="absolute bottom-2 left-2 z-10 flex h-5 w-5 cursor-pointer items-center justify-center rounded-md border border-border/80 bg-card/95 shadow-sm sm:bottom-auto sm:top-2.5 sm:h-6 sm:w-6"
                       title="选择用于全局批量启停"
                     >
                       <input
                         type="checkbox"
-                        className="h-4 w-4 accent-primary"
+                        className="h-3.5 w-3.5 accent-primary sm:h-4 sm:w-4"
                         checked={selectedPluginKeys.has(f.key)}
                         onChange={() => onTogglePluginSelection(f.key)}
                         aria-label={`选择插件 ${f.display_name}`}
@@ -1058,7 +1058,7 @@ function FeatureZone({
                   </MetaBadge>
                   <div className="min-w-0">
                     <div className="flex min-w-0 flex-col gap-1.5 sm:flex-row sm:items-start sm:justify-between sm:gap-2">
-                      <div className={cn("min-w-0 pr-14 sm:pr-0", installByKey.has(f.key) && "pl-8")}>
+                      <div className={cn("min-w-0 pr-14 sm:pr-0", installByKey.has(f.key) && "sm:pl-8")}>
                         <div className="flex min-w-0 items-start gap-1">
                           <button
                             type="button"

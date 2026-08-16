@@ -68,6 +68,7 @@ from ..services.system_agent.actions import (
     web_owns_action,
 )
 from ..services.system_agent.executor import get_action_executor
+from ..services.system_agent.media import materialize_attachments
 from ..services.system_agent.registry import get_registry
 from ..services.system_agent.run_manager import (
     RunConflictError,
@@ -398,7 +399,7 @@ async def stream_message(
     if session is None:
         raise _err("SESSION_NOT_FOUND", "会话不存在", 404)
     content = payload.content.strip()
-    if not content:
+    if not content and not payload.attachments:
         raise _err("EMPTY_MESSAGE", "消息不能为空", 422)
 
     # 可选更新账号上下文
@@ -412,6 +413,7 @@ async def stream_message(
             web_user_id=user.id,
             client_request_id=str(uuid.uuid4()),
             text=content,
+            attachments=[item.model_dump(exclude_none=True) for item in payload.attachments],
             model_selection=(
                 payload.model_selection.model_dump() if payload.model_selection else None
             ),
@@ -616,7 +618,7 @@ async def start_system_agent_run(
     if session is None:
         raise _err("SESSION_NOT_FOUND", "会话不存在", 404)
     content = payload.content.strip()
-    if not content:
+    if not content and not payload.attachments:
         raise _err("EMPTY_MESSAGE", "消息不能为空", 422)
     if payload.account_id is not None and session.account_id != payload.account_id:
         await svc.update_session(db, session, account_id=payload.account_id)
@@ -627,6 +629,7 @@ async def start_system_agent_run(
             web_user_id=user.id,
             client_request_id=payload.client_request_id,
             text=content,
+            attachments=[item.model_dump(exclude_none=True) for item in payload.attachments],
             model_selection=(
                 payload.model_selection.model_dump() if payload.model_selection else None
             ),
@@ -725,6 +728,7 @@ async def start_system_agent_regenerate_run(
             web_user_id=user.id,
             client_request_id=payload.client_request_id,
             text=edited_content or "",
+            attachments=[item.model_dump(exclude_none=True) for item in payload.attachments],
             account_id=payload.account_id,
             regenerate_message_id=message.id,
             regenerate_assistant_message_id=assistant_message.id,
@@ -798,14 +802,23 @@ async def steer_system_agent_run(
 ) -> SystemAgentRunInputOut:
     await _owned_run(db, run_id, user.id)
     content = str(payload.content or "").strip()
-    if not content:
-        raise _err("EMPTY_STEER", "Steer 内容不能为空", 422)
+    if not content and not payload.attachments:
+        raise _err("EMPTY_STEER", "请提供调整说明或图片", 422)
+    try:
+        attachments, _ = await materialize_attachments(
+            [item.model_dump(exclude_none=True) for item in payload.attachments]
+        )
+    except ValueError as exc:
+        raise _err("INVALID_IMAGE_ATTACHMENT", str(exc), 422) from None
     try:
         row = await get_system_agent_run_manager().add_run_input(
             run_id,
             kind=RUN_INPUT_STEER,
             client_request_id=payload.client_request_id,
-            payload={"content": content},
+            payload={
+                "content": content,
+                **({"attachments": attachments} if attachments else {}),
+            },
         )
     except RunNotFoundError:
         raise _err("RUN_NOT_FOUND", "助手运行不存在", 404) from None
@@ -881,18 +894,22 @@ async def stop_and_replace_system_agent_run(
 ) -> SystemAgentRunOut:
     await _owned_run(db, run_id, user.id)
     content = payload.content.strip()
-    if not content:
+    if not content and not payload.attachments:
         raise _err("EMPTY_REPLACEMENT", "替代消息不能为空", 422)
     try:
-        row = await get_system_agent_run_manager().stop_and_replace(
-            run_id,
-            web_user_id=user.id,
-            client_request_id=payload.client_request_id,
-            text=content,
-            model_selection=(
+        kwargs: dict[str, Any] = {
+            "web_user_id": user.id,
+            "client_request_id": payload.client_request_id,
+            "text": content,
+            "model_selection": (
                 payload.model_selection.model_dump() if payload.model_selection else None
             ),
-        )
+        }
+        if payload.attachments:
+            kwargs["attachments"] = [
+                item.model_dump(exclude_none=True) for item in payload.attachments
+            ]
+        row = await get_system_agent_run_manager().stop_and_replace(run_id, **kwargs)
     except RunNotFoundError:
         raise _err("RUN_NOT_FOUND", "助手运行不存在", 404) from None
     except RunConflictError as exc:

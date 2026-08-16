@@ -809,6 +809,27 @@
     }
   }
 
+  /* 暗色主题使用安静的石墨层，不叠加白色高光，避免底栏出现反光感。 */
+  .dark .liquid-bottom-nav {
+    border-color: hsl(var(--border-strong) / 0.9);
+    background: hsl(var(--card) / 0.92);
+    box-shadow:
+      0 8px 22px hsl(0 0% 0% / 0.28),
+      inset 0 1px 0 hsl(var(--foreground) / 0.05),
+      inset 0 -1px 0 hsl(0 0% 0% / 0.16);
+  }
+
+  .dark .liquid-bottom-nav::before {
+    background: hsl(var(--card) / 0.92);
+    -webkit-backdrop-filter: blur(18px) saturate(1.05);
+    backdrop-filter: blur(18px) saturate(1.05);
+  }
+
+  .dark .liquid-bottom-nav::after {
+    background: none;
+    opacity: 0;
+  }
+
   .liquid-nav-item {
     border: 0;
     border-radius: 999px;

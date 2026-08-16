@@ -14,11 +14,13 @@ from app.services.llm_client import (
     OpenAIClient,
     ResponsesClient,
     _anthropic_messages,
+    _anthropic_structured_response,
     _chat_messages,
     _extract_tool_media,
     _openai_structured_response,
     _reasoning_transport_for_model,
     _responses_input,
+    _responses_structured_response,
 )
 from app.services.llm_protocol import (
     ImageContent,
@@ -334,6 +336,42 @@ def test_anthropic_tool_result_preserves_url_image_source() -> None:
         "type": "image",
         "source": {"type": "url", "url": "https://example.test/image.png"},
     }
+
+
+def test_structured_responses_preserve_native_image_outputs() -> None:
+    image_bytes = b"\x89PNG\r\n\x1a\n"
+    data_url = f"data:image/png;base64,{base64.b64encode(image_bytes).decode()}"
+
+    chat = _openai_structured_response(
+        {
+            "model": "vision",
+            "choices": [{"finish_reason": "stop", "message": {"content": [{"type": "image_url", "image_url": {"url": data_url}}]}}],
+        },
+        request=_request(),
+        tool_names={},
+    )
+    anthropic = _anthropic_structured_response(
+        {
+            "model": "vision",
+            "stop_reason": "end_turn",
+            "content": [{"type": "image", "source": {"type": "url", "url": "https://example.test/result.png"}}],
+        },
+        request=_request(),
+        tool_names={},
+    )
+    responses = _responses_structured_response(
+        {
+            "model": "vision",
+            "status": "completed",
+            "output": [{"type": "image_generation_call", "result": base64.b64encode(image_bytes).decode()}],
+        },
+        request=_request(),
+        tool_names={},
+    )
+
+    assert chat.images == (ImageContent(data=image_bytes, mime_type="image/png"),)
+    assert anthropic.images == (ImageContent(url="https://example.test/result.png"),)
+    assert responses.images == (ImageContent(data=image_bytes, mime_type="image/png"),)
 
 
 @pytest.mark.asyncio

@@ -9955,11 +9955,41 @@ export interface components {
             /** Session Token Limit */
             session_token_limit?: number | null;
         };
+        /**
+         * SystemAgentImageAttachment
+         * @description Agent 输入/输出使用的受控图片附件。
+         */
+        SystemAgentImageAttachment: {
+            /** Data Url */
+            data_url?: string | null;
+            /**
+             * Kind
+             * @default image
+             * @constant
+             */
+            kind: "image";
+            /** Mime Type */
+            mime_type?: string | null;
+            /** Name */
+            name?: string | null;
+            /**
+             * Source
+             * @enum {string}
+             */
+            source: "data_url" | "remote_url";
+            /** Url */
+            url?: string | null;
+        };
         /** SystemAgentMessageCreate */
         SystemAgentMessageCreate: {
             /** Account Id */
             account_id?: number | null;
-            /** Content */
+            /** Attachments */
+            attachments?: components["schemas"]["SystemAgentImageAttachment"][];
+            /**
+             * Content
+             * @default
+             */
             content: string;
             model_selection?: components["schemas"]["SystemAgentModelSelection"] | null;
         };
@@ -10086,6 +10116,8 @@ export interface components {
             approved_tools?: string[];
             /** Assistant Message Id */
             assistant_message_id: number;
+            /** Attachments */
+            attachments?: components["schemas"]["SystemAgentImageAttachment"][];
             /** Client Request Id */
             client_request_id: string;
             /** Content */
@@ -10110,9 +10142,14 @@ export interface components {
         SystemAgentRunCreate: {
             /** Account Id */
             account_id?: number | null;
+            /** Attachments */
+            attachments?: components["schemas"]["SystemAgentImageAttachment"][];
             /** Client Request Id */
             client_request_id: string;
-            /** Content */
+            /**
+             * Content
+             * @default
+             */
             content: string;
             model_selection?: components["schemas"]["SystemAgentModelSelection"] | null;
         };
@@ -10135,6 +10172,8 @@ export interface components {
             approved?: boolean | null;
             /** Approved Tools */
             approved_tools?: string[];
+            /** Attachments */
+            attachments?: components["schemas"]["SystemAgentImageAttachment"][];
             /** Client Request Id */
             client_request_id: string;
             /** Content */
@@ -10297,9 +10336,14 @@ export interface components {
         };
         /** SystemAgentStopReplaceCreate */
         SystemAgentStopReplaceCreate: {
+            /** Attachments */
+            attachments?: components["schemas"]["SystemAgentImageAttachment"][];
             /** Client Request Id */
             client_request_id: string;
-            /** Content */
+            /**
+             * Content
+             * @default
+             */
             content: string;
             model_selection?: components["schemas"]["SystemAgentModelSelection"] | null;
         };

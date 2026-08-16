@@ -71,9 +71,16 @@ export function loadSessionModelSelection(sessionId: string | null | undefined):
   const clientIdentityProfile = CLIENT_IDENTITIES.has(value.clientIdentityProfile)
     ? value.clientIdentityProfile
     : undefined;
+  // Agent 快速选择器不再暴露 minimal / openai_sdk。它们仍是 Provider
+  // 配置和后端兼容契约的一部分；旧会话恢复时统一回到标准 API 的自动身份，
+  // 避免已移除的选项在原生 select 中显示为空白。
+  const visibleClientIdentityProfile = clientIdentityProfile === "minimal"
+    || clientIdentityProfile === "openai_sdk"
+    ? "auto"
+    : clientIdentityProfile;
   const common = {
     executionBackend,
-    clientIdentityProfile,
+    clientIdentityProfile: visibleClientIdentityProfile,
   };
   if (value.mode === "pinned" && value.providerId > 0 && value.model) {
     return { mode: "pinned", providerId: value.providerId, model: value.model, ...common };

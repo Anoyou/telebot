@@ -36,6 +36,22 @@ test("历史工具结果不作为第二条聊天消息渲染", () => {
   );
 });
 
+test("带原生图片的工具结果保留为可见消息", () => {
+  const messages = [
+    { id: 1, role: "user", content: { text: "生成图片" } },
+    {
+      id: 2,
+      role: "tool",
+      content: { images: [{ kind: "image", source: "remote_url", url: "https://example.test/a.png" }] },
+    },
+  ] as never[];
+
+  assert.deepEqual(
+    visibleConversationMessages(messages).map((message) => message.id),
+    [1, 2],
+  );
+});
+
 test("流式 Markdown 未闭合围栏会补临时闭合", () => {
   const open = "前言\n```js\nconst x = 1\n";
   const closed = stabilizeStreamingMarkdown(open);

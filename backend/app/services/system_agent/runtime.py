@@ -27,7 +27,16 @@ from ..llm_agent import AgentCallbacks, AgentLimits, AgentTool, run_agent
 from ..llm_call_context import runtime_metadata as build_runtime_metadata
 from ..llm_dto import LLMProviderDTO
 from ..llm_invoke import invoke_structured, stream_structured
-from ..llm_protocol import MessageRole, ModelMessage, ModelRequest, ModelUsage, ToolCall, ToolResult
+from ..llm_protocol import (
+    ImageContent,
+    MessageRole,
+    ModelMessage,
+    ModelRequest,
+    ModelUsage,
+    TextContent,
+    ToolCall,
+    ToolResult,
+)
 from ..llm_protocol import ToolSpec as LlmToolSpec
 from ..llm_runtime import ProviderSwitchRequired, diagnostic_error_kwargs
 from .config import (
@@ -39,6 +48,7 @@ from .config import (
 )
 from .context import ToolContext
 from .events import make_event
+from .media import extract_image_contents, image_content_to_public, materialize_attachments
 from .memory import memory_context
 from .model_capability import verify_resolved_agent_providers
 from .prompts import build_system_prompt, provider_setup_hint
@@ -90,6 +100,7 @@ class SystemAgentRuntime:
         *,
         session: SystemAgentSession,
         user_text: str,
+        user_images: tuple[ImageContent, ...] | list[ImageContent] = (),
         role: str,
         channel: str,
         web_user_id: int | None = None,
@@ -102,7 +113,7 @@ class SystemAgentRuntime:
         model_selection: dict[str, Any] | None = None,
         read_only_only: bool = False,
         exclude_latest_session_memory: bool = False,
-        run_input_provider: Callable[[], Awaitable[list[str]]] | None = None,
+        run_input_provider: Callable[[], Awaitable[list[str | dict[str, Any]]]] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """执行一轮对话，逐条 yield NDJSON 事件。
 
@@ -549,6 +560,7 @@ class SystemAgentRuntime:
             token_budget=int(
                 cfg.get("session_token_limit") if cfg.get("session_token_limit") is not None else 16_384
             ),
+            user_images=tuple(user_images),
         )
         # pinned：同模型内重试照旧，耗尽后走确认链路，不静默换模型
         request = ModelRequest(
@@ -620,6 +632,10 @@ class SystemAgentRuntime:
         async def on_tool_finish(call: ToolCall, result: ToolResult) -> None:
             spec = tool_specs_by_name.get(call.name)
             result_summary = summarize_tool_result(result.content, max_chars=1200)
+            result_images = [
+                image_content_to_public(image)
+                for image in extract_image_contents(result.content)
+            ]
             await progress_queue.put(
                 next_event(
                     "tool_finished",
@@ -628,6 +644,7 @@ class SystemAgentRuntime:
                     call_id=call.id,
                     is_error=bool(result.is_error),
                     result_summary=redact_turn_value(result_summary),
+                    images=result_images,
                 )
             )
 
@@ -665,26 +682,46 @@ class SystemAgentRuntime:
         async def on_safe_boundary() -> tuple[ModelMessage, ...]:
             if run_input_provider is None:
                 return ()
-            values = [str(item).strip() for item in await run_input_provider()]
-            values = [item for item in values if item]
+            raw_values = await run_input_provider()
+            values: list[tuple[str, tuple[ImageContent, ...]]] = []
+            for item in raw_values:
+                if isinstance(item, dict):
+                    text = str(item.get("content") or "").strip()
+                    _, images = await materialize_attachments(item.get("attachments") or [])
+                    if text or images:
+                        values.append((text, tuple(images)))
+                else:
+                    text = str(item).strip()
+                    if text:
+                        values.append((text, ()))
             if not values:
                 return ()
-            for secret in extract_plaintext_secrets("\n".join(values)):
+            for secret in extract_plaintext_secrets("\n".join(text for text, _ in values)):
                 if secret not in turn_secrets:
                     turn_secrets.append(secret)
-            for value in values:
+            for value, images in values:
                 await progress_queue.put(
                     next_event(
                         "steer_applied",
-                        summary=redact_turn_text(value)[:500],
+                        summary=(
+                            redact_turn_text(value)[:500]
+                            if value
+                            else f"已补充 {len(images)} 张图片"
+                        ),
                     )
                 )
             return tuple(
-                ModelMessage.text(
-                    MessageRole.USER,
-                    "用户在运行中补充了新指令，请从当前安全边界起优先遵循：\n" + value,
+                ModelMessage(
+                    role=MessageRole.USER,
+                    content=(
+                        TextContent(
+                            "用户在运行中补充了新指令和图片，请从当前安全边界起优先遵循："
+                            + (f"\n{value}" if value else "")
+                        ),
+                        *images,
+                    ),
                 )
-                for value in values
+                for value, images in values
             )
 
         callbacks = AgentCallbacks(
@@ -932,6 +969,7 @@ class SystemAgentRuntime:
             yield ev
 
         assistant_text = redact_turn_text(result.text or "")
+        assistant_images = [image_content_to_public(image) for image in result.images]
         assistant_reasoning = redact_turn_text(result.reasoning_content or "")
         timings = finalize_stage_timings(ok=True)
         usage_payload = _usage_payload(
@@ -958,6 +996,7 @@ class SystemAgentRuntime:
             "assistant_message",
             content=assistant_text,
             reasoning=assistant_reasoning,
+            images=assistant_images,
             usage=usage_payload,
         )
         yield next_event(
@@ -1209,6 +1248,7 @@ class SystemAgentRuntime:
         history: list[SystemAgentMessage],
         user_text: str,
         token_budget: int,
+        user_images: tuple[ImageContent, ...] = (),
     ) -> list[ModelMessage]:
         messages: list[ModelMessage] = [ModelMessage.text(MessageRole.SYSTEM, system_prompt)]
         # 粗略按字符预算滑窗：约 4 字符 ~ 1 token。0 表示不裁剪历史窗口。
@@ -1217,19 +1257,27 @@ class SystemAgentRuntime:
         used = 0
         for msg in reversed(history):
             text = _message_text(msg)
-            if not text:
+            images = _message_images(msg)
+            if not text and not images:
                 continue
             role = _map_role(msg.role)
             if role is None:
                 continue
-            cost = len(text)
+            cost = len(text) + 2_000 * len(images)
             if budget_chars is not None and used + cost > budget_chars and selected:
                 break
-            selected.append(ModelMessage.text(role, text))
+            content = ((TextContent(text),) if text else ()) + images
+            selected.append(ModelMessage(role=role, content=content))
             used += cost
         selected.reverse()
         messages.extend(selected)
-        messages.append(ModelMessage.text(MessageRole.USER, user_text))
+        user_content = []
+        if user_text:
+            user_content.append(TextContent(user_text))
+        user_content.extend(user_images)
+        messages.append(
+            ModelMessage(role=MessageRole.USER, content=tuple(user_content))
+        )
         return messages
 
 
@@ -1257,6 +1305,13 @@ def _message_text(msg: SystemAgentMessage) -> str:
         except (TypeError, ValueError):
             return f"[tool:{name}] {str(summary)[:1500]}"
     return ""
+
+
+def _message_images(msg: SystemAgentMessage) -> tuple[ImageContent, ...]:
+    if msg.role != MESSAGE_ROLE_USER:
+        return ()
+    content = msg.content if isinstance(msg.content, dict) else {}
+    return extract_image_contents(content.get("attachments") or ())
 
 
 def _usage_payload(

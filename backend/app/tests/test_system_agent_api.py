@@ -11,6 +11,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.api import system_agent as api
+from app.schemas.system_agent import SystemAgentImageAttachment
 
 
 class _FakeSvc:
@@ -460,6 +461,43 @@ async def test_message_entrypoints_reject_blank_content(fake_svc, fake_run_manag
 
 
 @pytest.mark.asyncio
+async def test_run_entrypoint_accepts_image_only_message(fake_svc, fake_run_manager) -> None:
+    db = AsyncMock()
+    user = SimpleNamespace(id=7)
+    await api.create_session(api.SystemAgentSessionCreate(), db, user)
+    data_url = "data:image/png;base64,iVBORw0KGgo="
+
+    await api.start_system_agent_run(
+        "s1",
+        api.SystemAgentRunCreate(
+            content="",
+            client_request_id="request-image-only",
+            attachments=[
+                    SystemAgentImageAttachment(
+                    source="data_url",
+                    mime_type="image/png",
+                    data_url=data_url,
+                    name="paste.png",
+                )
+            ],
+        ),
+        db,
+        user,
+    )
+
+    assert fake_run_manager.last_start_kwargs["text"] == ""
+    assert fake_run_manager.last_start_kwargs["attachments"] == [
+        {
+            "kind": "image",
+            "source": "data_url",
+            "mime_type": "image/png",
+            "data_url": data_url,
+            "name": "paste.png",
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_stop_replace_rejects_blank_content_before_manager(
     monkeypatch,
     fake_run_manager,
@@ -507,6 +545,33 @@ async def test_run_input_routes_normalize_and_forward_payloads(
         "content": "改用另一个方案"
     }
 
+    await api.steer_system_agent_run(
+        "run-1",
+        api.SystemAgentRunInputCreate(
+            client_request_id="request-steer-image-api",
+            attachments=[
+                {
+                    "kind": "image",
+                    "source": "data_url",
+                    "data_url": "data:image/png;base64,iVBORw0KGgo=",
+                }
+            ],
+        ),
+        db,
+        user,
+    )
+    assert fake_run_manager.last_input_kwargs["payload"] == {
+        "content": "",
+        "attachments": [
+            {
+                "kind": "image",
+                "source": "data_url",
+                "mime_type": "image/png",
+                "data_url": "data:image/png;base64,iVBORw0KGgo=",
+            }
+        ],
+    }
+
     resumed = await api.resume_system_agent_run_with_input(
         "run-1",
         api.SystemAgentRunInputCreate(
@@ -538,7 +603,7 @@ async def test_run_input_routes_normalize_and_forward_payloads(
         "approved_tools": ["scheduler.list"],
         "content": "",
     }
-    assert owned.await_count == 3
+    assert owned.await_count == 4
 
 
 @pytest.mark.asyncio
