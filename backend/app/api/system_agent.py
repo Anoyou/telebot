@@ -38,6 +38,7 @@ from ..schemas.system_agent import (
     SystemAgentQueueItemPatch,
     SystemAgentQueueMutationOut,
     SystemAgentQueueReorder,
+    SystemAgentQueueSteerCreate,
     SystemAgentRegenerateRunCreate,
     SystemAgentRetryRunCreate,
     SystemAgentRunCreate,
@@ -536,6 +537,29 @@ async def delete_system_agent_queue_item(
     except RunNotFoundError:
         raise _err("QUEUE_ITEM_NOT_FOUND", "排队消息不存在或已开始执行", 404) from None
     return _run_out(row)
+
+
+@router.post("/queue/{turn_id}/steer", response_model=SystemAgentRunInputOut)
+async def steer_system_agent_queue_item(
+    turn_id: str,
+    payload: SystemAgentQueueSteerCreate,
+    user: CurrentUser,
+) -> SystemAgentRunInputOut:
+    try:
+        row = await get_system_agent_run_manager().steer_queue_item(
+            turn_id,
+            web_user_id=user.id,
+            client_request_id=payload.client_request_id,
+        )
+    except RunNotFoundError:
+        raise _err(
+            "QUEUE_ITEM_NOT_FOUND",
+            "排队消息不存在或已开始执行",
+            404,
+        ) from None
+    except RunConflictError as exc:
+        raise _err("QUEUE_STEER_CONFLICT", str(exc), 409) from None
+    return SystemAgentRunInputOut.model_validate(row)
 
 
 @router.post(

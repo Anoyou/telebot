@@ -39,8 +39,7 @@ import {
   startSystemAgentRegenerateRun,
   startSystemAgentRetryRun,
   startSystemAgentRun,
-  steerSystemAgentRun,
-  stopAndReplaceSystemAgentRun,
+  steerSystemAgentQueueItem,
   streamSystemAgentRun,
   submitSystemAgentRunInput,
   updateSystemAgentQueueItem,
@@ -57,7 +56,7 @@ import { listLLMProviders } from "@/api/commands";
 import { listAccounts } from "@/api/accounts";
 import type { LLMProviderOut } from "@/api/types";
 import { matrixToPickerItems, type ModelPickerValue } from "@/components/ai/ModelPicker";
-import { Composer, type ComposerAction, type ComposerAttachment } from "@/components/assistant/Composer";
+import { Composer, type ComposerAttachment } from "@/components/assistant/Composer";
 import { AgentMark } from "@/components/assistant/AgentMark";
 import { useAssistantDock } from "@/components/assistant/AssistantDock";
 import { Conversation, type LiveBubble } from "@/components/assistant/Conversation";
@@ -244,7 +243,6 @@ export function AssistantIndex() {
   } | null>(null);
   const [streamNotice, setStreamNotice] = useState("");
   const [composerValue, setComposerValue] = useState("");
-  const [composerAction, setComposerAction] = useState<ComposerAction>("queue");
   const [waitingInput, setWaitingInput] = useState("");
   const [activeRunSnapshot, setActiveRunSnapshot] = useState<SystemAgentRun | null>(null);
   const [notificationPermission, setNotificationPermission] = useState<
@@ -252,7 +250,7 @@ export function AssistantIndex() {
   >(() =>
     "Notification" in window ? Notification.permission : "unsupported"
   );
-  /** 本轮模型选择：仅会话本地，默认自动路由 */
+  /** 本轮模型选择：浏览器本地记住最近一次，默认自动路由。 */
   const [sessionModel, setSessionModel] = useState<SessionModelSelection>(
     DEFAULT_SESSION_MODEL_SELECTION,
   );
@@ -377,6 +375,10 @@ export function AssistantIndex() {
     () => allQueue.filter((item) => item.session_id === activeId),
     [activeId, allQueue],
   );
+  const composerQueue = useMemo(
+    () => currentQueue.filter((item) => item.channel === "web" && ["pending", "paused"].includes(item.status)),
+    [currentQueue],
+  );
   const hasOpenRun = Boolean(currentRun || streaming);
   const memoryQ = useQuery({
     queryKey: ["system-agent", "user-memory"],
@@ -459,7 +461,6 @@ export function AssistantIndex() {
     skipNextDraftWriteRef.current = true;
     setComposerValue(readDraft(meQ.data.id, activeId));
     setWaitingInput("");
-    setComposerAction("queue");
     setActiveRunSnapshot(null);
   }, [activeId, meQ.data?.id]);
 
@@ -649,7 +650,7 @@ export function AssistantIndex() {
     return "自动路由";
   }, [sessionModel, modelPickerItems, configuredProvider, configuredModel]);
 
-  // 切换会话时恢复 localStorage 中的本轮选择
+  // 切换会话时沿用 localStorage 中最近一次本轮选择。
   useEffect(() => {
     setSessionModel(loadSessionModelSelection(activeId));
   }, [activeId]);
@@ -670,7 +671,7 @@ export function AssistantIndex() {
             clientIdentityProfile: sessionModel.clientIdentityProfile,
           };
     setSessionModel(selection);
-    if (activeId) saveSessionModelSelection(activeId, selection);
+    saveSessionModelSelection(activeId, selection);
   };
 
   const onSessionClientChange = (next: {
@@ -693,7 +694,7 @@ export function AssistantIndex() {
         }
       : { ...sessionModel, ...next } as SessionModelSelection;
     setSessionModel(selection);
-    if (activeId) saveSessionModelSelection(activeId, selection);
+    saveSessionModelSelection(activeId, selection);
   };
 
   const onSetDefaultModel = (providerId: number, model: string) => {
@@ -1304,58 +1305,6 @@ export function AssistantIndex() {
         await runTurn({ text, attachments });
         return;
       }
-      if (composerAction === "steer") {
-        if (target.status !== "running") {
-          toast.error("只有正在运行的任务可以调整；等待态请使用下方补充或审批操作");
-          return;
-        }
-        await steerSystemAgentRun(target.id, {
-          content: text,
-          attachments,
-          client_request_id: requestId(),
-        });
-        toast.success("已提交调整，会在下一个安全边界应用");
-        return;
-      }
-      if (composerAction === "replace") {
-        if (!["running", "waiting_input", "waiting_approval"].includes(target.status)) {
-          toast.error("当前任务尚未进入可替换状态");
-          return;
-        }
-        const replacement = await stopAndReplaceSystemAgentRun(target.id, {
-          content: text,
-          attachments,
-          client_request_id: requestId(),
-          model_selection: toApiModelSelection(sessionModel),
-        });
-        abortRef.current?.abort();
-        const controller = new AbortController();
-        abortRef.current = controller;
-        const saved: StoredRun = { runId: replacement.id, lastSeq: 0 };
-        rememberRun(sessionId, saved);
-        setActiveRun(saved);
-        setActiveRunSnapshot(replacement);
-        setStreaming(true);
-        clearLiveStreamingState();
-        setLive([
-          {
-            id: `live-user-${Date.now()}`,
-            role: "user",
-            text,
-            images: attachments,
-            createdAt: new Date().toISOString(),
-          },
-          {
-            id: `live-assistant-${Date.now()}`,
-            role: "assistant",
-            text: "正在停止上一任务并切换…",
-            pending: true,
-          },
-        ]);
-        void refreshRunData(sessionId);
-        await followRun(sessionId, saved, controller);
-        return;
-      }
       const queued = await startSystemAgentRun(sessionId, {
         content: text,
         attachments,
@@ -1370,6 +1319,16 @@ export function AssistantIndex() {
           ? "已开始执行"
           : `已加入队列${pendingAhead ? `，前面有 ${pendingAhead} 条` : ""}`,
       );
+    } catch (error) {
+      toast.error(getErrMsg(error));
+    }
+  };
+
+  const steerQueueItem = async (item: SystemAgentQueueItem) => {
+    try {
+      await steerSystemAgentQueueItem(item.id, { client_request_id: requestId() });
+      await refreshRunData(item.session_id);
+      toast.success("已改为当前任务的补充说明");
     } catch (error) {
       toast.error(getErrMsg(error));
     }
@@ -2247,9 +2206,9 @@ export function AssistantIndex() {
                 value={composerValue}
                 onValueChange={setComposerValue}
                 onStop={onStop}
-                actionMode={composerAction}
-                onActionModeChange={setComposerAction}
-                queueCount={currentQueue.length}
+                queueItems={composerQueue}
+                onDeleteQueueItem={deleteQueueItem}
+                onSteerQueueItem={steerQueueItem}
                 runStatus={currentRun?.status}
                 placeholder={viewingBotSession ? "Telegram 会话仅供查看" : undefined}
                 modelItems={visibleModelPickerItems}

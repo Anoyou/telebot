@@ -15948,6 +15948,21 @@
         "title": "SystemAgentQueueReorder",
         "type": "object"
       },
+      "SystemAgentQueueSteerCreate": {
+        "properties": {
+          "client_request_id": {
+            "maxLength": 64,
+            "minLength": 8,
+            "title": "Client Request Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "client_request_id"
+        ],
+        "title": "SystemAgentQueueSteerCreate",
+        "type": "object"
+      },
       "SystemAgentRegenerateRunCreate": {
         "properties": {
           "account_id": {
@@ -18535,7 +18550,7 @@
   },
   "info": {
     "title": "TelePilot",
-    "version": "0.99.0-beta.1"
+    "version": "0.99.0-beta.2"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -40901,6 +40916,112 @@
           }
         ],
         "summary": "Update System Agent Queue Item",
+        "tags": [
+          "system-agent"
+        ]
+      }
+    },
+    "/api/system-agent/queue/{turn_id}/steer": {
+      "post": {
+        "operationId": "steer_system_agent_queue_item_api_system_agent_queue__turn_id__steer_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "turn_id",
+            "required": true,
+            "schema": {
+              "title": "Turn Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "auth_token",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Auth Token"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SystemAgentQueueSteerCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SystemAgentRunInputOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "认证失败"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "CSRF 校验失败或权限不足"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "服务器内部错误"
+          }
+        },
+        "security": [
+          {
+            "AuthCookie": [],
+            "CsrfCookie": [],
+            "CsrfHeader": [],
+            "RequestedWith": []
+          }
+        ],
+        "summary": "Steer System Agent Queue Item",
         "tags": [
           "system-agent"
         ]

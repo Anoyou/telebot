@@ -323,6 +323,17 @@ export async function deleteSystemAgentQueueItem(turnId: string): Promise<System
   return data;
 }
 
+export async function steerSystemAgentQueueItem(
+  turnId: string,
+  payload: { client_request_id: string },
+): Promise<SystemAgentRunInput> {
+  const { data } = await api.post<SystemAgentRunInput>(
+    `/api/system-agent/queue/${turnId}/steer`,
+    payload,
+  );
+  return data;
+}
+
 export async function reorderSystemAgentQueue(
   sessionId: string,
   turnIds: string[],

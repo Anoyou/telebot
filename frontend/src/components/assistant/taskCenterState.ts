@@ -51,6 +51,34 @@ export function sortSystemAgentRuns(runs: SystemAgentRun[]): SystemAgentRun[] {
   });
 }
 
+export function taskCenterVisibleRuns(
+  runs: SystemAgentRun[],
+  dismissedRunIds: ReadonlySet<string> = new Set(),
+): SystemAgentRun[] {
+  const latestByMessage = new Map<string, SystemAgentRun>();
+  for (const run of runs) {
+    if (run.user_message_id == null) continue;
+    const key = `${run.session_id}:${run.user_message_id}`;
+    const current = latestByMessage.get(key);
+    if (
+      !current
+      || timestamp(run.updated_at || run.created_at)
+        > timestamp(current.updated_at || current.created_at)
+    ) {
+      latestByMessage.set(key, run);
+    }
+  }
+
+  return sortSystemAgentRuns(
+    runs.filter((run) => {
+      if (OPEN_RUN_STATUSES.has(run.status)) return true;
+      if (run.status !== "failed" || dismissedRunIds.has(run.id)) return false;
+      if (run.user_message_id == null) return true;
+      return latestByMessage.get(`${run.session_id}:${run.user_message_id}`)?.id === run.id;
+    }),
+  ).slice(0, 20);
+}
+
 export function sessionRunStatusById(
   runs: SystemAgentRun[],
 ): Record<string, string> {

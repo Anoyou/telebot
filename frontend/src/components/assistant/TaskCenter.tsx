@@ -27,7 +27,27 @@ import {
 } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
-import { sortSystemAgentQueue, sortSystemAgentRuns } from "./taskCenterState";
+import { sortSystemAgentQueue, taskCenterVisibleRuns } from "./taskCenterState";
+
+const DISMISSED_RUNS_KEY = "telepilot.system-agent.dismissed-task-runs.v1";
+
+function readDismissedRunIds(): Set<string> {
+  try {
+    const value = JSON.parse(window.localStorage.getItem(DISMISSED_RUNS_KEY) || "[]") as unknown;
+    if (!Array.isArray(value)) return new Set();
+    return new Set(value.filter((item): item is string => typeof item === "string").slice(-200));
+  } catch {
+    return new Set();
+  }
+}
+
+function writeDismissedRunIds(values: Set<string>): void {
+  try {
+    window.localStorage.setItem(DISMISSED_RUNS_KEY, JSON.stringify([...values].slice(-200)));
+  } catch {
+    // localStorage 不可用时，本页仍可隐藏。
+  }
+}
 
 const STATUS_LABELS: Record<string, string> = {
   queued: "排队中",
@@ -89,17 +109,12 @@ export function TaskCenter({
   const [editingItem, setEditingItem] = useState<SystemAgentQueueItem | null>(null);
   const [editingContent, setEditingContent] = useState("");
   const [clearSessionId, setClearSessionId] = useState<string | null>(null);
+  const [dismissedRunIds, setDismissedRunIds] = useState(readDismissedRunIds);
   const sessionTitles = useMemo(
     () => new Map(sessions.map((session) => [session.id, session.title || "未命名对话"])),
     [sessions],
   );
-  const visibleRuns = sortSystemAgentRuns(
-    runs.filter((run) =>
-      ["queued", "running", "waiting_input", "waiting_approval", "failed"].includes(
-        run.status,
-      ),
-    ),
-  ).slice(0, 20);
+  const visibleRuns = taskCenterVisibleRuns(runs, dismissedRunIds);
   const currentQueue = activeSessionId
     ? sortSystemAgentQueue(queue.filter((item) => item.session_id === activeSessionId))
     : [];
@@ -113,7 +128,9 @@ export function TaskCenter({
   );
   const attentionCount =
     runs.filter((run) => ["running", "waiting_input", "waiting_approval"].includes(run.status))
-      .length + queue.filter((item) => item.status !== "dispatching").length;
+      .length
+      + visibleRuns.filter((run) => run.status === "failed").length
+      + queue.filter((item) => item.status !== "dispatching").length;
 
   if (visibleRuns.length === 0 && queue.length === 0) return null;
 
@@ -156,33 +173,55 @@ export function TaskCenter({
                 </p>
               ) : (
                 visibleRuns.map((run) => (
-                  <button
+                  <div
                     key={run.id}
-                    type="button"
                     className={cn(
                       "flex min-h-11 w-full items-center gap-2 rounded-md border px-2.5 py-2 text-left hover:bg-muted/50",
                       run.session_id === activeSessionId && "border-primary/35 bg-primary/5",
                     )}
-                    onClick={() => onSelectSession(run.session_id)}
                   >
-                    <Badge variant="outline" className={cn("shrink-0 text-[10px]", statusClass(run.status))}>
-                      {statusLabel(run.status)}
-                    </Badge>
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate text-xs font-medium">
-                        {sessionTitles.get(run.session_id) || run.session_id.slice(0, 8)}
+                    <button
+                      type="button"
+                      className="flex min-w-0 flex-1 items-center gap-2 text-left"
+                      onClick={() => onSelectSession(run.session_id)}
+                    >
+                      <Badge variant="outline" className={cn("shrink-0 text-[10px]", statusClass(run.status))}>
+                        {statusLabel(run.status)}
+                      </Badge>
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-xs font-medium">
+                          {sessionTitles.get(run.session_id) || run.session_id.slice(0, 8)}
+                        </span>
+                        <span className="block truncate text-[10px] text-muted-foreground">
+                          {run.phase || run.kind}
+                          {run.error_message ? ` · ${run.error_message}` : ""}
+                        </span>
                       </span>
-                      <span className="block truncate text-[10px] text-muted-foreground">
-                        {run.phase || run.kind}
-                        {run.error_message ? ` · ${run.error_message}` : ""}
-                      </span>
-                    </span>
-                    {run.elapsed_ms != null ? (
-                      <span className="shrink-0 text-[10px] text-muted-foreground">
-                        {(run.elapsed_ms / 1000).toFixed(1)}s
-                      </span>
+                      {run.elapsed_ms != null ? (
+                        <span className="shrink-0 text-[10px] text-muted-foreground">
+                          {(run.elapsed_ms / 1000).toFixed(1)}s
+                        </span>
+                      ) : null}
+                    </button>
+                    {run.status === "failed" ? (
+                      <button
+                        type="button"
+                        className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+                        title="从任务中心移除，运行记录仍保留"
+                        aria-label="从任务中心移除失败任务"
+                        onClick={() => {
+                          setDismissedRunIds((current) => {
+                            const next = new Set(current);
+                            next.add(run.id);
+                            writeDismissedRunIds(next);
+                            return next;
+                          });
+                        }}
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
                     ) : null}
-                  </button>
+                  </div>
                 ))
               )}
             </div>

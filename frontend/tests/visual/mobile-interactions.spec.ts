@@ -26,7 +26,7 @@ test.describe("移动端交互细节", () => {
     fixture.assertClean();
   });
 
-  test("PWA 页面与卡片使用适中紧凑间距", async ({ page }, testInfo) => {
+  test("PWA 页面恢复外层留白并保持内容区紧凑", async ({ page }, testInfo) => {
     test.skip(testInfo.project.name !== "mobile", "仅 PWA 视口");
     const fixture = await installApiFixture(page);
     await page.goto("/overview", { waitUntil: "networkidle" });
@@ -61,8 +61,8 @@ test.describe("移动端交互细节", () => {
       };
     });
     expect(spacing).toMatchObject({
-      mainPaddingLeft: "9px",
-      mainPaddingTop: "9px",
+      mainPaddingLeft: "12px",
+      mainPaddingTop: "12px",
       pageHeaderPaddingLeft: "9px",
       sectionGap: "12px",
       cardHeaderPaddingLeft: "12px",
@@ -504,7 +504,7 @@ test.describe("移动端交互细节", () => {
     const fixture = await installApiFixture(page);
     await page.route("**/api/feature-matrix", async (route) => {
       const features = [
-        { key: "game_demo", display_name: "互动示例", is_builtin: false, source_type: "remote", version: "1.0.0", usage: "互动插件", category: "interactive", experimental: false },
+        { key: "game_demo", display_name: "互动示例", is_builtin: false, source_type: "remote", version: "1.0.0", usage: "互动插件", category: "interactive", config_schema: { type: "object", properties: {} }, experimental: false },
         { key: "auto_demo", display_name: "自动化示例", is_builtin: false, source_type: "remote", version: "1.0.0", usage: "自动化插件", category: "automation", experimental: false },
         { key: "tool_demo", display_name: "工具示例", is_builtin: false, source_type: "remote", version: "1.0.0", usage: "工具插件", category: "utility", capabilities: { telegram_direct_passthrough: true }, experimental: false },
       ];
@@ -517,6 +517,27 @@ test.describe("移动端交互细节", () => {
         }),
       });
     });
+    await page.route("**/api/platform/tree", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          trunk: {
+            userbot: { workers: [{ account_id: 1, alive: true, desired: "running", fail_count: 0, queued: false, starting: false }], total: 1, alive: 1 },
+            kill_switch: false,
+            current_profile: "custom",
+          },
+          branches: {
+            interaction_bot: { state: "running", desired: true, forced_off: false, demanded_by: ["game_demo"], can_turn_off: true },
+          },
+          leaves: [
+            { key: "game_demo", attachment: "交互", enabled: true, requires: [], warnings: [], source_missing: false },
+            { key: "auto_demo", attachment: "命令", enabled: false, requires: [], warnings: [], source_missing: false },
+            { key: "tool_demo", attachment: "直通", enabled: true, requires: [], warnings: [], source_missing: false },
+          ],
+        }),
+      });
+    });
     await page.goto("/plugins", { waitUntil: "networkidle" });
     await expect(page.getByText("0.13 安全变更提醒", { exact: true })).toHaveCount(0);
     await expect(page.locator('[data-plugin-category-filter="all"]')).toHaveAttribute("aria-current", "page");
@@ -525,8 +546,19 @@ test.describe("移动端交互细节", () => {
       const categoryNavBox = await page.locator("[data-plugin-category-nav]").boundingBox();
       expect(categoryNavBox?.width || 999).toBeLessThanOrEqual(140);
     } else {
+      await expect(page.getByText("一键进入可持久、自愈的值守态，恢复时逐项还原进入前快照。")).toBeHidden();
+      const accountSelectBox = await page.getByRole("combobox", { name: "选择配置的账号" }).boundingBox();
+      const templateButtonBox = await page.getByRole("button", { name: "消息模板测试" }).boundingBox();
+      expect(Math.abs((accountSelectBox?.y ?? 0) - (templateButtonBox?.y ?? 999))).toBeLessThanOrEqual(2);
+
       const allBox = await allCategory.boundingBox();
       expect(allBox?.width || 999).toBeLessThan(150);
+      const globalFilter = page.getByRole("button", { name: "全局筛选" });
+      await expect(globalFilter).toHaveAttribute("aria-expanded", "false");
+      await expect(page.getByPlaceholder("搜索名称、key、用途或分类")).toBeHidden();
+      await expect(page.getByRole("combobox", { name: "状态" })).toBeHidden();
+      await globalFilter.click();
+      await expect(globalFilter).toHaveAttribute("aria-expanded", "true");
       const searchBox = await page.getByPlaceholder("搜索名称、key、用途或分类").boundingBox();
       const statusBox = await page.getByRole("combobox", { name: "状态" }).boundingBox();
       expect(Math.abs((searchBox?.y ?? 0) - (statusBox?.y ?? 999))).toBeLessThanOrEqual(2);
@@ -539,6 +571,11 @@ test.describe("移动端交互细节", () => {
       expect(Math.max(...batchButtonTops) - Math.min(...batchButtonTops)).toBeLessThanOrEqual(2);
       const viewTabs = page.getByRole("tablist", { name: "切换插件视图" });
       await expect(viewTabs.getByRole("tab")).toHaveCount(2);
+      const featureHeaderBox = await page.locator("[data-plugin-feature-header]").boundingBox();
+      const featureTitleBox = await page.locator("[data-plugin-feature-header]").getByText("全部已安装插件", { exact: true }).boundingBox();
+      const featureCountBox = await page.locator("[data-plugin-feature-count]").boundingBox();
+      expect(featureCountBox?.x ?? 0).toBeGreaterThan((featureHeaderBox?.x ?? 999) + (featureHeaderBox?.width ?? 0) / 2);
+      expect(Math.abs((featureCountBox?.y ?? 0) - (featureTitleBox?.y ?? 999))).toBeLessThanOrEqual(4);
     }
     await expect(page.locator("[data-plugin-card]")).toHaveCount(3);
     const gameCard = page.locator('[data-plugin-key="game_demo"]');
@@ -559,6 +596,23 @@ test.describe("移动端交互细节", () => {
     await expect(page.locator("[data-plugin-card]")).toHaveCount(1);
     await expect(page.locator('[data-plugin-key="game_demo"]')).toBeVisible();
     await expect(page.locator('[data-plugin-key="auto_demo"]')).toHaveCount(0);
+    if (testInfo.project.name === "mobile") {
+      await page.getByRole("tab", { name: "树状视图" }).click();
+      const gameLeaf = page.locator('[data-platform-tree-leaf="game_demo"]');
+      const toolLeaf = page.locator('[data-platform-tree-leaf="tool_demo"]');
+      await expect(gameLeaf).toBeVisible();
+      await expect(toolLeaf).toBeVisible();
+      const leafStyle = await gameLeaf.evaluate((element) => {
+        const style = getComputedStyle(element);
+        return { paddingTop: Number.parseFloat(style.paddingTop), paddingBottom: Number.parseFloat(style.paddingBottom) };
+      });
+      expect(leafStyle.paddingTop).toBeGreaterThanOrEqual(4.5);
+      expect(leafStyle.paddingBottom).toBeGreaterThanOrEqual(4.5);
+      const editButton = gameLeaf.getByRole("button", { name: "编辑 互动示例" });
+      await expect(editButton).toHaveCSS("border-top-style", "solid");
+      const editButtonBox = await editButton.boundingBox();
+      expect(editButtonBox?.height ?? 0).toBeGreaterThanOrEqual(32);
+    }
     fixture.assertClean();
   });
 

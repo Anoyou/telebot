@@ -3527,6 +3527,23 @@ export interface paths {
         patch: operations["update_system_agent_queue_item_api_system_agent_queue__turn_id__patch"];
         trace?: never;
     };
+    "/api/system-agent/queue/{turn_id}/steer": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Steer System Agent Queue Item */
+        post: operations["steer_system_agent_queue_item_api_system_agent_queue__turn_id__steer_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/system-agent/runs": {
         parameters: {
             query?: never;
@@ -10107,6 +10124,11 @@ export interface components {
         SystemAgentQueueReorder: {
             /** Turn Ids */
             turn_ids?: string[];
+        };
+        /** SystemAgentQueueSteerCreate */
+        SystemAgentQueueSteerCreate: {
+            /** Client Request Id */
+            client_request_id: string;
         };
         /** SystemAgentRegenerateRunCreate */
         SystemAgentRegenerateRunCreate: {
@@ -23722,6 +23744,70 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SystemAgentQueueItemOut"];
+                };
+            };
+            /** @description 认证失败 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description CSRF 校验失败或权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    steer_system_agent_queue_item_api_system_agent_queue__turn_id__steer_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                turn_id: string;
+            };
+            cookie?: {
+                auth_token?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SystemAgentQueueSteerCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SystemAgentRunInputOut"];
                 };
             };
             /** @description 认证失败 */

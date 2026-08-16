@@ -261,10 +261,12 @@
   /* PWA 主内容密度：只收紧内容区的边距与间距，不改底部安全区和可点击控件高度。
      在上一版紧凑映射基础上统一放大 1.5 倍，兼顾信息密度与内容呼吸感。 */
   @media (max-width: 639px) {
+    /* 外层设备边框留白恢复为 AppShell 原始的 px-3/py-3，
+       仅调整内容区与设备边缘的距离；下方安全区仍由 pb 规则单独控制。 */
     [data-app-main] {
-      padding-top: 0.5625rem !important;
-      padding-left: max(0.5625rem, env(safe-area-inset-left)) !important;
-      padding-right: max(0.5625rem, env(safe-area-inset-right)) !important;
+      padding-top: 0.75rem !important;
+      padding-left: max(0.75rem, env(safe-area-inset-left)) !important;
+      padding-right: max(0.75rem, env(safe-area-inset-right)) !important;
     }
 
     [data-app-main] [class~="gap-0.5"] { gap: 0.1875rem !important; }
@@ -1721,4 +1723,11 @@
 .ptree-twigs--alive .ptree-twig::before,
 .ptree-twigs--alive .ptree-twig::after {
   background: hsl(var(--success) / 0.32);
+}
+
+@media (max-width: 639px) {
+  /* PWA 树视图让每个插件行多留一拍呼吸空间，连接线仍对齐首行文字。 */
+  .ptree-spine {
+    --ptree-tick-y: 1rem;
+  }
 }

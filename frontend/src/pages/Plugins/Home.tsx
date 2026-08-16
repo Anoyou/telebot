@@ -217,6 +217,7 @@ export function PluginsHome() {
   const [selectedCategory, setSelectedCategory] = useState<ModuleCategoryFilter>("all");
   const [pluginSearch, setPluginSearch] = useState("");
   const [pluginStatus, setPluginStatus] = useState<PluginStatusFilter>("all");
+  const [mobileSearchExpanded, setMobileSearchExpanded] = useState(false);
   const [pluginView, setPluginView] = useState<PluginView>("cards");
   const [selectedPluginKeys, setSelectedPluginKeys] = useState<Set<string>>(() => new Set());
   const [historyPluginKey, setHistoryPluginKey] = useState<string | null>(null);
@@ -515,13 +516,14 @@ export function PluginsHome() {
             </div>
           ) : null}
           {accounts.length > 0 ? (
-            <div className="flex flex-col items-stretch gap-2 lg:flex-row lg:items-center lg:justify-between">
-              <div className="flex flex-col items-stretch gap-2 sm:flex-row sm:items-center">
-                <span className="text-sm text-muted-foreground">选择配置的账号：</span>
+            <div className="flex items-center gap-2 lg:flex-row lg:justify-between">
+              <div className="flex min-w-0 flex-1 items-center gap-2">
+                <span className="hidden shrink-0 text-sm text-muted-foreground sm:inline">选择配置的账号：</span>
                 <Select
                   value={selectedAid?.toString() ?? ""}
                   onChange={(e) => setSelectedAid(Number(e.target.value))}
-                  className="w-full sm:w-64"
+                  aria-label="选择配置的账号"
+                  className="min-w-0 flex-1 sm:w-64 sm:flex-none"
                 >
                   {accounts.map((a) => (
                     <option key={a.id} value={a.id}>{a.name}</option>
@@ -531,7 +533,7 @@ export function PluginsHome() {
               <Button
                 type="button"
                 variant="outline"
-                className="justify-center"
+                className="shrink-0 justify-center px-3"
                 onClick={() =>
                   nav(
                     selectedAid
@@ -569,72 +571,89 @@ export function PluginsHome() {
           </div>
           {pluginView === "cards" ? (
             <>
-          <div className="grid grid-cols-[minmax(0,1fr)_minmax(7.25rem,0.55fr)] gap-3 rounded-lg border bg-muted/20 p-3 sm:grid-cols-[minmax(0,1fr)_160px] lg:grid-cols-[minmax(0,1fr)_160px_minmax(22rem,auto)] lg:items-end">
-            <label className="space-y-1.5 text-sm">
-              <span className="text-muted-foreground">全局搜索</span>
-              <span className="relative block">
-                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                <Input
-                  value={pluginSearch}
-                  onChange={(event) => setPluginSearch(event.target.value)}
-                  placeholder="搜索名称、key、用途或分类"
-                  className="pl-9"
-                />
+          <div data-plugin-global-search className="rounded-lg border bg-muted/20">
+            <button
+              type="button"
+              className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-sm sm:hidden"
+              aria-expanded={mobileSearchExpanded}
+              onClick={() => setMobileSearchExpanded((value) => !value)}
+            >
+              <span className="flex min-w-0 items-center gap-2 font-medium">
+                <Search className="h-4 w-4 shrink-0 text-primary" />
+                <span>全局筛选</span>
+                {pluginSearch || pluginStatus !== "all" ? (
+                  <span className="truncate text-xs font-normal text-muted-foreground">已设置条件</span>
+                ) : null}
               </span>
-            </label>
-            <label className="space-y-1.5 text-sm">
-              <span className="text-muted-foreground">状态</span>
-              <Select value={pluginStatus} onChange={(event) => setPluginStatus(event.target.value as PluginStatusFilter)}>
-                <option value="all">全部状态</option>
-                <option value="enabled">全局已启用</option>
-                <option value="disabled">全局已停用</option>
-                <option value="failed">当前账号异常</option>
-              </Select>
-            </label>
-            <div className="col-span-2 grid min-w-0 grid-cols-3 gap-2 lg:col-span-1">
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                disabled={installedQ.isLoading || installedQ.isError || !selectableKeys.length || batchInstallMutation.isPending}
-                className="min-w-0 w-full px-1 text-[11px] min-[390px]:text-xs"
-                onClick={() => setSelectedPluginKeys((current) => (
-                  current.size === selectableKeys.length ? new Set() : new Set(selectableKeys)
-                ))}
-              >
-                {selectedPluginKeys.size === selectableKeys.length && selectableKeys.length ? "取消全选" : "选择当前结果"}
-              </Button>
-              <Button
-                type="button"
-                size="sm"
-                disabled={!selectedPluginKeys.size || batchInstallMutation.isPending}
-                className="min-w-0 w-full px-1 text-[11px] min-[390px]:text-xs"
-                onClick={() => runBatchInstallAction(true)}
-              >
-                全局启用（{selectedPluginKeys.size}）
-              </Button>
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                disabled={!selectedPluginKeys.size || batchInstallMutation.isPending}
-                className="min-w-0 w-full px-1 text-[11px] min-[390px]:text-xs"
-                onClick={() => runBatchInstallAction(false)}
-              >
-                全局停用
-              </Button>
+              <ChevronDown className={cn("h-4 w-4 shrink-0 text-muted-foreground transition-transform", mobileSearchExpanded && "rotate-180")} />
+            </button>
+            <div className={cn("grid grid-cols-[minmax(0,1fr)_minmax(7.25rem,0.55fr)] gap-3 p-3 sm:grid-cols-[minmax(0,1fr)_160px] lg:grid-cols-[minmax(0,1fr)_160px_minmax(22rem,auto)] lg:items-end", !mobileSearchExpanded && "hidden sm:grid")}>
+              <label className="space-y-1.5 text-sm">
+                <span className="text-muted-foreground">全局搜索</span>
+                <span className="relative block">
+                  <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                  <Input
+                    value={pluginSearch}
+                    onChange={(event) => setPluginSearch(event.target.value)}
+                    placeholder="搜索名称、key、用途或分类"
+                    className="pl-9"
+                  />
+                </span>
+              </label>
+              <label className="space-y-1.5 text-sm">
+                <span className="text-muted-foreground">状态</span>
+                <Select value={pluginStatus} onChange={(event) => setPluginStatus(event.target.value as PluginStatusFilter)}>
+                  <option value="all">全部状态</option>
+                  <option value="enabled">全局已启用</option>
+                  <option value="disabled">全局已停用</option>
+                  <option value="failed">当前账号异常</option>
+                </Select>
+              </label>
+              <div className="col-span-2 grid min-w-0 grid-cols-3 gap-2 lg:col-span-1">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  disabled={installedQ.isLoading || installedQ.isError || !selectableKeys.length || batchInstallMutation.isPending}
+                  className="min-w-0 w-full px-1 text-[11px] min-[390px]:text-xs"
+                  onClick={() => setSelectedPluginKeys((current) => (
+                    current.size === selectableKeys.length ? new Set() : new Set(selectableKeys)
+                  ))}
+                >
+                  {selectedPluginKeys.size === selectableKeys.length && selectableKeys.length ? "取消全选" : "选择当前结果"}
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  disabled={!selectedPluginKeys.size || batchInstallMutation.isPending}
+                  className="min-w-0 w-full px-1 text-[11px] min-[390px]:text-xs"
+                  onClick={() => runBatchInstallAction(true)}
+                >
+                  全局启用（{selectedPluginKeys.size}）
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  disabled={!selectedPluginKeys.size || batchInstallMutation.isPending}
+                  className="min-w-0 w-full px-1 text-[11px] min-[390px]:text-xs"
+                  onClick={() => runBatchInstallAction(false)}
+                >
+                  全局停用
+                </Button>
+              </div>
+              <p className="col-span-2 text-xs text-muted-foreground lg:col-span-1">
+                {installedQ.isLoading
+                  ? "正在读取可批量操作的安装插件……"
+                  : installedQ.isError
+                    ? "已安装插件清单加载失败，请刷新后重试。"
+                    : selectableKeys.length === 0
+                      ? "当前筛选没有可批量操作的已安装插件。"
+                      : selectedPluginKeys.size === 0
+                        ? "先选择当前结果，再执行全局启用或停用。"
+                        : `已选择 ${selectedPluginKeys.size} 个插件，可批量启用或停用。`}
+              </p>
             </div>
-            <p className="col-span-2 text-xs text-muted-foreground lg:col-span-1">
-              {installedQ.isLoading
-                ? "正在读取可批量操作的安装插件……"
-                : installedQ.isError
-                  ? "已安装插件清单加载失败，请刷新后重试。"
-                  : selectableKeys.length === 0
-                    ? "当前筛选没有可批量操作的已安装插件。"
-                    : selectedPluginKeys.size === 0
-                      ? "先选择当前结果，再执行全局启用或停用。"
-                      : `已选择 ${selectedPluginKeys.size} 个插件，可批量启用或停用。`}
-            </p>
           </div>
           <div
             data-plugin-category-layout
@@ -945,13 +964,15 @@ function FeatureZone({
 
   return (
     <Card>
-      <CardHeader className="pb-3">
+      <CardHeader data-plugin-feature-header className="pb-3">
         <SectionHeader
           icon={icon}
           title={title}
           description={hint}
+          className="flex-row items-start justify-between gap-2"
+          metaClassName="w-auto shrink-0 justify-end"
           meta={(
-            <div className="flex items-center gap-2">
+            <div data-plugin-feature-count className="flex items-center gap-2">
               <SignalPill tone="neutral" label="插件" value={features.length} className="h-8" />
             </div>
           )}

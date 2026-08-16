@@ -93,13 +93,14 @@ export function PlatformTreeView({
     return (
     <div
       key={leaf.key}
+      data-platform-tree-leaf={leaf.key}
       tabIndex={0}
       onMouseEnter={() => setHover({ kind: "leaf", key: leaf.key })}
       onMouseLeave={clearHover}
       onFocus={() => setHover({ kind: "leaf", key: leaf.key })}
       onBlur={clearHover}
       className={cn(
-        "ptree-twig flex flex-wrap items-center gap-x-2 gap-y-0.5 rounded-sm py-1 pl-1 pr-2 text-xs transition-opacity duration-150",
+        "ptree-twig flex flex-wrap items-center gap-x-2 gap-y-1 rounded-sm py-1.5 pl-1 pr-2 text-xs transition-opacity duration-150",
         "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
         hover?.kind === "leaf" && hover.key === leaf.key && "bg-muted/30",
         leafDimmed(leaf) && "opacity-40",
@@ -151,8 +152,8 @@ export function PlatformTreeView({
         <Button
           type="button"
           size="sm"
-          variant="ghost"
-          className="ml-auto h-6 shrink-0 px-2 text-[10px]"
+          variant="outline"
+          className="ml-auto h-8 shrink-0 px-2.5 text-xs"
           onClick={() => onEditLeaf(leaf.key)}
           aria-label={`编辑 ${details.displayName || leaf.key}`}
         >

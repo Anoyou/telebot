@@ -1034,6 +1034,126 @@ class SystemAgentRunManager:
             await db.refresh(run)
             return run
 
+    async def steer_queue_item(
+        self,
+        turn_id: str,
+        *,
+        web_user_id: int,
+        client_request_id: str,
+    ) -> SystemAgentRunInput:
+        """原子地把一条 Web 排队消息改为当前运行的方向调整。"""
+
+        await self.ensure_ready()
+        async with self._session_factory() as db:
+            snapshot_result = await db.execute(
+                select(SystemAgentPendingTurn).where(
+                    SystemAgentPendingTurn.id == turn_id,
+                    SystemAgentPendingTurn.web_user_id == web_user_id,
+                    SystemAgentPendingTurn.channel == CHANNEL_WEB,
+                )
+            )
+            snapshot = snapshot_result.scalar_one_or_none()
+            if snapshot is None:
+                raise RunNotFoundError(f"queue:{turn_id}")
+            session_result = await db.execute(
+                select(SystemAgentSession)
+                .where(
+                    SystemAgentSession.id == snapshot.session_id,
+                    SystemAgentSession.web_user_id == web_user_id,
+                )
+                .with_for_update()
+            )
+            if session_result.scalar_one_or_none() is None:
+                raise RunNotFoundError(f"queue:{turn_id}")
+            pending_result = await db.execute(
+                select(SystemAgentPendingTurn)
+                .where(
+                    SystemAgentPendingTurn.id == turn_id,
+                    SystemAgentPendingTurn.web_user_id == web_user_id,
+                    SystemAgentPendingTurn.channel == CHANNEL_WEB,
+                )
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            pending = pending_result.scalar_one_or_none()
+            if pending is None or pending.status not in {
+                PENDING_TURN_PENDING,
+                PENDING_TURN_PAUSED,
+            }:
+                raise RunNotFoundError(f"queue:{turn_id}")
+            active_result = await db.execute(
+                select(SystemAgentRun)
+                .where(
+                    SystemAgentRun.session_id == pending.session_id,
+                    SystemAgentRun.web_user_id == web_user_id,
+                    SystemAgentRun.channel == CHANNEL_WEB,
+                    SystemAgentRun.status == AGENT_RUN_RUNNING,
+                    SystemAgentRun.id != pending.dispatch_run_id,
+                )
+                .order_by(desc(SystemAgentRun.started_at), desc(SystemAgentRun.created_at))
+                .with_for_update()
+            )
+            active = active_result.scalars().first()
+            if active is None:
+                raise RunConflictError("当前没有可接收方向调整的运行中任务")
+            queued_run = await db.get(
+                SystemAgentRun,
+                pending.dispatch_run_id,
+                with_for_update=True,
+            )
+            if queued_run is None or queued_run.status != AGENT_RUN_QUEUED:
+                raise RunNotFoundError(f"queue:{turn_id}")
+
+            request_payload = dict(pending.request_payload or {})
+            content = decrypt_str(pending.content_enc).strip()
+            attachments = [
+                dict(item)
+                for item in request_payload.get("attachments", [])
+                if isinstance(item, dict)
+            ][:4]
+            if not content and not attachments:
+                raise RunConflictError("排队消息没有可提交的文字或图片")
+            payload = {
+                "content": content,
+                **({"attachments": attachments} if attachments else {}),
+            }
+            canonical_payload = json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            existing_result = await db.execute(
+                select(SystemAgentRunInput).where(
+                    SystemAgentRunInput.run_id == active.id,
+                    SystemAgentRunInput.client_request_id == client_request_id,
+                )
+            )
+            if existing_result.scalar_one_or_none() is not None:
+                raise RunConflictError("该方向调整已经提交，请刷新队列")
+
+            item = SystemAgentRunInput(
+                run_id=active.id,
+                kind=RUN_INPUT_STEER,
+                payload_enc=encrypt_str(canonical_payload),
+                status=RUN_INPUT_PENDING,
+                client_request_id=client_request_id,
+            )
+            db.add(item)
+            now = datetime.now(UTC)
+            pending.status = PENDING_TURN_CANCELLED
+            pending.blocked_reason = "steered"
+            pending.updated_at = now
+            queued_run.status = AGENT_RUN_CANCELLED
+            queued_run.phase = "steered"
+            queued_run.error_code = "AGENT_QUEUE_ITEM_STEERED"
+            queued_run.error_message = "排队消息已改为当前任务的方向调整。"
+            queued_run.finished_at = now
+            queued_run.updated_at = now
+            await db.commit()
+            await db.refresh(item)
+            return item
+
     async def reorder_queue(
         self,
         *,

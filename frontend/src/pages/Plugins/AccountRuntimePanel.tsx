@@ -96,6 +96,7 @@ export function AccountRuntimePanel() {
                 icon={ShieldAlert}
                 title="运行模式"
                 description="一键进入可持久、自愈的值守态，恢复时逐项还原进入前快照。"
+                descriptionClassName="max-sm:hidden"
               />
             </button>
             <div className="flex shrink-0 items-center gap-2">

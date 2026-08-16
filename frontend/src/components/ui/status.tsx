@@ -262,15 +262,19 @@ export function SectionHeader({
   icon: Icon,
   title,
   description,
+  descriptionClassName,
   actions,
   meta,
+  metaClassName,
   className,
 }: {
   icon?: ComponentType<{ className?: string }>;
   title: ReactNode;
   description?: ReactNode;
+  descriptionClassName?: string;
   actions?: ReactNode;
   meta?: ReactNode;
+  metaClassName?: string;
   className?: string;
 }) {
   return (
@@ -283,13 +287,13 @@ export function SectionHeader({
           </div>
         </div>
         {description ? (
-          <div className="mt-1 text-sm leading-5 text-muted-foreground">
+          <div className={cn("mt-1 text-sm leading-5 text-muted-foreground", descriptionClassName)}>
             {description}
           </div>
         ) : null}
       </div>
       {(meta || actions) ? (
-        <div className="flex w-full min-w-0 flex-wrap items-center gap-2 md:w-auto md:shrink-0 md:justify-end">
+        <div className={cn("flex w-full min-w-0 flex-wrap items-center gap-2 md:w-auto md:shrink-0 md:justify-end", metaClassName)}>
           {meta}
           {actions}
         </div>

@@ -1,4 +1,4 @@
-/** 会话级本轮模型选择（localStorage，不写全局配置）。 */
+/** Agent 最近一次本轮模型选择（localStorage，不写全局 Provider 配置）。 */
 
 import type { SystemAgentModelSelection } from "@/api/systemAgent";
 import type {
@@ -40,6 +40,7 @@ const CLIENT_IDENTITIES = new Set<SessionClientIdentity>([
 ]);
 
 const STORAGE_KEY = "telepilot.system-agent.session-model.v1";
+const LAST_SELECTION_KEY = "telepilot.system-agent.last-model-selection.v1";
 
 type Store = Record<string, SessionModelSelection>;
 
@@ -61,37 +62,74 @@ function writeStore(store: Store): void {
   }
 }
 
-export function loadSessionModelSelection(sessionId: string | null | undefined): SessionModelSelection {
-  if (!sessionId) return DEFAULT_SESSION_MODEL_SELECTION;
-  const value = readStore()[sessionId];
-  if (!value || typeof value !== "object") return DEFAULT_SESSION_MODEL_SELECTION;
-  const executionBackend = ["provider", "direct", "codex_gateway"].includes(value.executionBackend)
-    ? value.executionBackend
+function normalizeSelection(value: unknown): SessionModelSelection | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const candidate = value as Partial<SessionModelSelection>;
+  const executionBackend = ["provider", "direct", "codex_gateway"].includes(
+    String(candidate.executionBackend || ""),
+  )
+    ? candidate.executionBackend as SessionExecutionBackend
     : "provider";
-  const clientIdentityProfile = CLIENT_IDENTITIES.has(value.clientIdentityProfile)
-    ? value.clientIdentityProfile
+  const clientIdentityProfile = CLIENT_IDENTITIES.has(candidate.clientIdentityProfile)
+    ? candidate.clientIdentityProfile
     : undefined;
   // Agent 快速选择器不再暴露 minimal / openai_sdk。它们仍是 Provider
-  // 配置和后端兼容契约的一部分；旧会话恢复时统一回到标准 API 的自动身份，
-  // 避免已移除的选项在原生 select 中显示为空白。
+  // 配置和后端兼容契约的一部分；旧选择恢复时统一回到标准 API 的自动身份。
   const visibleClientIdentityProfile = clientIdentityProfile === "minimal"
     || clientIdentityProfile === "openai_sdk"
     ? "auto"
     : clientIdentityProfile;
-  const common = {
-    executionBackend,
-    clientIdentityProfile: visibleClientIdentityProfile,
-  };
-  if (value.mode === "pinned" && value.providerId > 0 && value.model) {
-    return { mode: "pinned", providerId: value.providerId, model: value.model, ...common };
+  const common = visibleClientIdentityProfile
+    ? { executionBackend, clientIdentityProfile: visibleClientIdentityProfile }
+    : { executionBackend };
+  if (
+    candidate.mode === "pinned"
+    && Number(candidate.providerId) > 0
+    && typeof candidate.model === "string"
+    && candidate.model
+  ) {
+    return {
+      mode: "pinned",
+      providerId: Number(candidate.providerId),
+      model: candidate.model,
+      ...common,
+    };
   }
-  return { mode: "auto", ...common };
+  if (candidate.mode === "auto") return { mode: "auto", ...common };
+  return null;
+}
+
+function readLastSelection(): SessionModelSelection | null {
+  try {
+    return normalizeSelection(
+      JSON.parse(window.localStorage.getItem(LAST_SELECTION_KEY) || "null") as unknown,
+    );
+  } catch {
+    return null;
+  }
+}
+
+function writeLastSelection(selection: SessionModelSelection): void {
+  try {
+    window.localStorage.setItem(LAST_SELECTION_KEY, JSON.stringify(selection));
+  } catch {
+    // ignore
+  }
+}
+
+export function loadSessionModelSelection(sessionId: string | null | undefined): SessionModelSelection {
+  const recent = readLastSelection();
+  if (recent) return recent;
+  if (!sessionId) return DEFAULT_SESSION_MODEL_SELECTION;
+  return normalizeSelection(readStore()[sessionId]) || DEFAULT_SESSION_MODEL_SELECTION;
 }
 
 export function saveSessionModelSelection(
-  sessionId: string,
+  sessionId: string | null | undefined,
   selection: SessionModelSelection,
 ): void {
+  writeLastSelection(selection);
+  if (!sessionId) return;
   const store = readStore();
   if (
     selection.mode === "auto"

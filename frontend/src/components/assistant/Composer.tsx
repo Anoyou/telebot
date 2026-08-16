@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
-import { ImagePlus, ListPlus, Menu, Route, Send, Square, StepForward, X } from "lucide-react";
+import { Check, ChevronDown, CornerDownRight, ImagePlus, ListPlus, Menu, Route, Send, Square, Trash2, X } from "lucide-react";
 import { toast } from "sonner";
 
 import {
@@ -9,34 +9,29 @@ import {
 } from "@/components/ai/ModelPicker";
 import { ClientPicker, type ClientPickerValue } from "./ClientPicker";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { composerEnterAction } from "./composerState";
-import type { SystemAgentImageAttachment } from "@/api/systemAgent";
+import type { SystemAgentImageAttachment, SystemAgentQueueItem } from "@/api/systemAgent";
 
-export type ComposerAction = "queue" | "steer" | "replace";
 export type ComposerAttachment = SystemAgentImageAttachment;
 
-const ACTION_COPY: Record<
-  ComposerAction,
-  { label: string; description: string; submitLabel: string }
-> = {
+const QUEUE_ACTION_COPY = {
   queue: {
     label: "稍后执行",
     description: "等当前任务完成后，再处理这条消息。",
-    submitLabel: "加入稍后执行",
   },
   steer: {
-    label: "补充要求",
-    description: "不中断当前任务，把这条要求补充进去。",
-    submitLabel: "补充到当前任务",
+    label: "补充说明/调整方向",
+    description: "把补充信息加入当前任务，Agent 会据此调整后续处理。",
   },
-  replace: {
-    label: "改做这条",
-    description: "停止当前任务，立即改做这条消息。",
-    submitLabel: "停止并改做",
-  },
-};
+} as const;
 
 export function Composer({
   disabled,
@@ -59,9 +54,9 @@ export function Composer({
   value: controlledValue,
   onValueChange,
   focusRequestKey = 0,
-  actionMode = "queue",
-  onActionModeChange,
-  queueCount = 0,
+  queueItems = [],
+  onDeleteQueueItem,
+  onSteerQueueItem,
   runStatus,
 }: {
   disabled?: boolean;
@@ -86,21 +81,21 @@ export function Composer({
   value?: string;
   onValueChange?: (value: string) => void;
   focusRequestKey?: number;
-  actionMode?: ComposerAction;
-  onActionModeChange?: (value: ComposerAction) => void;
-  queueCount?: number;
+  queueItems?: SystemAgentQueueItem[];
+  onDeleteQueueItem?: (item: SystemAgentQueueItem) => void | Promise<void>;
+  onSteerQueueItem?: (item: SystemAgentQueueItem) => void | Promise<void>;
   runStatus?: string | null;
 }) {
   const [internalValue, setInternalValue] = useState("");
   const [sending, setSending] = useState(false);
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
+  const [queueMutationId, setQueueMutationId] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const composingRef = useRef(false);
   const suppressNextEnterRef = useRef(false);
   const suppressTimerRef = useRef<number | null>(null);
   const value = controlledValue ?? internalValue;
-  const selectedAction = ACTION_COPY[actionMode];
 
   const updateValue = (next: string) => {
     if (controlledValue === undefined) setInternalValue(next);
@@ -187,63 +182,101 @@ export function Composer({
       className="shrink-0 border-t bg-background/90 p-2 backdrop-blur sm:p-3"
     >
       <div className="mx-auto max-w-3xl rounded-xl border border-border/80 bg-input-bg/70 p-2 shadow-sm focus-within:border-primary/50 focus-within:ring-2 focus-within:ring-ring/15 xl:max-w-5xl 2xl:max-w-6xl">
-        {streaming ? (
-          <div className="mb-2 border-b border-border/50 pb-2">
-            <div className="mb-1.5 flex items-center justify-between gap-2 px-0.5">
-              <span className="text-xs font-medium">这条消息怎么处理？</span>
-              {queueCount > 0 ? (
-                <span className="shrink-0 text-[10px] text-muted-foreground">
-                  已有 {queueCount} 条稍后执行
-                </span>
-              ) : null}
-            </div>
-            <div
-              role="radiogroup"
-              aria-label="选择这条消息的处理方式"
-              className="grid grid-cols-3 gap-1 rounded-lg bg-muted/55 p-1"
-            >
-              {(Object.keys(ACTION_COPY) as ComposerAction[]).map((mode) => {
-                const copy = ACTION_COPY[mode];
-                const unavailable =
-                  (mode === "steer" && runStatus !== "running") ||
-                  (mode === "replace" &&
-                    (!runStatus ||
-                      !["running", "waiting_input", "waiting_approval"].includes(
-                        runStatus,
-                      )));
-                return (
-                  <button
-                    key={mode}
-                    type="button"
-                    role="radio"
-                    aria-checked={actionMode === mode}
-                    aria-describedby="composer-action-description"
-                    disabled={unavailable}
-                    onClick={() => onActionModeChange?.(mode)}
-                    className={cn(
-                      "min-h-9 min-w-0 rounded-md px-1.5 text-xs font-medium transition-colors",
-                      "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50",
-                      "disabled:cursor-not-allowed disabled:opacity-40",
-                      actionMode === mode
-                        ? "bg-background text-foreground shadow-sm"
-                        : "text-muted-foreground hover:bg-background/60 hover:text-foreground",
-                    )}
-                    title={copy.description}
+        {streaming && queueItems.length > 0 ? (
+          <div
+            data-assistant-composer-queue
+            className="-mx-2 -mt-2 mb-1 max-h-32 overflow-y-auto rounded-t-xl border-b border-border/70 bg-muted/25"
+            aria-label="已提交的待处理消息"
+          >
+            {queueItems.map((item) => {
+              const busy = queueMutationId === item.id;
+              return (
+                <div
+                  key={item.id}
+                  className="flex min-h-11 items-center gap-2 border-b border-border/45 px-2.5 py-1.5 last:border-b-0 sm:px-3"
+                >
+                  <CornerDownRight className="h-4 w-4 shrink-0 text-muted-foreground" />
+                  <span
+                    className="min-w-0 flex-1 truncate text-xs font-medium sm:text-sm"
+                    title={item.content || "图片消息"}
                   >
-                    <span className="block truncate">
-                      {copy.label}
-                      {mode === "queue" && queueCount > 0 ? ` · ${queueCount}` : ""}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-            <p
-              id="composer-action-description"
-              className="mt-1.5 min-h-4 px-0.5 text-[11px] leading-4 text-muted-foreground"
-            >
-              {selectedAction.description}
-            </p>
+                    {item.content || "图片消息"}
+                  </span>
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        disabled={busy}
+                        className="h-8 shrink-0 gap-1 px-2 text-[11px] text-muted-foreground sm:text-xs"
+                        aria-label={`选择“${item.content || "图片消息"}”的用途`}
+                      >
+                        <ListPlus className="h-3.5 w-3.5" />
+                        <span className="hidden xs:inline">稍后执行</span>
+                        <ChevronDown className="h-3 w-3" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent
+                      align="end"
+                      className="w-[min(20rem,calc(100vw-1.5rem))] p-1"
+                    >
+                      <DropdownMenuItem className="items-start gap-2 py-2.5">
+                        <ListPlus className="mt-0.5 h-4 w-4 shrink-0" />
+                        <span className="min-w-0 flex-1">
+                          <span className="block text-sm font-medium">
+                            {QUEUE_ACTION_COPY.queue.label}
+                          </span>
+                          <span className="mt-0.5 block text-[11px] leading-4 text-muted-foreground">
+                            {QUEUE_ACTION_COPY.queue.description}
+                          </span>
+                        </span>
+                        <Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />
+                      </DropdownMenuItem>
+                      <DropdownMenuItem
+                        disabled={runStatus !== "running" || busy}
+                        className="items-start gap-2 py-2.5"
+                        onSelect={() => {
+                          setQueueMutationId(item.id);
+                          void Promise.resolve(onSteerQueueItem?.(item)).finally(() => {
+                            setQueueMutationId((current) => current === item.id ? null : current);
+                          });
+                        }}
+                      >
+                        <Route className="mt-0.5 h-4 w-4 shrink-0" />
+                        <span className="min-w-0 flex-1">
+                          <span className="block text-sm font-medium">
+                            {QUEUE_ACTION_COPY.steer.label}
+                          </span>
+                          <span className="mt-0.5 block text-[11px] leading-4 text-muted-foreground">
+                            {runStatus === "running"
+                              ? QUEUE_ACTION_COPY.steer.description
+                              : "当前任务恢复运行后才可调整方向。"}
+                          </span>
+                        </span>
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    disabled={busy}
+                    className="h-8 w-8 shrink-0 text-muted-foreground hover:text-destructive"
+                    title="删除这条待处理消息"
+                    aria-label={`删除“${item.content || "图片消息"}”`}
+                    onClick={() => {
+                      setQueueMutationId(item.id);
+                      void Promise.resolve(onDeleteQueueItem?.(item)).finally(() => {
+                        setQueueMutationId((current) => current === item.id ? null : current);
+                      });
+                    }}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
+              );
+            })}
           </div>
         ) : null}
         {attachments.length > 0 ? (
@@ -336,20 +369,13 @@ export function Composer({
             <>
               <Button
                 type="submit"
-                size="sm"
+                size="icon"
                 disabled={disabled || sending || (!value.trim() && attachments.length === 0)}
-                className="h-9 shrink-0 gap-1.5 px-2.5 text-xs sm:px-3"
-                title={selectedAction.description}
+                className="h-9 w-9 shrink-0 rounded-full"
+                title="发送并加入稍后执行"
               >
-                {actionMode === "steer" ? (
-                  <Route className="h-4 w-4" />
-                ) : actionMode === "replace" ? (
-                  <StepForward className="h-4 w-4" />
-                ) : (
-                  <ListPlus className="h-4 w-4" />
-                )}
-                <span className="hidden sm:inline">{selectedAction.submitLabel}</span>
-                <span className="sm:hidden">{selectedAction.label}</span>
+                <Send className="h-4 w-4" />
+                <span className="sr-only">发送并加入稍后执行</span>
               </Button>
               <Button
                 type="button"

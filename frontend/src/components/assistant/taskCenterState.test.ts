@@ -7,6 +7,7 @@ import {
   sessionRunStatusById,
   sortSystemAgentQueue,
   sortSystemAgentRuns,
+  taskCenterVisibleRuns,
 } from "./taskCenterState.ts";
 
 function run(
@@ -116,5 +117,28 @@ test("会话徽标显示最新失败并优先提示未结束运行", () => {
       "active-session": "waiting_approval",
       "failed-session": "failed",
     },
+  );
+});
+
+test("任务中心只保留同一消息最新且未解决的失败", () => {
+  const failedOld = run("failed-old", "failed", "2026-07-30T01:00:00Z");
+  failedOld.user_message_id = 10;
+  const failedNew = run("failed-new", "failed", "2026-07-30T02:00:00Z");
+  failedNew.user_message_id = 10;
+  const succeeded = run("succeeded", "succeeded", "2026-07-30T03:00:00Z");
+  succeeded.user_message_id = 10;
+  const unresolved = run("unresolved", "failed", "2026-07-30T04:00:00Z");
+  unresolved.user_message_id = 11;
+
+  assert.deepEqual(
+    taskCenterVisibleRuns([failedOld, failedNew, succeeded, unresolved]).map((row) => row.id),
+    ["unresolved"],
+  );
+  assert.deepEqual(
+    taskCenterVisibleRuns(
+      [failedOld, failedNew, succeeded, unresolved],
+      new Set(["unresolved"]),
+    ),
+    [],
   );
 });

@@ -866,6 +866,62 @@ async def test_queue_limit_position_edit_reorder_delete_and_clear(run_db) -> Non
 
 
 @pytest.mark.asyncio
+async def test_queue_item_can_be_atomically_promoted_to_steer(run_db) -> None:
+    service = _ControlledService()
+    manager = SystemAgentRunManager(
+        session_factory=run_db,
+        service_factory=lambda: service,
+        poll_interval=0.01,
+    )
+    active = await manager.start_run(
+        session_id="session-1",
+        web_user_id=7,
+        client_request_id="request-steer-active",
+        text="先执行当前任务",
+    )
+    await _wait_for_status(manager, active.id, AGENT_RUN_RUNNING)
+    queued = await manager.start_run(
+        session_id="session-1",
+        web_user_id=7,
+        client_request_id="request-steer-queued",
+        text="改查最近两小时",
+        attachments=[
+            {
+                "kind": "image",
+                "source": "data_url",
+                "data_url": "data:image/png;base64,iVBORw0KGgo=",
+            }
+        ],
+    )
+    queue = await manager.list_queue(web_user_id=7, session_id="session-1")
+    queued_item = next(item for item in queue if item["run_id"] == queued.id)
+
+    steer = await manager.steer_queue_item(
+        queued_item["id"],
+        web_user_id=7,
+        client_request_id="request-promote-steer",
+    )
+
+    assert steer.run_id == active.id
+    assert steer.kind == RUN_INPUT_STEER
+    async with run_db() as db:
+        pending = await db.get(SystemAgentPendingTurn, queued.pending_turn_id)
+        queued_run = await db.get(SystemAgentRun, queued.id)
+        stored_input = await db.get(SystemAgentRunInput, steer.id)
+        assert pending is not None and pending.status == PENDING_TURN_CANCELLED
+        assert pending.blocked_reason == "steered"
+        assert queued_run is not None and queued_run.status == AGENT_RUN_CANCELLED
+        assert queued_run.error_code == "AGENT_QUEUE_ITEM_STEERED"
+        assert stored_input is not None
+        stored_payload = json.loads(decrypt_str(stored_input.payload_enc))
+        assert stored_payload["content"] == "改查最近两小时"
+        assert len(stored_payload["attachments"]) == 1
+
+    await manager.cancel_run(active.id)
+    await _wait_for_status(manager, active.id, AGENT_RUN_CANCELLED)
+
+
+@pytest.mark.asyncio
 async def test_pending_turn_and_run_inputs_are_encrypted_and_steer_is_consumed_once(
     run_db,
 ) -> None:
