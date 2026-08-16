@@ -25,6 +25,25 @@
 
 ## [Unreleased]
 
+## [0.98.0-beta.1] - 2026-08-16 · minor（次版本预发布） · 吸收 cc-switch 协议兼容与 Gateway 流治理能力
+
+### 新增
+
+- 模拟客户端支持工具结果中的原生图片媒体回放：自动识别完整图片 data URL 与图片块，并按 Chat Completions、Responses、Anthropic Messages 协议分别发送原生图片内容；普通长字符串和损坏的 data URL 保留为文本。
+- 增加模型 reasoning 能力元数据：支持 supported_reasoning_levels、默认档位、旧字段兼容、档位规范化，并在 Provider 与插件模板界面展示。
+- 增强 OpenAI 兼容 SSE 工具调用聚合：兼容缺省数字 index，并在 index、调用 ID 与匿名序号混用时稳定合并多帧参数。
+- 内置 Gateway 增加上游响应头、路由总时限、SSE 首事件/事件间空闲时限及总字节上限治理，超时和超量响应统一返回结构化错误。
+
+### 修复
+
+- 检测并拒绝缺少函数名的上游工具调用，避免把不完整调用交给执行器；length 截断优先保留 max_tokens 结束原因。
+- 修复 Anthropic 工具结果中的 URL 图片被错误编码为空 base64 的问题。
+- 修复 Gateway 在首个 SSE 数据事件前收到注释/心跳时提前提交 200，确保首事件超时仍能返回 504。
+
+### 测试
+
+- 补充 reasoning transport、媒体抽取、Malformed tool call、缺省或混合 index 聚合与 Gateway SSE 超时/大小限制回归测试。
+
 ## [0.97.0-beta.9] - 2026-08-16 · patch（补丁预发布） · 清理随包插件与本地计划
 
 ### 移除

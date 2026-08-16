@@ -1537,6 +1537,8 @@ export interface ProviderModel {
     | "anthropic_thinking"
     | null;
   reasoning_efforts?: LLMReasoningEffort[] | null;
+  supported_reasoning_levels?: LLMReasoningEffort[] | null;
+  default_reasoning_level?: LLMReasoningEffort | null;
 }
 
 /**

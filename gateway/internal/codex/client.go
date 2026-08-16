@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -23,13 +24,21 @@ import (
 	"github.com/anoyou/telepilot/gateway/internal/version"
 )
 
-const maxBodyBytes = 16 << 20
+const (
+	maxBodyBytes                  = 16 << 20
+	upstreamResponseHeaderTimeout = 15 * time.Second
+	sseFirstEventTimeout          = 20 * time.Second
+	sseIdleTimeout                = 30 * time.Second
+)
 
 type Handler struct {
 	store          *control.Store
 	mu             sync.Mutex
 	providerSem    map[int64]chan struct{}
 	clientForRoute func(routing.Route) *http.Client
+	sseFirstEvent  time.Duration
+	sseIdle        time.Duration
+	sseMaxBytes    int64
 }
 
 func NewHandler(store *control.Store) *Handler {
@@ -37,6 +46,9 @@ func NewHandler(store *control.Store) *Handler {
 		store:          store,
 		providerSem:    make(map[int64]chan struct{}),
 		clientForRoute: httpClient,
+		sseFirstEvent:  sseFirstEventTimeout,
+		sseIdle:        sseIdleTimeout,
+		sseMaxBytes:    maxBodyBytes,
 	}
 }
 
@@ -84,6 +96,8 @@ func (h *Handler) responses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer release()
+	requestContext, cancelRequest := context.WithTimeout(r.Context(), routeTimeout(route))
+	defer cancelRequest()
 
 	downstreamStream, _ := payload["stream"].(bool)
 	payload["model"] = route.UpstreamModel
@@ -93,7 +107,7 @@ func (h *Handler) responses(w http.ResponseWriter, r *http.Request) {
 		payload["instructions"] = ""
 	}
 	identity := buildRequestIdentity(route, r)
-	upstreamRequest, err := http.NewRequestWithContext(r.Context(), http.MethodPost, route.BaseURL+"/responses", nil)
+	upstreamRequest, err := http.NewRequestWithContext(requestContext, http.MethodPost, route.BaseURL+"/responses", nil)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, contract.GatewayError{Code: "gateway_unavailable", Message: "Failed to create upstream request", Retryable: true, RequestID: requestID(r), GatewayStage: "request"})
 		return
@@ -119,7 +133,7 @@ func (h *Handler) responses(w http.ResponseWriter, r *http.Request) {
 
 	client := h.clientForRoute(route)
 	defer client.CloseIdleConnections()
-	response, err := doUpstreamRequest(client, upstreamRequest, r.Context())
+	response, err := doUpstreamRequest(client, upstreamRequest, requestContext)
 	if err != nil {
 		writeUpstreamRequestError(w, r, err, route)
 		return
@@ -138,22 +152,38 @@ func (h *Handler) responses(w http.ResponseWriter, r *http.Request) {
 	if strings.Contains(contentType, "text/event-stream") {
 		if downstreamStream {
 			w.Header().Set("Content-Type", "text/event-stream")
-			w.WriteHeader(http.StatusOK)
-			_ = copySSE(
+			wrote, streamErr := copySSEWithLimits(
 				w,
 				response.Body,
 				route.UpstreamModel,
 				model,
+				h.sseFirstEvent,
+				h.sseIdle,
+				h.sseMaxBytes,
 				routeSecretValues(route)...,
 			)
+			if streamErr != nil && !wrote && r.Context().Err() == nil {
+				writeSSEReadError(w, r, streamErr, requestContext)
+			}
 			return
 		}
-		final, err := aggregateSSE(response.Body, route.UpstreamModel, model)
+		final, err := aggregateSSEWithLimits(
+			response.Body,
+			route.UpstreamModel,
+			model,
+			h.sseFirstEvent,
+			h.sseIdle,
+			h.sseMaxBytes,
+		)
 		if err != nil {
 			var failed *upstreamEventFailure
 			if errors.As(err, &failed) {
 				gatewayError := diagnostics.FromUpstream(http.StatusBadGateway, failed.body, requestID(r), routeSecretValues(route)...)
 				writeError(w, http.StatusBadGateway, diagnostics.WithUpstreamHeaders(gatewayError, response.Header))
+				return
+			}
+			if isSSETimeout(err, requestContext) {
+				writeError(w, http.StatusGatewayTimeout, contract.GatewayError{Code: "timeout", Message: "Upstream response stream timed out", Retryable: true, RequestID: requestID(r), GatewayStage: "response"})
 				return
 			}
 			writeError(w, http.StatusBadGateway, contract.GatewayError{Code: "invalid_response", Message: err.Error(), RequestID: requestID(r), GatewayStage: "response"})
@@ -195,11 +225,13 @@ func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer release()
+	requestContext, cancelRequest := context.WithTimeout(r.Context(), routeTimeout(route))
+	defer cancelRequest()
 	client := h.clientForRoute(route)
 	defer client.CloseIdleConnections()
 	var response *http.Response
 	for index, endpoint := range route.ModelsEndpoints {
-		upstreamRequest, requestErr := http.NewRequestWithContext(r.Context(), http.MethodGet, endpoint, nil)
+		upstreamRequest, requestErr := http.NewRequestWithContext(requestContext, http.MethodGet, endpoint, nil)
 		if requestErr != nil {
 			writeError(w, http.StatusBadGateway, contract.GatewayError{Code: "gateway_unavailable", Message: "Failed to create upstream request", Retryable: true, RequestID: requestID(r), GatewayStage: "request"})
 			return
@@ -213,7 +245,7 @@ func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 		identity := buildRequestIdentity(route, r)
 		applyCodexHeaders(upstreamRequest, identity, route.CodexClientVersion)
 		security.StripInternalHeaders(upstreamRequest.Header)
-		response, err = doUpstreamRequest(client, upstreamRequest, r.Context())
+		response, err = doUpstreamRequest(client, upstreamRequest, requestContext)
 		if err != nil {
 			writeUpstreamRequestError(w, r, err, route)
 			return
@@ -346,6 +378,7 @@ func doUpstreamRequest(client *http.Client, request *http.Request, downstream co
 func httpClient(route routing.Route) *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.DialContext = (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext
+	transport.ResponseHeaderTimeout = upstreamResponseHeaderTimeout
 	// 未显式选择 Provider 代理时必须直连，不能继承 Web/Gateway 进程的
 	// HTTP_PROXY/HTTPS_PROXY 环境，否则凭据和请求体可能被送往非预期代理。
 	transport.Proxy = nil
@@ -354,17 +387,21 @@ func httpClient(route routing.Route) *http.Client {
 			transport.Proxy = http.ProxyURL(parsed)
 		}
 	}
-	timeout := time.Duration(route.TimeoutSeconds) * time.Second
-	if timeout <= 0 {
-		timeout = 90 * time.Second
-	}
 	return &http.Client{
 		Transport: transport,
-		Timeout:   timeout,
+		Timeout:   0,
 		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
 	}
+}
+
+func routeTimeout(route routing.Route) time.Duration {
+	timeout := time.Duration(route.TimeoutSeconds) * time.Second
+	if timeout <= 0 {
+		return 90 * time.Second
+	}
+	return timeout
 }
 
 func copySSE(
@@ -374,12 +411,34 @@ func copySSE(
 	publicModel string,
 	knownSecrets ...string,
 ) error {
+	_, err := copySSEWithLimits(
+		w, reader, upstreamModel, publicModel,
+		sseFirstEventTimeout, sseIdleTimeout, maxBodyBytes, knownSecrets...,
+	)
+	return err
+}
+
+func copySSEWithLimits(
+	w io.Writer,
+	reader io.Reader,
+	upstreamModel,
+	publicModel string,
+	firstEventTimeout,
+	idleTimeout time.Duration,
+	maxBytes int64,
+	knownSecrets ...string,
+) (bool, error) {
 	flusher, _ := w.(http.Flusher)
-	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 64<<10), 1<<20)
+	scanner, counted, timed := newSSEScanner(reader, firstEventTimeout, idleTimeout, maxBytes)
+	wrote := false
+	var pending bytes.Buffer
 	for scanner.Scan() {
+		if counted.read > maxBytes {
+			return wrote, &sseSizeError{limit: maxBytes}
+		}
 		line := scanner.Bytes()
 		if bytes.HasPrefix(line, []byte("data:")) {
+			timed.markStarted()
 			data := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
 			if !bytes.Equal(data, []byte("[DONE]")) {
 				data = restoreModel(data, upstreamModel, publicModel)
@@ -387,14 +446,30 @@ func copySSE(
 			}
 			line = append([]byte("data: "), data...)
 		}
-		if _, err := w.Write(append(line, '\n')); err != nil {
-			return err
+		rendered := append(append([]byte(nil), line...), '\n')
+		if !timed.started {
+			_, _ = pending.Write(rendered)
+			continue
 		}
+		if pending.Len() > 0 {
+			if _, err := w.Write(pending.Bytes()); err != nil {
+				return wrote, err
+			}
+			wrote = true
+			pending.Reset()
+		}
+		if _, err := w.Write(rendered); err != nil {
+			return wrote, err
+		}
+		wrote = true
 		if flusher != nil {
 			flusher.Flush()
 		}
 	}
-	return scanner.Err()
+	if counted.read > maxBytes {
+		return wrote, &sseSizeError{limit: maxBytes}
+	}
+	return wrote, scanner.Err()
 }
 
 func redactFailedSSEEvent(data []byte, knownSecrets ...string) []byte {
@@ -462,14 +537,31 @@ func sensitiveJSONKey(value string) bool {
 }
 
 func aggregateSSE(reader io.Reader, upstreamModel, publicModel string) (json.RawMessage, error) {
-	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 64<<10), 1<<20)
+	return aggregateSSEWithLimits(
+		reader, upstreamModel, publicModel,
+		sseFirstEventTimeout, sseIdleTimeout, maxBodyBytes,
+	)
+}
+
+func aggregateSSEWithLimits(
+	reader io.Reader,
+	upstreamModel,
+	publicModel string,
+	firstEventTimeout,
+	idleTimeout time.Duration,
+	maxBytes int64,
+) (json.RawMessage, error) {
+	scanner, counted, timed := newSSEScanner(reader, firstEventTimeout, idleTimeout, maxBytes)
 	var terminal json.RawMessage
 	for scanner.Scan() {
+		if counted.read > maxBytes {
+			return nil, &sseSizeError{limit: maxBytes}
+		}
 		line := bytes.TrimSpace(scanner.Bytes())
 		if !bytes.HasPrefix(line, []byte("data:")) {
 			continue
 		}
+		timed.markStarted()
 		data := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
 		var event map[string]any
 		if json.Unmarshal(data, &event) != nil {
@@ -492,6 +584,9 @@ func aggregateSSE(reader io.Reader, upstreamModel, publicModel string) (json.Raw
 			terminal, _ = json.Marshal(response)
 		}
 	}
+	if counted.read > maxBytes {
+		return nil, &sseSizeError{limit: maxBytes}
+	}
 	if err := scanner.Err(); err != nil {
 		return nil, err
 	}
@@ -499,6 +594,136 @@ func aggregateSSE(reader io.Reader, upstreamModel, publicModel string) (json.Raw
 		return nil, errors.New("upstream SSE ended without a terminal response")
 	}
 	return restoreModel(terminal, upstreamModel, publicModel), nil
+}
+
+type sseReadResult struct {
+	data []byte
+	err  error
+}
+
+type sseTimeoutError struct {
+	phase string
+}
+
+func (failure *sseTimeoutError) Error() string {
+	return "upstream SSE " + failure.phase + " timed out"
+}
+
+type sseSizeError struct {
+	limit int64
+}
+
+func (failure *sseSizeError) Error() string {
+	return fmt.Sprintf("upstream SSE exceeds %d bytes", failure.limit)
+}
+
+type sseTimeoutReader struct {
+	reader        io.Reader
+	firstTimeout  time.Duration
+	idleTimeout   time.Duration
+	started       bool
+	firstDeadline time.Time
+	idleDeadline  time.Time
+}
+
+func (reader *sseTimeoutReader) Read(buffer []byte) (int, error) {
+	timeout := reader.firstTimeout
+	phase := "first event"
+	if reader.started {
+		phase = "idle"
+		if reader.idleDeadline.IsZero() && reader.idleTimeout > 0 {
+			reader.idleDeadline = time.Now().Add(reader.idleTimeout)
+		}
+		if !reader.idleDeadline.IsZero() {
+			timeout = time.Until(reader.idleDeadline)
+		} else {
+			timeout = reader.idleTimeout
+		}
+	} else if !reader.firstDeadline.IsZero() {
+		timeout = time.Until(reader.firstDeadline)
+	}
+	if timeout <= 0 {
+		if (!reader.started && !reader.firstDeadline.IsZero()) ||
+			(reader.started && !reader.idleDeadline.IsZero()) {
+			return 0, &sseTimeoutError{phase: phase}
+		}
+		return reader.reader.Read(buffer)
+	}
+	if !reader.started && reader.firstDeadline.IsZero() {
+		reader.firstDeadline = time.Now().Add(timeout)
+	}
+	result := make(chan sseReadResult, 1)
+	temporary := make([]byte, len(buffer))
+	go func() {
+		n, err := reader.reader.Read(temporary)
+		result <- sseReadResult{data: temporary[:n], err: err}
+	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case completed := <-result:
+		copy(buffer, completed.data)
+		return len(completed.data), completed.err
+	case <-timer.C:
+		return 0, &sseTimeoutError{phase: phase}
+	}
+}
+
+func (reader *sseTimeoutReader) markStarted() {
+	reader.started = true
+	if reader.idleTimeout > 0 {
+		reader.idleDeadline = time.Now().Add(reader.idleTimeout)
+	}
+}
+
+type sseCountingReader struct {
+	reader io.Reader
+	read   int64
+}
+
+func (reader *sseCountingReader) Read(buffer []byte) (int, error) {
+	n, err := reader.reader.Read(buffer)
+	reader.read += int64(n)
+	return n, err
+}
+
+func newSSEScanner(
+	reader io.Reader,
+	firstEventTimeout, idleTimeout time.Duration,
+	maxBytes int64,
+) (*bufio.Scanner, *sseCountingReader, *sseTimeoutReader) {
+	limited := &io.LimitedReader{R: reader, N: maxBytes + 1}
+	timed := &sseTimeoutReader{
+		reader: limited, firstTimeout: firstEventTimeout, idleTimeout: idleTimeout,
+	}
+	counted := &sseCountingReader{reader: timed}
+	scanner := bufio.NewScanner(counted)
+	maxInt := int64(^uint(0) >> 1)
+	maxTokenBytes := maxBytes + 1
+	if maxTokenBytes <= 0 || maxTokenBytes > maxInt {
+		maxTokenBytes = maxInt
+	}
+	initialBytes := int64(64 << 10)
+	if maxTokenBytes < initialBytes {
+		initialBytes = maxTokenBytes
+	}
+	// Let the total-response limit, rather than Scanner's legacy 1 MiB
+	// token limit, classify a large but still permitted SSE event.
+	scanner.Buffer(make([]byte, int(initialBytes)), int(maxTokenBytes))
+	return scanner, counted, timed
+}
+
+func isSSETimeout(err error, requestContext context.Context) bool {
+	var timeout *sseTimeoutError
+	return errors.As(err, &timeout) || errors.Is(err, context.DeadlineExceeded) || errors.Is(requestContext.Err(), context.DeadlineExceeded)
+}
+
+func writeSSEReadError(w http.ResponseWriter, r *http.Request, err error, requestContext context.Context) {
+	if isSSETimeout(err, requestContext) {
+		writeError(w, http.StatusGatewayTimeout, contract.GatewayError{Code: "timeout", Message: "Upstream response stream timed out", Retryable: true, RequestID: requestID(r), GatewayStage: "response"})
+		return
+	}
+	writeError(w, http.StatusBadGateway, contract.GatewayError{Code: "invalid_response", Message: err.Error(), RequestID: requestID(r), GatewayStage: "response"})
 }
 
 type upstreamEventFailure struct {

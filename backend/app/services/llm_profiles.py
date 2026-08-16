@@ -49,7 +49,9 @@ _STANDARD_BY_FORMAT: dict[str, ProviderProtocolProfile] = {
         name=LLM_PROTOCOL_PROFILE_STANDARD,
         api_formats=frozenset({LLM_API_FORMAT_CHAT_COMPLETIONS}),
         recommended_identity="openai_sdk",
-        reasoning_transport="reasoning_content",
+        # OpenAI-compatible chat implementations differ on whether assistant
+        # reasoning history is accepted. Models must opt in through metadata.
+        reasoning_transport="native",
     ),
     LLM_API_FORMAT_RESPONSES: ProviderProtocolProfile(
         name=LLM_PROTOCOL_PROFILE_STANDARD,

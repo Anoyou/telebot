@@ -265,6 +265,7 @@ class ProviderCapabilities:
     temperature: bool = True
     reasoning: bool = False
     reasoning_efforts: frozenset[str] = frozenset()
+    default_reasoning_level: str | None = None
     context_window: int | None = None
     max_output_tokens: int | None = None
     input_modalities: frozenset[str] = frozenset({"text"})
@@ -319,6 +320,7 @@ class ProviderCapabilities:
             "temperature": self.temperature,
             "reasoning": self.reasoning,
             "reasoning_efforts": self.reasoning_efforts,
+            "default_reasoning_level": self.default_reasoning_level,
             "context_window": self.context_window,
             "max_output_tokens": self.max_output_tokens,
             "input_modalities": self.input_modalities,
@@ -347,6 +349,7 @@ CAPABILITIES_BY_API_FORMAT: dict[str, ProviderCapabilities] = {
         tools=True,
         streaming=True,
         reasoning=True,
+        default_reasoning_level="medium",
         supported_api_formats=frozenset({"chat_completions"}),
         reasoning_transport="reasoning_content",
     ),
@@ -356,6 +359,7 @@ CAPABILITIES_BY_API_FORMAT: dict[str, ProviderCapabilities] = {
         streaming=True,
         web_search=True,
         reasoning=True,
+        default_reasoning_level="medium",
         supported_api_formats=frozenset({"responses"}),
         reasoning_transport="responses_item",
     ),
@@ -365,6 +369,7 @@ CAPABILITIES_BY_API_FORMAT: dict[str, ProviderCapabilities] = {
         streaming=True,
         reasoning=True,
         reasoning_efforts=frozenset({"low", "medium", "high", "max"}),
+        default_reasoning_level="medium",
         supported_api_formats=frozenset({"anthropic_messages"}),
         reasoning_transport="anthropic_thinking",
     ),

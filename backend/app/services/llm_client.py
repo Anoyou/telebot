@@ -92,6 +92,7 @@ _STREAM_SSE_TOTAL_LIMIT_BYTES = 8 * 1_048_576
 _RESPONSES_ALLOWED_INCOMPLETE_REASONS = frozenset(
     {"max_output_tokens", "max_tokens", "content_filter", "safety"}
 )
+_TOOL_MEDIA_MARKER = "[TelePilot：工具结果媒体已转为后续原生媒体块]"
 _ERROR_SECRET_VALUES: ContextVar[tuple[str, ...]] = ContextVar(
     "llm_error_secret_values",
     default=(),
@@ -378,10 +379,101 @@ def _parse_tool_arguments(value: object) -> dict[str, Any]:
     return {"value": value}
 
 
+@dataclass(frozen=True)
+class _ToolResultMediaPlan:
+    text: str
+    images: tuple[ImageContent, ...] = ()
+
+
+def _image_from_data_url(value: object) -> ImageContent | None:
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    match = re.fullmatch(r"data:(image/[a-z0-9.+-]+);base64,([A-Za-z0-9+/=\s]+)", candidate, re.I)
+    if not match:
+        return None
+    try:
+        data = base64.b64decode(match.group(2), validate=True)
+    except (ValueError, base64.binascii.Error):
+        return None
+    if not data:
+        return None
+    return ImageContent(data=data, mime_type=match.group(1).lower())
+
+
+def _extract_tool_media(value: object, images: list[ImageContent], depth: int = 0) -> object:
+    """Extract only explicit image blocks/data URLs from tool output.
+
+    Generic long strings are intentionally untouched: a base64-looking value is
+    not media unless it is a complete, typed image data URL or a known block.
+    """
+
+    if depth > 32:
+        return value
+    if isinstance(value, str):
+        image = _image_from_data_url(value)
+        if image is not None:
+            images.append(image)
+            return _TOOL_MEDIA_MARKER
+        return value
+    if isinstance(value, ImageContent):
+        images.append(value)
+        return _TOOL_MEDIA_MARKER
+    if isinstance(value, list):
+        return [_extract_tool_media(item, images, depth + 1) for item in value]
+    if isinstance(value, tuple):
+        return [_extract_tool_media(item, images, depth + 1) for item in value]
+    if isinstance(value, dict):
+        item_type = str(value.get("type") or "").lower()
+        if item_type in {"image", "input_image", "image_url"}:
+            image_value = value.get("url") or value.get("image_url")
+            image_detail = value.get("detail")
+            if isinstance(image_value, dict):
+                image_detail = image_value.get("detail") or image_detail
+                image_value = image_value.get("url")
+            image = _image_from_data_url(image_value)
+            if image is not None:
+                images.append(image)
+                return _TOOL_MEDIA_MARKER
+            if (
+                isinstance(image_value, str)
+                and image_value.strip().lower().startswith(("http://", "https://"))
+            ):
+                images.append(ImageContent(url=image_value.strip(), detail=image_detail))
+                return _TOOL_MEDIA_MARKER
+            source = value.get("source")
+            if isinstance(source, dict) and str(source.get("type") or "") == "base64":
+                raw = source.get("data")
+                mime = source.get("media_type")
+                if isinstance(raw, str) and isinstance(mime, str) and mime.startswith("image/"):
+                    try:
+                        data = base64.b64decode(raw, validate=True)
+                    except (ValueError, base64.binascii.Error):
+                        data = b""
+                    if data:
+                        images.append(ImageContent(data=data, mime_type=mime))
+                        return _TOOL_MEDIA_MARKER
+        return {
+            str(key): _extract_tool_media(child, images, depth + 1)
+            for key, child in value.items()
+        }
+    return value
+
+
+def _tool_result_media_plan(result: ToolResult) -> _ToolResultMediaPlan:
+    images: list[ImageContent] = []
+    sanitized = _extract_tool_media(result.content, images)
+    if isinstance(result.content, str) and sanitized == _TOOL_MEDIA_MARKER:
+        text = _TOOL_MEDIA_MARKER
+    elif isinstance(sanitized, str):
+        text = sanitized
+    else:
+        text = json.dumps(sanitized, ensure_ascii=False, separators=(",", ":"))
+    return _ToolResultMediaPlan(text=text, images=tuple(images))
+
+
 def _tool_result_text(result: ToolResult) -> str:
-    if isinstance(result.content, str):
-        return result.content
-    return json.dumps(result.content, ensure_ascii=False, separators=(",", ":"))
+    return _tool_result_media_plan(result).text
 
 
 def _tool_specs_openai(
@@ -454,17 +546,42 @@ def _openai_content_text(value: object) -> str:
 def _chat_messages(
     messages: tuple[ModelMessage, ...],
     tool_names: Mapping[str, str],
+    reasoning_transport: str = "native",
 ) -> list[dict[str, Any]]:
     output: list[dict[str, Any]] = []
     for message in messages:
         if message.role is MessageRole.TOOL:
+            pending_media: list[ImageContent] = []
             for result in message.tool_results:
+                plan = _tool_result_media_plan(result)
                 output.append(
                     {
                         "role": "tool",
                         "tool_call_id": result.call_id,
                         "name": to_wire_tool_name(result.name, tool_names),
-                        "content": _tool_result_text(result),
+                        "content": plan.text,
+                    }
+                )
+                pending_media.extend(plan.images)
+            if pending_media:
+                output.append(
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": _TOOL_MEDIA_MARKER},
+                            *[
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": image.url
+                                        if image.url
+                                        else _to_data_url(image.data or b""),
+                                        **({"detail": image.detail} if image.detail else {}),
+                                    },
+                                }
+                                for image in pending_media
+                            ],
+                        ],
                     }
                 )
             continue
@@ -498,7 +615,8 @@ def _chat_messages(
             ]
         # DeepSeek 思考+工具：有 tool_calls 的 assistant 轮必须回传 reasoning_content
         if (
-            message.role is MessageRole.ASSISTANT
+            reasoning_transport == "reasoning_content"
+            and message.role is MessageRole.ASSISTANT
             and isinstance(message.reasoning_content, str)
             and message.reasoning_content
         ):
@@ -510,27 +628,49 @@ def _chat_messages(
 def _responses_input(
     messages: tuple[ModelMessage, ...],
     tool_names: Mapping[str, str],
+    reasoning_transport: str = "native",
 ) -> list[dict[str, Any]]:
     output: list[dict[str, Any]] = []
     for message in messages:
         if message.role is MessageRole.SYSTEM:
             continue
         if message.role is MessageRole.TOOL:
-            output.extend(
-                {
+            pending_media: list[ImageContent] = []
+            for result in message.tool_results:
+                plan = _tool_result_media_plan(result)
+                output.append({
                     "type": "function_call_output",
                     "call_id": result.call_id,
-                    "output": _tool_result_text(result),
-                }
-                for result in message.tool_results
-            )
+                    "output": plan.text,
+                })
+                pending_media.extend(plan.images)
+            if pending_media:
+                output.append(
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": _TOOL_MEDIA_MARKER},
+                            *[
+                                {
+                                    "type": "input_image",
+                                    "image_url": image.url
+                                    if image.url
+                                    else _to_data_url(image.data or b""),
+                                }
+                                for image in pending_media
+                            ],
+                        ],
+                    }
+                )
             continue
         text = message.text_content()
         # Responses reasoning item 必须与同一轮后续的 assistant message 或
         # function_call 成对出现。推理被截断且没有生成结果时不能回放，否则
         # 下一次请求会被上游以 "without its required following item" 拒绝。
         if (
-            message.role is MessageRole.ASSISTANT
+            reasoning_transport == "responses_item"
+            and message.role is MessageRole.ASSISTANT
             and isinstance(message.reasoning_content, str)
             and message.reasoning_content
             and (bool(text) or bool(message.tool_calls))
@@ -586,34 +726,62 @@ def _system_instructions(messages: tuple[ModelMessage, ...]) -> str:
     )
 
 
+def _anthropic_image_block(image: ImageContent) -> dict[str, Any]:
+    if image.url is not None:
+        return {
+            "type": "image",
+            "source": {"type": "url", "url": image.url},
+        }
+    data = image.data or b""
+    return {
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": image.mime_type or _sniff_image_mime(data),
+            "data": base64.b64encode(data).decode("ascii"),
+        },
+    }
+
+
 def _anthropic_messages(
     messages: tuple[ModelMessage, ...],
     tool_names: Mapping[str, str],
+    reasoning_transport: str = "native",
 ) -> list[dict[str, Any]]:
     output: list[dict[str, Any]] = []
     for message in messages:
         if message.role is MessageRole.SYSTEM:
             continue
         if message.role is MessageRole.TOOL:
+            results: list[dict[str, Any]] = []
+            for result in message.tool_results:
+                plan = _tool_result_media_plan(result)
+                content: object = plan.text
+                if plan.images:
+                    content = [
+                        {"type": "text", "text": plan.text},
+                        *[_anthropic_image_block(image) for image in plan.images],
+                    ]
+                results.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": result.call_id,
+                        "content": content,
+                        "is_error": result.is_error,
+                    }
+                )
             output.append(
                 {
                     "role": "user",
-                    "content": [
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": result.call_id,
-                            "content": _tool_result_text(result),
-                            "is_error": result.is_error,
-                        }
-                        for result in message.tool_results
-                    ],
+                    "content": results,
                 }
             )
             continue
         content: list[dict[str, Any]] = []
         # DeepSeek Anthropic：工具轮次需回传 thinking 块，否则后续请求 400
         if (
-            message.role is MessageRole.ASSISTANT
+            reasoning_transport == "anthropic_thinking"
+            and message.role is MessageRole.ASSISTANT
             and isinstance(message.reasoning_content, str)
             and message.reasoning_content
         ):
@@ -622,18 +790,7 @@ def _anthropic_messages(
             if isinstance(block, TextContent) and block.text:
                 content.append({"type": "text", "text": block.text})
             elif isinstance(block, ImageContent):
-                if block.data is None:
-                    raise ValueError("Anthropic 图片输入暂不支持 URL，仅支持内联字节")
-                content.append(
-                    {
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": block.mime_type or _sniff_image_mime(block.data),
-                            "data": base64.b64encode(block.data).decode("ascii"),
-                        },
-                    }
-                )
+                content.append(_anthropic_image_block(block))
         if message.role is MessageRole.ASSISTANT:
             content.extend(
                 {
@@ -758,19 +915,36 @@ def _openai_structured_response(
     message = choice.get("message") or {}
     if not isinstance(message, dict):
         raise LLMError("OpenAI 返回结构异常: message 不是对象")
-    tool_calls = tuple(
-        ToolCall(
-            id=str(item.get("id") or ""),
-            name=from_wire_tool_name(str((item.get("function") or {}).get("name") or ""), tool_names),
-            arguments=_parse_tool_arguments((item.get("function") or {}).get("arguments")),
+    raw_tool_calls = message.get("tool_calls") or []
+    if not isinstance(raw_tool_calls, list):
+        raise LLMError("OpenAI 返回结构异常: tool_calls 不是数组", category="upstream_tool_call_dropped")
+    finish_reason = choice.get("finish_reason")
+    malformed_tool_call = False
+    normalized_tool_calls: list[ToolCall] = []
+    for item in raw_tool_calls:
+        if not isinstance(item, dict):
+            malformed_tool_call = True
+            continue
+        function = item.get("function")
+        if not isinstance(function, dict) or not str(function.get("name") or "").strip():
+            malformed_tool_call = True
+            continue
+        normalized_tool_calls.append(
+            ToolCall(
+                id=str(item.get("id") or ""),
+                name=from_wire_tool_name(str(function.get("name") or ""), tool_names),
+                arguments=_parse_tool_arguments(function.get("arguments")),
+            )
         )
-        for item in message.get("tool_calls") or []
-        if isinstance(item, dict) and str((item.get("function") or {}).get("name") or "")
-    )
+    if (malformed_tool_call or (finish_reason == "tool_calls" and not normalized_tool_calls)) and finish_reason != "length":
+        raise LLMError(
+            "上游工具调用缺少函数名，无法安全执行",
+            category="upstream_tool_call_dropped",
+        )
+    tool_calls = tuple(normalized_tool_calls)
     usage = data.get("usage") or {}
     if not isinstance(usage, dict):
         usage = {}
-    finish_reason = choice.get("finish_reason")
     refusal = message.get("refusal")
     normalized_finish_reason = stop_reason_from_provider(finish_reason)
     if normalized_finish_reason in {StopReason.FAILED, StopReason.CANCELLED}:
@@ -1597,6 +1771,7 @@ class OpenAIClient(LLMClient):
         proxy_url: str | None = None,
         identity: ClientIdentity | None = None,
         compatibility_headers: Mapping[str, str] | None = None,
+        reasoning_transport: str = "native",
     ):
         self._api_key = api_key
         self._base_url = normalize_base_url(base_url or "https://api.openai.com/v1")
@@ -1604,6 +1779,7 @@ class OpenAIClient(LLMClient):
         self._proxy_url = proxy_url
         self._identity = identity
         self._compatibility_headers = dict(compatibility_headers or {})
+        self._reasoning_transport = reasoning_transport
 
     async def complete(
         self,
@@ -1954,7 +2130,7 @@ class OpenAIClient(LLMClient):
             headers["Authorization"] = f"Bearer {self._api_key}"
         body: dict[str, Any] = {
             "model": request.model or self._model,
-            "messages": _chat_messages(request.messages, tool_names),
+            "messages": _chat_messages(request.messages, tool_names, self._reasoning_transport),
             "max_tokens": request.max_output_tokens,
         }
         if request.tools:
@@ -2016,7 +2192,7 @@ class OpenAIClient(LLMClient):
             headers["Authorization"] = f"Bearer {self._api_key}"
         body: dict[str, Any] = {
             "model": request.model or self._model,
-            "messages": _chat_messages(request.messages, tool_names),
+            "messages": _chat_messages(request.messages, tool_names, self._reasoning_transport),
             "max_tokens": request.max_output_tokens,
             "stream": True,
         }
@@ -2043,13 +2219,18 @@ class OpenAIClient(LLMClient):
         text_parts: list[str] = []
         reasoning_parts: list[str] = []
         refusal_parts: list[str] = []
-        tool_parts: dict[int, dict[str, Any]] = {}
+        tool_parts: dict[str, dict[str, Any]] = {}
+        anonymous_tool_counter = 0
+        # Some OpenAI-compatible gateways omit either ``index`` or ``id`` (or
+        # switch between them across frames). Keep an ordinal alias table so
+        # partial arguments remain attached to the same call without changing
+        # insertion order when a later frame reveals an id.
+        ordinal_tool_keys: list[str] = []
         terminal_sent = False
 
         def terminal_response(*, stream_fallback: bool = False) -> ModelResponse:
             calls: list[dict[str, Any]] = []
-            for index in sorted(tool_parts):
-                item = tool_parts[index]
+            for item in tool_parts.values():
                 function = item.get("function") if isinstance(item.get("function"), dict) else {}
                 calls.append(
                     {
@@ -2170,16 +2351,61 @@ class OpenAIClient(LLMClient):
                             if isinstance(refusal, str) and refusal:
                                 refusal_parts.append(refusal)
                             raw_calls = delta.get("tool_calls") or []
+                            call_ordinal = 0
                             for raw_call in raw_calls if isinstance(raw_calls, list) else []:
                                 if not isinstance(raw_call, dict):
                                     continue
-                                try:
-                                    index = int(raw_call.get("index") or 0)
-                                except (TypeError, ValueError):
-                                    raise LLMError("OpenAI streaming tool_call index 格式无效") from None
-                                current = tool_parts.setdefault(index, {"function": {}})
-                                if raw_call.get("id"):
-                                    current["id"] = str(raw_call["id"])
+                                call_id = str(raw_call.get("id") or "").strip()
+                                raw_index = raw_call.get("index")
+                                key: str | None = None
+                                if call_id:
+                                    # Prefer an already established id even if
+                                    # this frame also changes the index shape.
+                                    for candidate_key, candidate in tool_parts.items():
+                                        if candidate.get("id") == call_id:
+                                            key = candidate_key
+                                            break
+                                if raw_index is not None:
+                                    if isinstance(raw_index, bool) or not isinstance(raw_index, int) or raw_index < 0:
+                                        raise LLMError("OpenAI streaming tool_call index 格式无效")
+                                    indexed_key = f"idx:{raw_index}"
+                                    indexed = tool_parts.get(indexed_key)
+                                    if indexed is not None:
+                                        key = indexed_key
+                                    elif key is None:
+                                        # A provider may reveal an index only
+                                        # after beginning the call anonymously.
+                                        # Reuse that anonymous ordinal instead
+                                        # of creating a duplicate indexed call.
+                                        if call_ordinal < len(ordinal_tool_keys):
+                                            candidate_key = ordinal_tool_keys[call_ordinal]
+                                            candidate = tool_parts.get(candidate_key)
+                                            if (
+                                                candidate_key.startswith("anon:")
+                                                and candidate is not None
+                                                and not candidate.get("id")
+                                            ):
+                                                key = candidate_key
+                                        if key is None:
+                                            key = indexed_key
+                                if key is None and call_ordinal < len(ordinal_tool_keys):
+                                    candidate_key = ordinal_tool_keys[call_ordinal]
+                                    candidate = tool_parts.get(candidate_key)
+                                    if candidate is not None and (not call_id or not candidate.get("id")):
+                                        key = candidate_key
+                                if key is None:
+                                    if call_id:
+                                        key = f"id:{call_id}"
+                                    else:
+                                        anonymous_tool_counter += 1
+                                        key = f"anon:{anonymous_tool_counter}"
+                                if call_ordinal >= len(ordinal_tool_keys):
+                                    ordinal_tool_keys.extend("" for _ in range(call_ordinal + 1 - len(ordinal_tool_keys)))
+                                ordinal_tool_keys[call_ordinal] = key
+                                call_ordinal += 1
+                                current = tool_parts.setdefault(key, {"function": {}})
+                                if call_id:
+                                    current["id"] = call_id
                                 function = raw_call.get("function") or {}
                                 if isinstance(function, dict):
                                     current_function = current.setdefault("function", {})
@@ -2382,6 +2608,7 @@ class AnthropicClient(LLMClient):
         identity: ClientIdentity | None = None,
         compatibility_headers: Mapping[str, str] | None = None,
         provider_scope: str | None = None,
+        reasoning_transport: str | None = None,
     ):
         self._api_key = api_key
         self._base_url = normalize_base_url(base_url or "https://api.anthropic.com/v1")
@@ -2391,6 +2618,13 @@ class AnthropicClient(LLMClient):
         self._identity = identity
         self._provider_scope = provider_scope or f"{self._base_url}|{protocol_profile}"
         self._compatibility_headers = dict(compatibility_headers or {})
+        self._reasoning_transport = reasoning_transport or resolve_protocol_profile(
+            LLM_API_FORMAT_ANTHROPIC_MESSAGES,
+            protocol_profile,
+            base_url=self._base_url,
+            model=model,
+            infer_when_standard=True,
+        ).reasoning_transport
 
     def _headers(self, request: ModelRequest | None = None) -> dict[str, str]:
         _activate_error_secrets(self._compatibility_headers.values())
@@ -2660,7 +2894,7 @@ class AnthropicClient(LLMClient):
             "model": request.model or self._model,
             "max_tokens": request.max_output_tokens,
             "system": _system_instructions(request.messages),
-            "messages": _anthropic_messages(request.messages, tool_names),
+            "messages": _anthropic_messages(request.messages, tool_names, self._reasoning_transport),
             "stream": False,
         }
         if request.tools:
@@ -2723,7 +2957,7 @@ class AnthropicClient(LLMClient):
             "model": request.model or self._model,
             "max_tokens": request.max_output_tokens,
             "system": _system_instructions(request.messages),
-            "messages": _anthropic_messages(request.messages, tool_names),
+            "messages": _anthropic_messages(request.messages, tool_names, self._reasoning_transport),
             "stream": True,
         }
         if request.tools:
@@ -3200,6 +3434,7 @@ class ResponsesClient(LLMClient):
         compatibility_headers: Mapping[str, str] | None = None,
         protocol_profile: str = LLM_PROTOCOL_PROFILE_STANDARD,
         provider_scope: str | None = None,
+        reasoning_transport: str | None = None,
     ):
         self._api_key = api_key
         self._base_url = normalize_base_url(base_url or "https://api.openai.com/v1")
@@ -3217,6 +3452,7 @@ class ResponsesClient(LLMClient):
             f"{self._base_url}|{self._protocol_profile.name}"
         )
         self._compatibility_headers = dict(compatibility_headers or {})
+        self._reasoning_transport = reasoning_transport or self._protocol_profile.reasoning_transport
 
     def _client_kwargs(self, timeout_seconds: int | None) -> dict[str, object]:
         kwargs: dict[str, object] = {"timeout": _timeout_for_call(self._base_url, timeout_seconds)}
@@ -3406,7 +3642,7 @@ class ResponsesClient(LLMClient):
         body: dict[str, Any] = {
             "model": request.model or self._model,
             "instructions": _system_instructions(request.messages),
-            "input": _responses_input(request.messages, tool_names),
+            "input": _responses_input(request.messages, tool_names, self._reasoning_transport),
             "max_output_tokens": request.max_output_tokens,
             "stream": False,
             "store": False,
@@ -3483,7 +3719,7 @@ class ResponsesClient(LLMClient):
         body: dict[str, Any] = {
             "model": request.model or self._model,
             "instructions": _system_instructions(request.messages),
-            "input": _responses_input(request.messages, tool_names),
+            "input": _responses_input(request.messages, tool_names, self._reasoning_transport),
             "max_output_tokens": request.max_output_tokens,
             "stream": True,
             "store": False,
@@ -4750,6 +4986,33 @@ def _diagnostic_hint(status: int, body: str) -> str:
     return f"  ↳ [{category}] {suggestion}" if suggestion else f"  ↳ [{category}]"
 
 
+def _reasoning_transport_for_model(
+    profile: ProviderProtocolProfile,
+    models: Iterable[Mapping[str, Any]],
+    model: str,
+) -> str:
+    """Only replay reasoning history when the provider explicitly supports it."""
+
+    if (
+        profile.name != LLM_PROTOCOL_PROFILE_STANDARD
+        or LLM_API_FORMAT_CHAT_COMPLETIONS not in profile.api_formats
+    ):
+        return profile.reasoning_transport
+    for metadata in models:
+        if str(metadata.get("id") or "").strip() != model:
+            continue
+        value = metadata.get("reasoning_transport")
+        if isinstance(value, str) and value in {
+            "none",
+            "reasoning_content",
+            "responses_item",
+            "encrypted_reasoning_item",
+            "anthropic_thinking",
+        }:
+            return value
+    return "native"
+
+
 def _describe_http_error(exc: BaseException, base_url: str | None) -> str:
     """把 httpx 异常翻译成"用户能看懂的报错"。
 
@@ -4845,6 +5108,9 @@ def build_client(
         getattr(provider_row, "request_headers_enc", None),
         request_scope,
     )
+    reasoning_transport = _reasoning_transport_for_model(
+        protocol_profile, getattr(provider_row, "models", None) or [], model
+    )
 
     if fmt == LLM_API_FORMAT_CHAT_COMPLETIONS:
         # ollama 兜底 base_url（chat_completions 也兼容）
@@ -4858,6 +5124,7 @@ def build_client(
             proxy_url=proxy_url,
             identity=identity,
             compatibility_headers=compatibility_headers,
+            reasoning_transport=reasoning_transport,
         )
     if fmt == LLM_API_FORMAT_RESPONSES:
         return ResponsesClient(
@@ -4869,6 +5136,7 @@ def build_client(
             provider_scope=f"provider:{provider_row.id}|{protocol_profile.name}",
             identity=identity,
             compatibility_headers=compatibility_headers,
+            reasoning_transport=reasoning_transport,
         )
     if fmt == LLM_API_FORMAT_ANTHROPIC_MESSAGES:
         return AnthropicClient(
@@ -4880,6 +5148,7 @@ def build_client(
             provider_scope=f"provider:{provider_row.id}|{protocol_profile.name}",
             identity=identity,
             compatibility_headers=compatibility_headers,
+            reasoning_transport=reasoning_transport,
         )
     raise ValueError(f"未知 api_format: {fmt}")
 
@@ -4944,6 +5213,7 @@ def build_client_from_dto(
         dto.request_headers_enc,
         request_scope,
     )
+    reasoning_transport = _reasoning_transport_for_model(protocol_profile, dto.models, model)
 
     if fmt == LLM_API_FORMAT_CHAT_COMPLETIONS:
         base = dto.base_url
@@ -4956,6 +5226,7 @@ def build_client_from_dto(
             proxy_url=final_proxy,
             identity=identity,
             compatibility_headers=compatibility_headers,
+            reasoning_transport=reasoning_transport,
         )
     if fmt == LLM_API_FORMAT_RESPONSES:
         return ResponsesClient(
@@ -4967,6 +5238,7 @@ def build_client_from_dto(
             provider_scope=f"provider:{dto.id}|{protocol_profile.name}",
             identity=identity,
             compatibility_headers=compatibility_headers,
+            reasoning_transport=reasoning_transport,
         )
     if fmt == LLM_API_FORMAT_ANTHROPIC_MESSAGES:
         return AnthropicClient(
@@ -4978,6 +5250,7 @@ def build_client_from_dto(
             provider_scope=f"provider:{dto.id}|{protocol_profile.name}",
             identity=identity,
             compatibility_headers=compatibility_headers,
+            reasoning_transport=reasoning_transport,
         )
     raise ValueError(f"未知 api_format: {fmt}")
 

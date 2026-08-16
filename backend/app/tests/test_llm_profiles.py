@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from app.db.models.command import normalize_protocol_profile
 from app.services.llm_codecs.responses import plan_responses_body
-from app.services.llm_dto import LLMProviderDTO
+from app.services.llm_dto import LLMProviderDTO, _reasoning_levels
 from app.services.llm_profiles import infer_protocol_profile, resolve_protocol_profile
 from app.services.llm_protocol import provider_models_endpoints
 
@@ -72,6 +72,39 @@ def test_model_metadata_exposes_extended_capability_facts() -> None:
     assert capabilities.max_output_tokens == 8192
     assert capabilities.input_modalities == frozenset({"text", "image"})
     assert capabilities.protocol_compatible is True
+
+
+def test_model_metadata_normalizes_reasoning_levels_and_default() -> None:
+    provider = _provider(
+        models=[
+            {
+                "id": "model",
+                "supported_reasoning_levels": ["max", "low", "low", "medium", "unknown"],
+                "reasoning_efforts": ["high"],
+                "default_reasoning_level": "low",
+            }
+        ]
+    )
+
+    levels, default_level = _reasoning_levels(provider.models[0])
+    capabilities = provider.capabilities_for_model("model")
+
+    assert levels == ("low", "medium", "max")
+    assert default_level == "low"
+    assert capabilities.reasoning_efforts == frozenset({"low", "medium", "max"})
+    assert capabilities.default_reasoning_level == "low"
+
+
+def test_model_metadata_falls_back_to_medium_or_highest_reasoning_level() -> None:
+    medium_provider = _provider(
+        models=[{"id": "model", "supported_reasoning_levels": ["high", "medium"]}]
+    )
+    highest_provider = _provider(
+        models=[{"id": "model", "supported_reasoning_levels": ["minimal", "low"]}]
+    )
+
+    assert medium_provider.capabilities_for_model("model").default_reasoning_level == "medium"
+    assert highest_provider.capabilities_for_model("model").default_reasoning_level == "low"
 
 
 def test_profile_inference_and_model_endpoint_candidates() -> None:

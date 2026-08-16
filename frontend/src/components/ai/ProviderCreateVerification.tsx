@@ -485,6 +485,8 @@ export function ProviderCreateVerification({
               resetVerification();
             }}
             declaredEfforts={selectedMetadata?.reasoning_efforts}
+            supportedLevels={selectedMetadata?.supported_reasoning_levels}
+            defaultLevel={selectedMetadata?.default_reasoning_level}
             apiFormat={apiFormat}
             modelId={selectedModel}
             disabled={status === "running"}

@@ -1579,7 +1579,9 @@ function CommandEditDialog({
                         (item) => item.id === modelId,
                       );
                       const capability = reasoningEffortsForModel({
-                        declared: metadata?.reasoning_efforts,
+                        declared:
+                          metadata?.supported_reasoning_levels ??
+                          metadata?.reasoning_efforts,
                         apiFormat: (provider?.api_format as LLMApiFormat) || "responses",
                         modelId,
                       });
@@ -1707,6 +1709,8 @@ function CommandEditDialog({
                         value={form.ai_reasoning_effort}
                         onChange={(effort) => setField("ai_reasoning_effort", effort)}
                         declaredEfforts={selectedReasoningModel?.reasoning_efforts}
+                        supportedLevels={selectedReasoningModel?.supported_reasoning_levels}
+                        defaultLevel={selectedReasoningModel?.default_reasoning_level}
                         apiFormat={(selectedReasoningProvider?.api_format as LLMApiFormat) || "responses"}
                         modelId={selectedReasoningModelId}
                       />

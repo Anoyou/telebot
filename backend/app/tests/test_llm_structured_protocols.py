@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import re
 from dataclasses import replace
@@ -7,8 +8,20 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.services.llm_client import AnthropicClient, OpenAIClient, ResponsesClient
+from app.services.llm_client import (
+    AnthropicClient,
+    LLMError,
+    OpenAIClient,
+    ResponsesClient,
+    _anthropic_messages,
+    _chat_messages,
+    _extract_tool_media,
+    _openai_structured_response,
+    _reasoning_transport_for_model,
+    _responses_input,
+)
 from app.services.llm_protocol import (
+    ImageContent,
     MessageRole,
     ModelMessage,
     ModelRequest,
@@ -112,6 +125,7 @@ def test_responses_input_preserves_deepseek_reasoning_for_tool_round() -> None:
     items = _responses_input(
         (request.messages[0], request.messages[1], assistant, request.messages[3]),
         {request.tools[0].name: wire_tool_name(request.tools[0].name)},
+        "responses_item",
     )
 
     assert items[1]["type"] == "reasoning"
@@ -121,8 +135,6 @@ def test_responses_input_preserves_deepseek_reasoning_for_tool_round() -> None:
 
 
 def test_responses_input_drops_orphan_reasoning_without_following_output() -> None:
-    from app.services.llm_client import _responses_input
-
     items = _responses_input(
         (
             ModelMessage.text(MessageRole.USER, "question"),
@@ -132,9 +144,196 @@ def test_responses_input_drops_orphan_reasoning_without_following_output() -> No
             ),
         ),
         {},
+        "responses_item",
     )
 
     assert all(item.get("type") != "reasoning" for item in items)
+
+
+def test_reasoning_history_requires_explicit_transport() -> None:
+    messages = (
+        ModelMessage(
+            role=MessageRole.ASSISTANT,
+            content=(),
+            tool_calls=(ToolCall("c1", "lookup", {"id": 1}),),
+            reasoning_content="need lookup",
+        ),
+    )
+
+    assert "reasoning_content" not in _chat_messages(messages, {"lookup": "lookup"})[0]
+    assert all(item.get("type") != "reasoning" for item in _responses_input(messages, {}))
+    assert all(
+        block.get("type") != "thinking"
+        for block in _anthropic_messages(messages, {"lookup": "lookup"})[0]["content"]
+    )
+
+    assert (
+        _chat_messages(messages, {"lookup": "lookup"}, "reasoning_content")[0][
+            "reasoning_content"
+        ]
+        == "need lookup"
+    )
+    assert _responses_input(messages, {"lookup": "lookup"}, "responses_item")[0]["type"] == (
+        "reasoning"
+    )
+    assert _anthropic_messages(
+        messages, {"lookup": "lookup"}, "anthropic_thinking"
+    )[0]["content"][0] == {"type": "thinking", "thinking": "need lookup"}
+
+
+def test_standard_chat_reasoning_transport_requires_model_metadata() -> None:
+    from app.services.llm_profiles import resolve_protocol_profile
+
+    profile = resolve_protocol_profile("chat_completions", "standard")
+
+    assert _reasoning_transport_for_model(profile, [], "kimi-k3") == "native"
+    assert (
+        _reasoning_transport_for_model(
+            profile,
+            [{"id": "kimi-k3", "reasoning_transport": "reasoning_content"}],
+            "kimi-k3",
+        )
+        == "reasoning_content"
+    )
+
+
+@pytest.mark.parametrize(
+    "tool_calls",
+    [
+        [],
+        [{"id": "call-1", "function": {"arguments": "{}"}}],
+    ],
+)
+def test_openai_tool_call_without_function_name_is_rejected(tool_calls: list[dict]) -> None:
+    with pytest.raises(LLMError) as error:
+        _openai_structured_response(
+            {
+                "choices": [
+                    {
+                        "finish_reason": "tool_calls",
+                        "message": {"content": None, "tool_calls": tool_calls},
+                    }
+                ]
+            },
+            request=_request(),
+            tool_names={"lookup": "lookup"},
+        )
+
+    assert error.value.category == "upstream_tool_call_dropped"
+
+
+def test_openai_length_finish_reason_wins_over_malformed_tool_call() -> None:
+    response = _openai_structured_response(
+        {
+            "choices": [
+                {
+                    "finish_reason": "length",
+                    "message": {
+                        "content": None,
+                        "tool_calls": [{"id": "call-1", "function": {"arguments": "{}"}}],
+                    },
+                }
+            ]
+        },
+        request=_request(),
+        tool_names={"lookup": "lookup"},
+    )
+
+    assert response.stop_reason is StopReason.MAX_TOKENS
+    assert response.tool_calls == ()
+
+
+def test_tool_result_media_extraction_is_explicit_and_protocol_native() -> None:
+    image_bytes = b"\x89PNG\r\n\x1a\n"
+    data_url = f"data:image/png;base64,{base64.b64encode(image_bytes).decode()}"
+    ordinary = "A" * 12_000
+    malformed = "data:image/png;base64," + ("A" * 8191) + "!"
+
+    images: list[ImageContent] = []
+    assert _extract_tool_media(ordinary, images) == ordinary
+    assert images == []
+    assert _extract_tool_media(malformed, images) == malformed
+    assert images == []
+
+    extracted = _extract_tool_media(data_url, images)
+    assert extracted != data_url
+    assert images == [ImageContent(data=image_bytes, mime_type="image/png")]
+
+    tool_message = ModelMessage(
+        role=MessageRole.TOOL,
+        tool_results=(ToolResult("call-1", "lookup", data_url),),
+    )
+    chat = _chat_messages((tool_message,), {"lookup": "lookup"})
+    responses = _responses_input((tool_message,), {"lookup": "lookup"})
+    anthropic = _anthropic_messages((tool_message,), {"lookup": "lookup"})
+
+    assert chat[0]["content"] != data_url
+    assert chat[1]["content"][1]["type"] == "image_url"
+    assert responses[0]["output"] != data_url
+    assert responses[1]["content"][1]["type"] == "input_image"
+    source = anthropic[0]["content"][0]["content"][1]["source"]
+    assert source == {
+        "type": "base64",
+        "media_type": "image/png",
+        "data": base64.b64encode(image_bytes).decode("ascii"),
+    }
+
+
+def test_tool_result_url_image_block_is_protocol_native() -> None:
+    image_url = "https://example.test/image.png"
+    tool_message = ModelMessage(
+        role=MessageRole.TOOL,
+        tool_results=(
+            ToolResult(
+                "call-1",
+                "lookup",
+                {
+                    "type": "image_url",
+                    "image_url": {"url": image_url, "detail": "high"},
+                },
+            ),
+        ),
+    )
+
+    chat = _chat_messages((tool_message,), {"lookup": "lookup"})
+    responses = _responses_input((tool_message,), {"lookup": "lookup"})
+    anthropic = _anthropic_messages((tool_message,), {"lookup": "lookup"})
+
+    assert chat[1]["content"][1] == {
+        "type": "image_url",
+        "image_url": {"url": image_url, "detail": "high"},
+    }
+    assert responses[1]["content"][1] == {
+        "type": "input_image",
+        "image_url": image_url,
+    }
+    assert anthropic[0]["content"][0]["content"][1] == {
+        "type": "image",
+        "source": {"type": "url", "url": image_url},
+    }
+
+
+def test_anthropic_tool_result_preserves_url_image_source() -> None:
+    messages = (
+        ModelMessage(
+            role=MessageRole.TOOL,
+            tool_results=(
+                ToolResult(
+                    "call-1",
+                    "lookup",
+                    ImageContent(url="https://example.test/image.png"),
+                ),
+            ),
+        ),
+    )
+
+    content = _anthropic_messages(messages, {"lookup": "lookup"})[0]["content"][0][
+        "content"
+    ]
+    assert content[1] == {
+        "type": "image",
+        "source": {"type": "url", "url": "https://example.test/image.png"},
+    }
 
 
 @pytest.mark.asyncio
@@ -244,8 +443,6 @@ async def test_chat_adapter_sends_thinking_control_and_keeps_reasoning_with_tool
 
 @pytest.mark.asyncio
 async def test_chat_messages_round_trip_reasoning_content_on_tool_turn() -> None:
-    from app.services.llm_client import _chat_messages
-
     messages = (
         ModelMessage(
             role=MessageRole.ASSISTANT,
@@ -258,7 +455,7 @@ async def test_chat_messages_round_trip_reasoning_content_on_tool_turn() -> None
             tool_results=(ToolResult("c1", "lookup", {"ok": True}),),
         ),
     )
-    payload = _chat_messages(messages, {"lookup": "lookup"})
+    payload = _chat_messages(messages, {"lookup": "lookup"}, "reasoning_content")
     assert payload[0]["reasoning_content"] == "need lookup"
     assert payload[0]["tool_calls"][0]["function"]["name"] == "lookup"
 
@@ -893,6 +1090,275 @@ async def test_chat_stream_invoke_emits_real_deltas_and_joins_tool_arguments() -
     )
     assert terminal.stop_reason is StopReason.TOOL_CALLS
     assert terminal.stream_fallback is False
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_tool_call_without_index_joins_by_id() -> None:
+    response = _StreamingResponse(
+        _sse_chunks(
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "id": "call-no-index",
+                                    "function": {"name": "lookup", "arguments": '{"id":'},
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "id": "call-no-index",
+                                    "function": {"arguments": "7}"},
+                                }
+                            ]
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ]
+            },
+            "[DONE]",
+        )
+    )
+    with patch(
+        "app.services.llm_client.httpx.AsyncClient",
+        return_value=_StreamingClient(response),
+    ):
+        events = [
+            event
+            async for event in OpenAIClient(
+                "sk", "https://api.example/v1", "model"
+            ).stream_invoke(_request())
+        ]
+
+    terminal = events[-1].response
+    assert terminal is not None
+    assert terminal.tool_calls == (ToolCall("call-no-index", "lookup", {"id": 7}),)
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_tool_calls_without_index_keep_distinct_ids_in_same_chunk() -> None:
+    response = _StreamingResponse(
+        _sse_chunks(
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "id": "call-a",
+                                    "function": {"name": "lookup", "arguments": '{"id":1}'},
+                                },
+                                {
+                                    "id": "call-b",
+                                    "function": {"name": "lookup", "arguments": '{"id":2}'},
+                                },
+                            ]
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ]
+            },
+            "[DONE]",
+        )
+    )
+    with patch(
+        "app.services.llm_client.httpx.AsyncClient",
+        return_value=_StreamingClient(response),
+    ):
+        events = [
+            event
+            async for event in OpenAIClient(
+                "sk", "https://api.example/v1", "model"
+            ).stream_invoke(_request())
+        ]
+
+    terminal = events[-1].response
+    assert terminal is not None
+    assert terminal.tool_calls == (
+        ToolCall("call-a", "lookup", {"id": 1}),
+        ToolCall("call-b", "lookup", {"id": 2}),
+    )
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_anonymous_tool_calls_in_same_chunk_do_not_collapse() -> None:
+    response = _StreamingResponse(
+        _sse_chunks(
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {"function": {"name": "lookup", "arguments": '{"id":1}'}},
+                                {"function": {"name": "lookup", "arguments": '{"id":2}'}},
+                            ]
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ]
+            },
+            "[DONE]",
+        )
+    )
+    with patch(
+        "app.services.llm_client.httpx.AsyncClient",
+        return_value=_StreamingClient(response),
+    ):
+        events = [
+            event
+            async for event in OpenAIClient(
+                "sk", "https://api.example/v1", "model"
+            ).stream_invoke(_request())
+        ]
+
+    terminal = events[-1].response
+    assert terminal is not None
+    assert [call.arguments for call in terminal.tool_calls] == [{"id": 1}, {"id": 2}]
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_anonymous_tool_calls_keep_ordinals_across_chunks() -> None:
+    response = _StreamingResponse(
+        _sse_chunks(
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {"function": {"name": "lookup", "arguments": '{"id":'}},
+                                {"function": {"name": "lookup", "arguments": '{"id":'}},
+                            ]
+                        },
+                        "finish_reason": None,
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {"function": {"arguments": "1}"}},
+                                {"function": {"arguments": "2}"}},
+                            ]
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ]
+            },
+            "[DONE]",
+        )
+    )
+    with patch(
+        "app.services.llm_client.httpx.AsyncClient",
+        return_value=_StreamingClient(response),
+    ):
+        events = [
+            event
+            async for event in OpenAIClient(
+                "sk", "https://api.example/v1", "model"
+            ).stream_invoke(_request())
+        ]
+
+    terminal = events[-1].response
+    assert terminal is not None
+    assert [call.arguments for call in terminal.tool_calls] == [{"id": 1}, {"id": 2}]
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_tool_calls_merge_mixed_anonymous_index_and_id_frames() -> None:
+    response = _StreamingResponse(
+        _sse_chunks(
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {"function": {"name": "lookup", "arguments": '{"id":'}},
+                                {"function": {"name": "lookup", "arguments": '{"id":'}},
+                            ]
+                        }
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {"index": 0, "id": "call-a", "function": {"arguments": "1}"}},
+                                {"index": 1, "id": "call-b", "function": {"arguments": "2}"}},
+                            ]
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ]
+            },
+            "[DONE]",
+        )
+    )
+    with patch(
+        "app.services.llm_client.httpx.AsyncClient",
+        return_value=_StreamingClient(response),
+    ):
+        events = [
+            event
+            async for event in OpenAIClient(
+                "sk", "https://api.example/v1", "model"
+            ).stream_invoke(_request())
+        ]
+
+    terminal = events[-1].response
+    assert terminal is not None
+    assert terminal.tool_calls == (
+        ToolCall("call-a", "lookup", {"id": 1}),
+        ToolCall("call-b", "lookup", {"id": 2}),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_index", [True, -1, 1.5, "0"])
+async def test_chat_stream_rejects_invalid_tool_call_index(invalid_index: object) -> None:
+    response = _StreamingResponse(
+        _sse_chunks(
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": invalid_index,
+                                    "function": {"name": "lookup", "arguments": "{}"},
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        )
+    )
+    with (
+        patch(
+            "app.services.llm_client.httpx.AsyncClient",
+            return_value=_StreamingClient(response),
+        ),
+        pytest.raises(LLMError, match="index 格式无效"),
+    ):
+        _ = [
+            event
+            async for event in OpenAIClient(
+                "sk", "https://api.example/v1", "model"
+            ).stream_invoke(_request())
+        ]
 
 
 @pytest.mark.asyncio

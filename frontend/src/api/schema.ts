@@ -8842,6 +8842,8 @@ export interface components {
              * @default false
              */
             custom: boolean;
+            /** Default Reasoning Level */
+            default_reasoning_level?: ("minimal" | "low" | "medium" | "high" | "xhigh" | "max") | null;
             /**
              * Enabled
              * @default true
@@ -8863,6 +8865,8 @@ export interface components {
             reasoning_transport?: ("none" | "reasoning_content" | "responses_item" | "encrypted_reasoning_item" | "anthropic_thinking") | null;
             /** Supported Api Formats */
             supported_api_formats?: ("chat_completions" | "responses" | "anthropic_messages")[] | null;
+            /** Supported Reasoning Levels */
+            supported_reasoning_levels?: ("minimal" | "low" | "medium" | "high" | "xhigh" | "max")[] | null;
             /** Supports Images */
             supports_images?: boolean | null;
             /** Supports Parallel Tool Calls */

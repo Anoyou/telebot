@@ -56,6 +56,8 @@ export function ReasoningEffortSelect({
   value,
   onChange,
   declaredEfforts,
+  supportedLevels,
+  defaultLevel,
   apiFormat,
   modelId,
   disabled,
@@ -64,12 +66,14 @@ export function ReasoningEffortSelect({
   value: ReasoningEffortValue;
   onChange: (value: ReasoningEffortValue) => void;
   declaredEfforts?: LLMReasoningEffort[] | null;
+  supportedLevels?: LLMReasoningEffort[] | null;
+  defaultLevel?: LLMReasoningEffort | null;
   apiFormat: LLMApiFormat;
   modelId?: string | null;
   disabled?: boolean;
 }) {
   const capability = reasoningEffortsForModel({
-    declared: declaredEfforts,
+    declared: supportedLevels ?? declaredEfforts,
     apiFormat,
     modelId,
   });
@@ -98,7 +102,7 @@ export function ReasoningEffortSelect({
         {capability.efforts.length === 0
           ? "当前协议未声明可调推理强度，将使用上游默认行为。"
           : capability.declared
-            ? `该模型已声明支持：${capability.efforts.join(" / ")}。`
+            ? `该模型已声明支持：${capability.efforts.join(" / ")}。默认：${defaultLevel || "跟随模型"}。`
             : "上游模型列表未声明档位；这里按协议提供候选值，需通过真实验证确认。"}
       </p>
     </div>

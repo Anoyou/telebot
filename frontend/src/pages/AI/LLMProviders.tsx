@@ -967,6 +967,8 @@ export function LLMProviders({
         supports_images: m.supports_images ?? null,
         supports_temperature: m.supports_temperature ?? null,
         reasoning_efforts: m.reasoning_efforts ?? null,
+        supported_reasoning_levels: m.supported_reasoning_levels ?? null,
+        default_reasoning_level: m.default_reasoning_level ?? null,
       })),
       request_headers: (p.request_headers || []).map((header) => ({
         name: header.name,

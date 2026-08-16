@@ -22,6 +22,26 @@ from ..db.models.command import (
     normalize_protocol_profile,
 )
 
+_REASONING_LEVEL_ORDER = ("minimal", "low", "medium", "high", "xhigh", "max")
+
+
+def _reasoning_levels(metadata: dict[str, Any]) -> tuple[tuple[str, ...], str | None]:
+    raw = metadata.get("supported_reasoning_levels")
+    if raw is None:
+        raw = metadata.get("reasoning_efforts")
+    if not isinstance(raw, list):
+        return (), None
+    declared = {str(item) for item in raw}
+    levels = tuple(level for level in _REASONING_LEVEL_ORDER if level in declared)
+    if not levels:
+        return (), None
+    explicit_default = str(metadata.get("default_reasoning_level") or "")
+    if explicit_default in levels:
+        return levels, explicit_default
+    if "medium" in levels:
+        return levels, "medium"
+    return levels, levels[-1]
+
 
 @dataclass
 class LLMProviderDTO:
@@ -270,15 +290,14 @@ class LLMProviderDTO:
             and reasoning_transport
         ):
             overrides["reasoning_transport"] = reasoning_transport
-        efforts = metadata.get("reasoning_efforts")
-        if isinstance(efforts, list):
-            normalized = frozenset(
-                str(item)
-                for item in efforts
-                if str(item) in {"minimal", "low", "medium", "high", "xhigh", "max"}
-            )
+        levels, default_level = _reasoning_levels(metadata)
+        if isinstance(metadata.get("supported_reasoning_levels"), list) or isinstance(
+            metadata.get("reasoning_efforts"), list
+        ):
+            normalized = frozenset(levels)
             overrides["reasoning"] = bool(normalized)
             overrides["reasoning_efforts"] = normalized
+            overrides["default_reasoning_level"] = default_level
         capabilities = capabilities.with_overrides(**overrides)
         return capabilities.with_overrides(**hard_disabled)
 

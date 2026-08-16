@@ -12482,6 +12482,25 @@
             "title": "Custom",
             "type": "boolean"
           },
+          "default_reasoning_level": {
+            "anyOf": [
+              {
+                "enum": [
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Reasoning Level"
+          },
           "enabled": {
             "default": true,
             "title": "Enabled",
@@ -12614,6 +12633,28 @@
               }
             ],
             "title": "Supported Api Formats"
+          },
+          "supported_reasoning_levels": {
+            "anyOf": [
+              {
+                "items": {
+                  "enum": [
+                    "minimal",
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh",
+                    "max"
+                  ],
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supported Reasoning Levels"
           },
           "supports_images": {
             "anyOf": [
@@ -18387,7 +18428,7 @@
   },
   "info": {
     "title": "TelePilot",
-    "version": "0.97.0-beta.9"
+    "version": "0.98.0-beta.1"
   },
   "openapi": "3.1.0",
   "paths": {

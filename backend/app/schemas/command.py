@@ -350,6 +350,8 @@ class ProviderModel(BaseModel):
         | None
     ) = None
     reasoning_efforts: list[Literal["minimal", "low", "medium", "high", "xhigh", "max"]] | None = None
+    supported_reasoning_levels: list[Literal["minimal", "low", "medium", "high", "xhigh", "max"]] | None = None
+    default_reasoning_level: Literal["minimal", "low", "medium", "high", "xhigh", "max"] | None = None
 
     @field_validator("id")
     @classmethod

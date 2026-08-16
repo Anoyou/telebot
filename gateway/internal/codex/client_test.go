@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -232,6 +233,161 @@ func TestStreamingResponseFailedRedactsSecretsWithoutChangingNormalEvents(t *tes
 	}
 }
 
+func TestCopySSEEnforcesTotalSizeBeforeWritingOversizedEvent(t *testing.T) {
+	input := "data: " + strings.Repeat("x", 128) + "\n\n"
+	var output bytes.Buffer
+
+	wrote, err := copySSEWithLimits(
+		&output, strings.NewReader(input), "model", "model",
+		time.Second, time.Second, 64,
+	)
+
+	var sizeFailure *sseSizeError
+	if !errors.As(err, &sizeFailure) || wrote || output.Len() != 0 {
+		t.Fatalf("err=%v wrote=%v output=%q", err, wrote, output.String())
+	}
+}
+
+func TestCopySSEAllowsEventLargerThanLegacyScannerLimit(t *testing.T) {
+	input := "data: " + strings.Repeat("x", (1<<20)+1) + "\n\n"
+
+	wrote, err := copySSEWithLimits(
+		io.Discard, strings.NewReader(input), "model", "model",
+		time.Second, time.Second, 2<<20,
+	)
+
+	if err != nil || !wrote {
+		t.Fatalf("err=%v wrote=%v", err, wrote)
+	}
+}
+
+func TestStreamingFirstEventTimeoutReturnsGatewayTimeout(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		select {
+		case <-r.Context().Done():
+		case <-time.After(time.Second):
+		}
+	}))
+	defer upstream.Close()
+
+	handler := configuredHandler(t, upstream.URL, "key", "model", "model")
+	handler.sseFirstEvent = 20 * time.Millisecond
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"model","stream":true}`))
+	request.Header.Set("X-TelePilot-Provider-ID", "1")
+	recorder := httptest.NewRecorder()
+
+	handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusGatewayTimeout || !strings.Contains(recorder.Body.String(), `"code":"timeout"`) {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestStreamingFirstEventTimeoutDoesNotCommitComments(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, ": keepalive\n\n")
+		w.(http.Flusher).Flush()
+		select {
+		case <-r.Context().Done():
+		case <-time.After(time.Second):
+		}
+	}))
+	defer upstream.Close()
+
+	handler := configuredHandler(t, upstream.URL, "key", "model", "model")
+	handler.sseFirstEvent = 20 * time.Millisecond
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader("{\"model\":\"model\",\"stream\":true}"))
+	request.Header.Set("X-TelePilot-Provider-ID", "1")
+	recorder := httptest.NewRecorder()
+
+	handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusGatewayTimeout || strings.Contains(recorder.Body.String(), "keepalive") {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestCopySSEIdleTimeoutIsNotExtendedByComments(t *testing.T) {
+	reader, writer := io.Pipe()
+	defer reader.Close()
+	defer writer.Close()
+	go func() {
+		_, _ = io.WriteString(writer, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n")
+		for range 20 {
+			time.Sleep(5 * time.Millisecond)
+			if _, err := io.WriteString(writer, ": keepalive\n\n"); err != nil {
+				return
+			}
+		}
+	}()
+
+	var output bytes.Buffer
+	wrote, err := copySSEWithLimits(
+		&output, reader, "model", "model",
+		time.Second, 20*time.Millisecond, maxBodyBytes,
+	)
+
+	var timeout *sseTimeoutError
+	if !errors.As(err, &timeout) || !wrote || timeout.phase != "idle" {
+		t.Fatalf("err=%v wrote=%v output=%q", err, wrote, output.String())
+	}
+}
+
+func TestStreamingIdleTimeoutEndsStartedStreamWithoutJSONFallback(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n")
+		w.(http.Flusher).Flush()
+		select {
+		case <-r.Context().Done():
+		case <-time.After(time.Second):
+		}
+	}))
+	defer upstream.Close()
+
+	handler := configuredHandler(t, upstream.URL, "key", "model", "model")
+	handler.sseIdle = 20 * time.Millisecond
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"model","stream":true}`))
+	request.Header.Set("X-TelePilot-Provider-ID", "1")
+	recorder := httptest.NewRecorder()
+
+	handler.ServeHTTP(recorder, request)
+
+	body := recorder.Body.String()
+	if recorder.Code != http.StatusOK || !strings.Contains(body, `"delta":"hi"`) || strings.Contains(body, `"code":"timeout"`) {
+		t.Fatalf("status=%d body=%s", recorder.Code, body)
+	}
+}
+
+func TestAggregateSSEIdleTimeoutReturnsGatewayTimeout(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n")
+		w.(http.Flusher).Flush()
+		select {
+		case <-r.Context().Done():
+		case <-time.After(time.Second):
+		}
+	}))
+	defer upstream.Close()
+
+	handler := configuredHandler(t, upstream.URL, "key", "model", "model")
+	handler.sseIdle = 20 * time.Millisecond
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"model","stream":false}`))
+	request.Header.Set("X-TelePilot-Provider-ID", "1")
+	recorder := httptest.NewRecorder()
+
+	handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusGatewayTimeout || !strings.Contains(recorder.Body.String(), `"code":"timeout"`) {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
 func TestUpstreamErrorPreservesStableFactWithoutSecret(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
@@ -384,6 +540,10 @@ func TestHTTPClientIgnoresEnvironmentProxyUnlessRouteOptsIn(t *testing.T) {
 	t.Setenv("HTTPS_PROXY", "http://environment-proxy.example:8080")
 
 	directTransport := httpClient(routing.Route{}).Transport.(*http.Transport)
+	directClient := httpClient(routing.Route{})
+	if directClient.Timeout != 0 || directTransport.ResponseHeaderTimeout != upstreamResponseHeaderTimeout {
+		t.Fatalf("client timeout=%s response_header_timeout=%s", directClient.Timeout, directTransport.ResponseHeaderTimeout)
+	}
 	request, err := http.NewRequest(http.MethodGet, "https://upstream.example/v1/responses", nil)
 	if err != nil {
 		t.Fatal(err)
