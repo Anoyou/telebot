@@ -574,7 +574,7 @@ export function PluginsHome() {
           <div data-plugin-global-search className="rounded-lg border bg-muted/20">
             <button
               type="button"
-              className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-sm sm:hidden"
+              className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-sm lg:hidden"
               aria-expanded={mobileSearchExpanded}
               onClick={() => setMobileSearchExpanded((value) => !value)}
             >
@@ -587,7 +587,7 @@ export function PluginsHome() {
               </span>
               <ChevronDown className={cn("h-4 w-4 shrink-0 text-muted-foreground transition-transform", mobileSearchExpanded && "rotate-180")} />
             </button>
-            <div className={cn("grid grid-cols-[minmax(0,1fr)_minmax(7.25rem,0.55fr)] gap-3 p-3 sm:grid-cols-[minmax(0,1fr)_160px] lg:grid-cols-[minmax(0,1fr)_160px_minmax(22rem,auto)] lg:items-end", !mobileSearchExpanded && "hidden sm:grid")}>
+            <div className={cn("grid grid-cols-[minmax(0,1fr)_minmax(7.25rem,0.55fr)] gap-3 p-3 sm:grid-cols-[minmax(0,1fr)_160px] lg:grid-cols-[minmax(0,1fr)_160px_minmax(22rem,auto)] lg:items-end", !mobileSearchExpanded && "hidden lg:grid")}>
               <label className="space-y-1.5 text-sm">
                 <span className="text-muted-foreground">全局搜索</span>
                 <span className="relative block">
