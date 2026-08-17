@@ -229,8 +229,8 @@ export const AssistantMarkdown = memo(function AssistantMarkdown({
           ul: ({ children }) => <ul className="my-1 list-disc space-y-0.5 pl-5">{children}</ul>,
           ol: ({ children }) => <ol className="my-1 list-decimal space-y-0.5 pl-5">{children}</ol>,
           h1: ({ children }) => <h1 className="my-2 text-base font-semibold">{children}</h1>,
-          h2: ({ children }) => <h2 className="my-2 text-sm font-semibold">{children}</h2>,
-          h3: ({ children }) => <h3 className="my-1.5 text-sm font-medium">{children}</h3>,
+          h2: ({ children }) => <h2 className="my-2 text-base font-semibold tracking-tight">{children}</h2>,
+          h3: ({ children }) => <h3 className="my-2 text-[0.9375rem] font-semibold tracking-tight text-foreground/90">{children}</h3>,
           blockquote: ({ children }) => (
             <blockquote className="my-2 border-l-2 border-border pl-3 text-muted-foreground">
               {children}
@@ -437,7 +437,12 @@ export function Conversation({
                 <ActionCard action={item.action} onUpdated={onActionUpdated} />
               </div>
             ) : (
-              <div className={cn("flex min-w-0 max-w-[85%] flex-col gap-1", isUser && "items-end")}>
+              <div className={cn(
+                "flex min-w-0 flex-col gap-1",
+                isUser
+                  ? "max-w-[85%] items-end"
+                  : "max-w-[calc(100%-2.25rem)] sm:max-w-[92%]",
+              )}>
                 {!isUser && !isTool
                   ? (() => {
                       const usage =
@@ -475,7 +480,7 @@ export function Conversation({
                     isUser && !isEditing && "rounded-2xl bg-primary px-3 py-2 text-primary-foreground",
                     isEditing && "w-[min(36rem,78vw)] rounded-lg border border-border bg-card p-2 text-foreground shadow-sm",
                     // 助手回答：无气泡正文（DEEIX / restyle）
-                    !isUser && !isTool && "min-w-0 max-w-[min(75ch,100%)] border-l-2 border-primary/35 py-0.5 pl-3 text-foreground xl:max-w-[min(96ch,100%)] 2xl:max-w-[min(112ch,100%)]",
+                    !isUser && !isTool && "min-w-0 max-w-[min(82ch,100%)] border-l-2 border-primary/35 py-0.5 pl-3 text-foreground xl:max-w-[min(96ch,100%)] 2xl:max-w-[min(112ch,100%)]",
                     isTool && "rounded-2xl border border-dashed bg-background px-3 py-2 text-xs text-muted-foreground",
                     (isUser || isTool) && "whitespace-pre-wrap",
                     item.pending && "opacity-70",

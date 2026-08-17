@@ -156,6 +156,7 @@ export type SystemAgentStreamEvent = {
   session_id?: string;
   seq?: number;
   ts?: string;
+  message_id?: number;
   content?: string;
   reasoning?: string;
   delta?: string;

@@ -919,6 +919,12 @@ export function AssistantIndex() {
       ]);
     }
     if (event.type === "assistant_message") {
+      const previousLiveAssistantId = liveAssistantIdentity().id;
+      const persistedMessageId = Number(event.message_id);
+      if (Number.isInteger(persistedMessageId) && persistedMessageId > 0) {
+        // 最终事件与数据库消息共享身份，历史刷新时由 mergeConversationItems 原位替换。
+        liveAssistantMessageIdRef.current = persistedMessageId;
+      }
       const providerName = event.usage?.provider_name;
       const model = event.usage?.model;
       if (typeof providerName === "string" && typeof model === "string") {
@@ -940,26 +946,16 @@ export function AssistantIndex() {
       setLive((prev) => {
         const identity = liveAssistantIdentity();
         const withoutPending = prev.filter((bubble) => !bubble.pending);
-        const hasStream = withoutPending.some((b) => b.id === identity.id);
-        if (hasStream) {
-          return withoutPending.map((bubble) =>
-            bubble.id === identity.id
-              ? {
-                  ...bubble,
-                  text: finalText,
-                  reasoning: finalReasoning,
-                  images: finalImages,
-                  createdAt: typeof event.ts === "string" ? event.ts : new Date().toISOString(),
-                  streaming: false,
-                  streamFallback: Boolean(event.stream_fallback || usage?.stream_fallback),
-                  usage,
-                }
-              : bubble,
-          );
-        }
+        const streamBubble = withoutPending.find((bubble) =>
+          bubble.id === identity.id || bubble.id === previousLiveAssistantId
+        );
+        const stableBubbles = withoutPending.filter((bubble) =>
+          bubble.id !== identity.id && bubble.id !== previousLiveAssistantId
+        );
         return [
-          ...withoutPending,
+          ...stableBubbles,
           {
+            ...streamBubble,
             ...identity,
             role: "assistant" as const,
             text: finalText,

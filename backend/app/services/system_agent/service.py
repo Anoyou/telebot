@@ -735,6 +735,7 @@ class SystemAgentService:
         assistant_text = ""
         assistant_reasoning = ""
         assistant_images: list[dict[str, Any]] = []
+        assistant_message: SystemAgentMessage | None = None
         usage: dict[str, Any] | None = None
         tool_events: list[dict[str, Any]] = []
         memory_tool_events: list[dict[str, Any]] = []
@@ -904,6 +905,7 @@ class SystemAgentService:
             }
             if regenerating:
                 assert regenerate_assistant_message is not None
+                assistant_message = regenerate_assistant_message
                 regenerate_assistant_message.content = assistant_content
                 regenerate_assistant_message.usage = usage_payload
                 regenerate_assistant_message.run_status = MESSAGE_RUN_COMPLETED
@@ -917,13 +919,14 @@ class SystemAgentService:
                     )
                 )
             else:
-                db.add(SystemAgentMessage(
+                assistant_message = SystemAgentMessage(
                     session_id=session.id,
                     role=MESSAGE_ROLE_ASSISTANT,
                     content=assistant_content,
                     usage=usage_payload,
                     run_status=MESSAGE_RUN_COMPLETED,
-                ))
+                )
+                db.add(assistant_message)
         for tev in tool_events:
             if tev.get("type") != "tool_finished":
                 continue
@@ -1001,6 +1004,10 @@ class SystemAgentService:
             )
         session.updated_at = datetime.now(UTC)
         await db.flush()
+        if assistant_message is not None:
+            for event in buffered_events:
+                if event.get("type") == "assistant_message":
+                    event["message_id"] = assistant_message.id
         await db.commit()
 
         if cancelled:

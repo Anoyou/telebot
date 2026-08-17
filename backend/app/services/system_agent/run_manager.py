@@ -454,6 +454,7 @@ class SystemAgentRunManager:
             row.last_seq += 1
             recovered_event = {
                 "type": "assistant_message",
+                "message_id": assistant_message.id,
                 "content": str(content.get("text") or ""),
                 "usage": redact_content(assistant_message.usage or {}),
                 "run_id": row.id,

@@ -472,6 +472,7 @@ async def test_stream_message_commits_history_before_terminal_events(agent_db, m
             roles = [m.role for m in saved_messages]
             assert roles == [MESSAGE_ROLE_USER, "assistant"]
             assert saved_messages[-1].content["reasoning"] == "先检查状态再汇总"
+            assert second["message_id"] == saved_messages[-1].id
 
         await stream.aclose()
 
