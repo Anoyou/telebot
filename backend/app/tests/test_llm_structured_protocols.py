@@ -271,8 +271,12 @@ def test_tool_result_media_extraction_is_explicit_and_protocol_native() -> None:
 
     assert chat[0]["content"] != data_url
     assert chat[1]["content"][1]["type"] == "image_url"
-    assert responses[0]["output"] != data_url
-    assert responses[1]["content"][1]["type"] == "input_image"
+    assert len(responses) == 1
+    assert responses[0]["output"][0] == {
+        "type": "input_text",
+        "text": "[TelePilot：工具结果媒体已转为后续原生媒体块]",
+    }
+    assert responses[0]["output"][1]["type"] == "input_image"
     source = anthropic[0]["content"][0]["content"][1]["source"]
     assert source == {
         "type": "base64",
@@ -305,9 +309,11 @@ def test_tool_result_url_image_block_is_protocol_native() -> None:
         "type": "image_url",
         "image_url": {"url": image_url, "detail": "high"},
     }
-    assert responses[1]["content"][1] == {
+    assert len(responses) == 1
+    assert responses[0]["output"][1] == {
         "type": "input_image",
         "image_url": image_url,
+        "detail": "high",
     }
     assert anthropic[0]["content"][0]["content"][1] == {
         "type": "image",
@@ -626,6 +632,60 @@ async def test_responses_accepts_reasoning_summary_without_output_text() -> None
         ).complete("system", "3+4?")
 
     assert "7" in result.text
+
+
+@pytest.mark.asyncio
+async def test_deepseek_vision_responses_sends_image_and_web_search_natively() -> None:
+    sent_bodies: list[dict] = []
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, *args, **kwargs):
+            sent_bodies.append(kwargs["json"])
+            return _Response(
+                {
+                    "id": "resp_vision",
+                    "status": "completed",
+                    "model": "deepseek-v4-flash-vision-exp",
+                    "output": [
+                        {
+                            "type": "message",
+                            "content": [{"type": "output_text", "text": "看到了"}],
+                        }
+                    ],
+                    "usage": {"input_tokens": 3, "output_tokens": 2},
+                }
+            )
+
+    with patch("app.services.llm_client.httpx.AsyncClient", return_value=_Client()):
+        result = await ResponsesClient(
+            "sk",
+            "https://api.deepseek.com",
+            "deepseek-v4-flash-vision-exp",
+            protocol_profile="deepseek_responses",
+        ).complete(
+            "system",
+            "描述图片",
+            images=[b"image-bytes"],
+            web_search=True,
+            web_search_context_size="high",
+        )
+
+    assert result.text == "看到了"
+    body = sent_bodies[0]
+    assert body["input"][0]["content"][1]["type"] == "input_image"
+    assert body["input"][0]["content"][1]["image_url"].startswith(
+        "data:image/jpeg;base64,"
+    )
+    assert body["tools"] == [
+        {"type": "web_search", "search_context_size": "high"}
+    ]
+    assert "include" not in body
 
 
 @pytest.mark.asyncio

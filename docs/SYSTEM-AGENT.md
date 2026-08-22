@@ -243,7 +243,7 @@ Run 状态为 `queued`、`running`、`waiting_input`、`waiting_approval`、`suc
 
 `assistant_message` 始终是最终权威全文，用于持久化和重连对账。OpenAI Chat Completions、OpenAI Responses 与 Anthropic Messages 均直接消费上游 SSE；工具参数允许跨多个 SSE 事件拼接。若兼容上游忽略 `stream=true` 并返回普通 JSON，只发送最终 `assistant_message`，同时在 usage 和 UI 标记“完整响应”，绝不伪造 delta。已经向客户端发送任何文本后若上游中断，本轮立即失败，不自动换模型或 Provider，避免把两次回答拼接成一条。
 
-Responses 流同时接受 `response.completed` 与 `response.incomplete` 协议终态，后者会按 `incomplete_details.reason` 映射为输出上限或错误；`response.failed` 始终失败。若终态 `response.output` 为空，运行时会从此前的 `response.output_item.done` 重建 reasoning 与 function call。DeepSeek 官方 `deepseek-v4-flash` 使用 `https://api.deepseek.com` 根地址和 Responses 协议时，工具续轮会把明文 reasoning input item 与 function call output 一起回传；不依赖 `previous_response_id`、`conversation` 或服务端状态。
+Responses 流同时接受 `response.completed` 与 `response.incomplete` 协议终态，后者会按 `incomplete_details.reason` 映射为输出上限或错误；`response.failed` 始终失败。若终态 `response.output` 为空，运行时会从此前的 `response.output_item.done` 重建 reasoning 与 function call。DeepSeek 官方 `deepseek-v4-flash`、`deepseek-v4-pro` 与 `deepseek-v4-flash-vision-exp` 使用 `https://api.deepseek.com` 根地址和 Responses 协议；其中只有 `deepseek-v4-flash-vision-exp` 会实际处理 `input_image`，支持 HTTP/HTTPS URL 与 data URL。工具续轮会把明文 reasoning item 与 `function_call_output` 一起回传，工具结果图片作为 `function_call_output.output` 内的原生 `input_image` 内容块发送；DeepSeek 路径不依赖 `previous_response_id`、`conversation`、`store` 或服务端状态，并可使用原生 `web_search` 工具。
 
 预算门禁在结构化调用与流式调用中使用同一 scope 语义：高价 Provider 的 `premium_daily` 到限时允许在尚未输出文本前继续尝试更便宜 Provider；账号级请求数、每日 token 或预算后端不可用属于整条请求的终止条件。上游没有返回 usage 时按请求预估值保守结算；已输出部分文本、取消或异常终止同样不会按“未调用”释放费用。
 

@@ -25,7 +25,8 @@ import (
 )
 
 const (
-	maxBodyBytes                  = 16 << 20
+	maxRequestBodyBytes           = 40 << 20
+	maxResponseBodyBytes          = 16 << 20
 	upstreamResponseHeaderTimeout = 15 * time.Second
 	sseFirstEventTimeout          = 20 * time.Second
 	sseIdleTimeout                = 30 * time.Second
@@ -48,7 +49,7 @@ func NewHandler(store *control.Store) *Handler {
 		clientForRoute: httpClient,
 		sseFirstEvent:  sseFirstEventTimeout,
 		sseIdle:        sseIdleTimeout,
-		sseMaxBytes:    maxBodyBytes,
+		sseMaxBytes:    maxResponseBodyBytes,
 	}
 }
 
@@ -74,7 +75,7 @@ func (h *Handler) responses(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, contract.GatewayError{Code: "request_invalid", Message: err.Error(), RequestID: requestID(r), GatewayStage: "routing"})
 		return
 	}
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBodyBytes))
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBodyBytes))
 	if err != nil {
 		writeError(w, http.StatusRequestEntityTooLarge, contract.GatewayError{Code: "request_invalid", Message: "Responses request is too large", RequestID: requestID(r), GatewayStage: "routing"})
 		return
@@ -192,8 +193,8 @@ func (h *Handler) responses(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, final)
 		return
 	}
-	responseBody, err := io.ReadAll(io.LimitReader(response.Body, maxBodyBytes+1))
-	if err != nil || len(responseBody) > maxBodyBytes {
+	responseBody, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBodyBytes+1))
+	if err != nil || len(responseBody) > maxResponseBodyBytes {
 		writeError(w, http.StatusBadGateway, contract.GatewayError{Code: "invalid_response", Message: "Upstream response could not be read", RequestID: requestID(r), GatewayStage: "response"})
 		return
 	}
@@ -263,8 +264,8 @@ func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 	}
 	defer response.Body.Close()
 	setGatewayHeaders(w, requestID(r), "upstream")
-	body, readErr := io.ReadAll(io.LimitReader(response.Body, maxBodyBytes+1))
-	if readErr != nil || len(body) > maxBodyBytes {
+	body, readErr := io.ReadAll(io.LimitReader(response.Body, maxResponseBodyBytes+1))
+	if readErr != nil || len(body) > maxResponseBodyBytes {
 		writeError(w, http.StatusBadGateway, contract.GatewayError{Code: "invalid_response", Message: "Upstream model list could not be read", RequestID: requestID(r), GatewayStage: "response"})
 		return
 	}
@@ -413,7 +414,7 @@ func copySSE(
 ) error {
 	_, err := copySSEWithLimits(
 		w, reader, upstreamModel, publicModel,
-		sseFirstEventTimeout, sseIdleTimeout, maxBodyBytes, knownSecrets...,
+		sseFirstEventTimeout, sseIdleTimeout, maxResponseBodyBytes, knownSecrets...,
 	)
 	return err
 }
@@ -539,7 +540,7 @@ func sensitiveJSONKey(value string) bool {
 func aggregateSSE(reader io.Reader, upstreamModel, publicModel string) (json.RawMessage, error) {
 	return aggregateSSEWithLimits(
 		reader, upstreamModel, publicModel,
-		sseFirstEventTimeout, sseIdleTimeout, maxBodyBytes,
+		sseFirstEventTimeout, sseIdleTimeout, maxResponseBodyBytes,
 	)
 }
 

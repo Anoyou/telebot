@@ -91,7 +91,6 @@ _PROFILES: dict[str, ProviderProtocolProfile] = {
                 "store",
             }
         ),
-        hard_disabled_capabilities=frozenset({"images", "web_search"}),
         supports_store=False,
         supports_previous_response_id=False,
         reasoning_transport="responses_item",
@@ -115,6 +114,34 @@ _PROFILES: dict[str, ProviderProtocolProfile] = {
         reasoning_transport="anthropic_thinking",
     ),
 }
+
+
+_DEEPSEEK_RESPONSES_VISION_MODELS = frozenset(
+    {
+        "deepseek-v4-flash-vision-exp",
+    }
+)
+
+
+def protocol_model_capability_overrides(
+    profile_name: str,
+    model: str,
+) -> dict[str, Any]:
+    """Return provider-dialect model facts not exposed by ``GET /models``.
+
+    DeepSeek's model-list response currently provides identifiers only.  The
+    Responses endpoint accepts ``input_image`` for every V4 model, but only the
+    documented vision model actually processes the image; text-only models
+    replace it with placeholder text.
+    """
+
+    if profile_name != LLM_PROTOCOL_PROFILE_DEEPSEEK_RESPONSES:
+        return {}
+    is_vision = str(model or "").strip().lower() in _DEEPSEEK_RESPONSES_VISION_MODELS
+    return {
+        "images": is_vision,
+        "input_modalities": frozenset({"text", "image"} if is_vision else {"text"}),
+    }
 
 
 def infer_protocol_profile(
@@ -177,6 +204,7 @@ def protocol_profile_names_for_format(api_format: str) -> tuple[str, ...]:
 __all__ = [
     "ProviderProtocolProfile",
     "infer_protocol_profile",
+    "protocol_model_capability_overrides",
     "protocol_profile_names_for_format",
     "resolve_protocol_profile",
 ]

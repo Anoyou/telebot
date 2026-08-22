@@ -90,7 +90,7 @@ const API_FORMAT_OPTIONS: { value: LLMApiFormat; label: string; hint: string }[]
   {
     value: "responses",
     label: "Responses ( /responses )",
-    hint: "OpenAI 兼容的新协议；DeepSeek 官方 deepseek-v4-flash 原生支持，Base URL 请填 https://api.deepseek.com（无需 /v1）",
+    hint: "OpenAI 兼容的新协议；DeepSeek 官方 V4 Flash、V4 Pro 与 V4 Flash Vision Exp 原生支持，Base URL 请填 https://api.deepseek.com（无需 /v1）",
   },
   {
     value: "anthropic_messages",
@@ -109,7 +109,7 @@ const PROTOCOL_PROFILE_OPTIONS: Record<
   responses: [
     { value: "standard", label: "通用 Responses", hint: "适合未声明特殊方言的兼容服务。" },
     { value: "openai_responses", label: "OpenAI Responses", hint: "启用 OpenAI 官方 Responses 字段与标准 SDK 身份。" },
-    { value: "deepseek_responses", label: "DeepSeek Responses", hint: "按 DeepSeek V4 正式版约束移除 store、previous_response_id、include 等不支持字段。" },
+    { value: "deepseek_responses", label: "DeepSeek Responses", hint: "按 DeepSeek V4 约束移除有状态字段，并启用原生工具、联网搜索及视觉模型图片输入。" },
     { value: "codex_responses", label: "Codex Responses", hint: "用于明确要求 Codex 身份及加密 reasoning 回传的 Responses 服务。" },
   ],
   anthropic_messages: [
@@ -437,7 +437,7 @@ const REQUEST_HEADER_GUIDES: RequestHeaderGuide[] = [
     key: "deepseek",
     label: "DeepSeek 官方",
     hosts: ["api.deepseek.com"],
-    note: "官方 API 通常只需要系统生成的 Bearer 鉴权，不需要额外兼容头；deepseek-v4-flash 请优先选择 Responses（Base URL 无需 /v1）。",
+    note: "官方 API 通常只需要系统生成的 Bearer 鉴权，不需要额外兼容头；DeepSeek V4 模型请优先选择 Responses，视觉输入使用 deepseek-v4-flash-vision-exp（Base URL 无需 /v1）。",
     headers: [],
   },
   {

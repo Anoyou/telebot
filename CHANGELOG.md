@@ -25,6 +25,23 @@
 
 ## [Unreleased]
 
+## [0.99.0-beta.5] - 2026-08-22 · minor（次版本预发布） · DeepSeek V4 Responses 视觉与搜索兼容
+
+### 新增
+
+- 新增 `deepseek-v4-flash-vision-exp` 视觉能力识别，支持通过 DeepSeek Responses 原生发送图片 data URL、公开图片 URL 与图片工具结果；普通 DeepSeek V4 模型继续按纯文本能力展示，避免误报视觉支持。
+- DeepSeek 官方 `deepseek-v4-flash`、`deepseek-v4-pro` 与 `deepseek-v4-flash-vision-exp` 在协议检测中优先选择 Responses，并启用原生 `web_search` 工具。
+
+### 修复
+
+- Responses 工具结果图片改为写入对应 `function_call_output.output` 的原生内容块，不再拆成额外用户消息，保持工具续轮语义完整。
+- Gateway 原样保留 Responses 图片 URL、data URL、`detail` 与工具结果图片块；请求体上限独立提升至 40 MiB，覆盖 Agent 当前多图输入，响应与 SSE 上限仍保持 16 MiB。
+- 更新 Provider 配置提示、插件联网搜索说明与开发文档，明确 DeepSeek V4 Responses 的模型能力和无状态约束。
+
+### 测试
+
+- 补充 DeepSeek 模型能力、协议自动检测、视觉与联网直连请求、工具结果图片编码、Gateway 图片转发及请求体边界回归测试。
+
 ## [0.99.0-beta.4] - 2026-08-17 · minor（次版本预发布） · 修复 Agent 回复重复与窄屏排版
 
 ### 修复

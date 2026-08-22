@@ -92,10 +92,14 @@ router = APIRouter(tags=["commands"])
 
 
 def _is_deepseek_v4_responses_target(base_url: str, model: str) -> bool:
-    """DeepSeek 官方 Responses API 当前仅开放给 deepseek-v4-flash。"""
+    """Return whether this is an official DeepSeek V4 Responses model."""
 
     host = (urlsplit(base_url).hostname or "").lower()
-    return host == "api.deepseek.com" and model.strip().lower() == "deepseek-v4-flash"
+    return host == "api.deepseek.com" and model.strip().lower() in {
+        "deepseek-v4-flash",
+        "deepseek-v4-pro",
+        "deepseek-v4-flash-vision-exp",
+    }
 
 
 async def _require_ai_enabled(db: DBSession) -> None:
@@ -1216,8 +1220,8 @@ async def detect_provider_protocols(
             note = "Anthropic provider 需要 /messages 可用。"
     else:
         if chat.ok:
-            # DeepSeek 官方文档当前仅为 deepseek-v4-flash 开放 Responses；
-            # 该模型即使同时保留 Chat 兼容入口，也应优先落到原生协议。
+            # DeepSeek 官方 V4 模型即使同时保留 Chat 兼容入口，也应优先落到
+            # 原生 Responses 协议。
             if responses.ok and _is_deepseek_v4_responses_target(base_url, model):
                 recommended_api_format = "responses"
                 recommended_web_search_api_format = "responses"
@@ -1230,8 +1234,9 @@ async def detect_provider_protocols(
         response_compat_note = responses.error if responses.ok and responses.error else ""
         if chat.ok and responses.ok and _is_deepseek_v4_responses_target(base_url, model):
             note = (
-                "检测到 DeepSeek 官方 deepseek-v4-flash；已优先选择原生 Responses API。"
-                "该协议当前不支持 conversation、previous_response_id、图片输入等 OpenAI 扩展参数。"
+                f"检测到 DeepSeek 官方 {model.strip()}；已优先选择原生 Responses API。"
+                "该协议支持 function、联网搜索与视觉模型图片输入，但不支持 "
+                "conversation、previous_response_id 等有状态扩展参数。"
             )
         elif chat.ok and responses.ok:
             note = (

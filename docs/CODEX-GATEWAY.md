@@ -10,7 +10,8 @@ TelePilot 可以让单个 LLM Provider 选择「标准 API 直连」或「Codex 
 2. 「Codex 客户端兼容模式（Gateway）」固定使用 Responses API 与 Codex Responses 档案，身份由 Gateway 管理。
 3. direct 与 Gateway 之间切换不会清空 API Key、代理、兼容请求头或已保存的客户端身份；切回 direct 后恢复原协议、联网协议和身份配置。LLM Provider 代理仅支持 HTTP/HTTPS/SOCKS5。当前系统不允许新建 MTProxy，也不允许把任何代理更新为 MTProxy；旧数据库中的 MTProxy 记录只会为审计和清理而列出，Telegram 和 LLM（包括 direct 与 Gateway）使用时都会 fail-closed，不会尝试连接或自动降级。
 4. Gateway Provider 必须配置 API Key；Base URL 留空时会物化当前服务类型的默认地址。新建或编辑表单可把当前未保存参数临时注入 Gateway，用于读取模型列表和快速验证；临时快照会与已提交 Provider 串行同步，请求结束后立即恢复数据库中的已提交快照。
-5. Gateway 只支持文本、图片输入与工具调用的 Responses 路径。Chat Completions、Anthropic Messages、语音转写和 `/images/generations` 图片生成必须使用 direct Provider。
+5. Gateway 只支持文本、图片输入与工具调用的 Responses 路径。`input_image` 的 HTTP/HTTPS URL、data URL、`detail` 与工具结果内容块会原样转发；已有 `file_id` 也会保留，但 Gateway 不实现 DeepSeek Files API 上传流程。Chat Completions、Anthropic Messages、语音转写和 `/images/generations` 图片生成必须使用 direct Provider。
+6. Gateway 的 Responses 请求体上限为 40 MiB，可覆盖 Agent 当前最多 4 张、每张 6 MiB 图片经 Base64 编码后的请求；上游普通响应与 SSE 累计上限保持 16 MiB，避免无界占用内存。
 
 模型测活的成功与失败结果都可展开“临时配置并再次测试”。临时选择 Gateway 时固定使用 Responses 且身份由 Gateway 管理；这些覆盖只作用于当次重试，不写回 Provider。
 

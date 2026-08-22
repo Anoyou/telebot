@@ -400,7 +400,15 @@ async def test_detect_stops_after_standard_identity_success(monkeypatch) -> None
 
 
 @pytest.mark.asyncio
-async def test_detect_prefers_official_deepseek_v4_responses(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    "model",
+    [
+        "deepseek-v4-flash",
+        "deepseek-v4-pro",
+        "deepseek-v4-flash-vision-exp",
+    ],
+)
+async def test_detect_prefers_official_deepseek_v4_responses(monkeypatch, model: str) -> None:
     from app.api import commands
     from app.schemas.command import DetectProviderProtocolsRequest
 
@@ -409,7 +417,7 @@ async def test_detect_prefers_official_deepseek_v4_responses(monkeypatch) -> Non
     def handler(request: httpx.Request) -> httpx.Response:
         requested_paths.append(request.url.path)
         if request.url.path == "/models":
-            return httpx.Response(200, json={"data": [{"id": "deepseek-v4-flash"}]})
+            return httpx.Response(200, json={"data": [{"id": model}]})
         if request.url.path == "/chat/completions":
             return httpx.Response(200, json={"choices": [{"message": {"content": "chat"}}]})
         if request.url.path == "/responses":
@@ -447,7 +455,7 @@ async def test_detect_prefers_official_deepseek_v4_responses(monkeypatch) -> Non
             provider="openai",
             base_url="https://api.deepseek.com",
             api_key="sk-test",
-            model="deepseek-v4-flash",
+            model=model,
         ),
         _DB(),
         _User(),
@@ -457,7 +465,7 @@ async def test_detect_prefers_official_deepseek_v4_responses(monkeypatch) -> Non
     assert result.responses.ok is True
     assert result.recommended_api_format == "responses"
     assert result.recommended_web_search_api_format == "responses"
-    assert result.note is not None and "DeepSeek 官方 deepseek-v4-flash" in result.note
+    assert result.note is not None and model in result.note
     assert "/responses" in requested_paths
     assert "/v1/responses" not in requested_paths
 

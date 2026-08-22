@@ -87,6 +87,61 @@ func TestProviderRouteRewritesModelAndUsesCompleteCodexIdentity(t *testing.T) {
 	}
 }
 
+func TestProviderRoutePreservesResponsesImageInput(t *testing.T) {
+	var gotPayload map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &gotPayload)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, `data: {"type":"response.completed","response":{"id":"r1","model":"upstream-model","output":[]}}`+"\n\n")
+	}))
+	defer upstream.Close()
+
+	handler := configuredHandler(t, upstream.URL, "secret-one", "public-model", "upstream-model")
+	body := `{"model":"public-model","input":[{"role":"user","content":[{"type":"input_text","text":"describe"},{"type":"input_image","image_url":"https://example.test/image.png","detail":"high"}]}],"stream":false}`
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
+	request.Header.Set("X-TelePilot-Provider-ID", "1")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	encoded, _ := json.Marshal(gotPayload["input"])
+	for _, expected := range []string{`"type":"input_image"`, `"image_url":"https://example.test/image.png"`, `"detail":"high"`} {
+		if !bytes.Contains(encoded, []byte(expected)) {
+			t.Fatalf("missing %s in forwarded input: %s", expected, encoded)
+		}
+	}
+}
+
+func TestProviderRouteRejectsOversizedResponsesRequest(t *testing.T) {
+	handler := configuredHandler(t, "https://example.test", "secret-one", "public-model", "upstream-model")
+	body := io.MultiReader(
+		strings.NewReader(`{"model":"public-model","input":"`),
+		io.LimitReader(zeroReader{}, maxRequestBodyBytes),
+		strings.NewReader(`"}`),
+	)
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", body)
+	request.Header.Set("X-TelePilot-Provider-ID", "1")
+	recorder := httptest.NewRecorder()
+
+	handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+type zeroReader struct{}
+
+func (zeroReader) Read(payload []byte) (int, error) {
+	for index := range payload {
+		payload[index] = 'a'
+	}
+	return len(payload), nil
+}
+
 func TestCodexIdentityOverridesConflictingPayloadMetadata(t *testing.T) {
 	payload := map[string]any{
 		"prompt_cache_key": "user-cache",
@@ -328,7 +383,7 @@ func TestCopySSEIdleTimeoutIsNotExtendedByComments(t *testing.T) {
 	var output bytes.Buffer
 	wrote, err := copySSEWithLimits(
 		&output, reader, "model", "model",
-		time.Second, 20*time.Millisecond, maxBodyBytes,
+		time.Second, 20*time.Millisecond, maxResponseBodyBytes,
 	)
 
 	var timeout *sseTimeoutError

@@ -30,25 +30,37 @@ def test_protocol_profile_normalization_is_scoped_by_api_format() -> None:
     )
 
 
-def test_deepseek_profile_hard_limits_override_model_metadata() -> None:
+def test_deepseek_profile_exposes_official_v4_model_capabilities() -> None:
     provider = _provider(
         protocol_profile="deepseek_responses",
         models=[
             {
                 "id": "deepseek-v4-flash",
                 "supports_images": True,
-                "supports_web_search": True,
+                "input_modalities": ["text", "image"],
                 "supports_parallel_tool_calls": True,
-            }
+            },
+            {
+                "id": "deepseek-v4-flash-vision-exp",
+                "supports_images": False,
+                "input_modalities": ["text"],
+            },
         ],
     )
 
-    capabilities = provider.capabilities_for_model("deepseek-v4-flash")
+    text_capabilities = provider.capabilities_for_model("deepseek-v4-flash")
+    vision_capabilities = provider.capabilities_for_model(
+        "deepseek-v4-flash-vision-exp"
+    )
 
-    assert capabilities.images is False
-    assert capabilities.web_search is False
-    assert capabilities.parallel_tool_calls is True
-    assert capabilities.reasoning_transport == "responses_item"
+    assert text_capabilities.images is False
+    assert text_capabilities.input_modalities == frozenset({"text"})
+    assert text_capabilities.web_search is True
+    assert text_capabilities.parallel_tool_calls is True
+    assert text_capabilities.reasoning_transport == "responses_item"
+    assert vision_capabilities.images is True
+    assert vision_capabilities.input_modalities == frozenset({"text", "image"})
+    assert vision_capabilities.web_search is True
 
 
 def test_model_metadata_exposes_extended_capability_facts() -> None:

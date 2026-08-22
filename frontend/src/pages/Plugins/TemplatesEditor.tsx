@@ -1473,7 +1473,7 @@ function CommandEditDialog({
                     <span className="font-medium text-foreground">chat</span>：普通问答、总结、翻译；若打开“允许联网搜索”，后端会把搜索工具交给模型，是否实际搜索由模型/provider 决定。
                   </p>
                   <p className="mt-1">
-                    <span className="font-medium text-foreground">search</span>：专门搜索指令，保存时固定启用联网搜索；需要支持 OpenAI Responses API（api_format=responses）的 Provider，适合 <CommandBadge>{cmdPrefix}search</CommandBadge> 或 <CommandBadge>{cmdPrefix}ai search</CommandBadge>。
+                    <span className="font-medium text-foreground">search</span>：专门搜索指令，保存时固定启用联网搜索；需要支持原生搜索工具的 Responses Provider（如 OpenAI、DeepSeek），适合 <CommandBadge>{cmdPrefix}search</CommandBadge> 或 <CommandBadge>{cmdPrefix}ai search</CommandBadge>。
                   </p>
                   <p className="mt-1">
                     <span className="font-medium text-foreground">image</span>：图片生成；可桥接 codex_image 插件，也可使用 LLM Provider 原生生图，适合 <CommandBadge>{cmdPrefix}image</CommandBadge>。

@@ -1136,8 +1136,10 @@ def _humanize_llm_error(e: BaseException, max_len: int = 360) -> str:
         return "模型鉴权失败：API Key 无效、过期，或当前账号没有权限。请检查 provider 配置。"
     if "404" in raw or "model not found" in lowered:
         return "模型或接口不存在。请检查 provider endpoint、api_format 和模型名称。"
-    if "联网搜索需要使用 openai responses api" in lowered or "api_format=responses" in lowered:
-        return "联网搜索需要使用 OpenAI Responses API provider（api_format=responses）。请把该 AI 命令绑定到支持 Responses 的 OpenAI provider，或关闭联网搜索。"
+    if (
+        "联网搜索需要使用" in lowered and "responses api" in lowered
+    ) or "api_format=responses" in lowered:
+        return "联网搜索需要使用支持原生搜索工具的 Responses Provider（api_format=responses）。请把该 AI 命令绑定到兼容 Provider，或关闭联网搜索。"
     if "timeout" in lowered:
         return "模型响应超时。请稍后重试，或调低 max_tokens / 换更快的 provider。"
     if "connect" in lowered or "network" in lowered or "proxy" in lowered or "ssl" in lowered:

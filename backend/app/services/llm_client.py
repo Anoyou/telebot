@@ -635,34 +635,28 @@ def _responses_input(
         if message.role is MessageRole.SYSTEM:
             continue
         if message.role is MessageRole.TOOL:
-            pending_media: list[ImageContent] = []
             for result in message.tool_results:
                 plan = _tool_result_media_plan(result)
+                result_output: object = plan.text
+                if plan.images:
+                    result_output = [
+                        {"type": "input_text", "text": plan.text},
+                        *[
+                            {
+                                "type": "input_image",
+                                "image_url": image.url
+                                if image.url
+                                else _to_data_url(image.data or b""),
+                                **({"detail": image.detail} if image.detail else {}),
+                            }
+                            for image in plan.images
+                        ],
+                    ]
                 output.append({
                     "type": "function_call_output",
                     "call_id": result.call_id,
-                    "output": plan.text,
+                    "output": result_output,
                 })
-                pending_media.extend(plan.images)
-            if pending_media:
-                output.append(
-                    {
-                        "type": "message",
-                        "role": "user",
-                        "content": [
-                            {"type": "input_text", "text": _TOOL_MEDIA_MARKER},
-                            *[
-                                {
-                                    "type": "input_image",
-                                    "image_url": image.url
-                                    if image.url
-                                    else _to_data_url(image.data or b""),
-                                }
-                                for image in pending_media
-                            ],
-                        ],
-                    }
-                )
             continue
         text = message.text_content()
         # Responses reasoning item 必须与同一轮后续的 assistant message 或
@@ -1869,7 +1863,7 @@ class OpenAIClient(LLMClient):
     ) -> LLMResult:
         if web_search:
             raise LLMError(
-                "联网搜索需要使用 OpenAI Responses API（api_format=responses）",
+                "联网搜索需要使用支持原生搜索工具的 Responses API（api_format=responses）",
                 scope=LLMErrorScope.CAPABILITY_MISMATCH,
             )
         url = provider_endpoint(self._base_url, LLM_API_FORMAT_CHAT_COMPLETIONS)
@@ -2020,7 +2014,7 @@ class OpenAIClient(LLMClient):
         """
         if web_search:
             raise LLMError(
-                "联网搜索需要使用 OpenAI Responses API（api_format=responses）",
+                "联网搜索需要使用支持原生搜索工具的 Responses API（api_format=responses）",
                 scope=LLMErrorScope.CAPABILITY_MISMATCH,
             )
         url = provider_endpoint(self._base_url, LLM_API_FORMAT_CHAT_COMPLETIONS)

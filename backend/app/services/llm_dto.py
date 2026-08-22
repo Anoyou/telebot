@@ -227,7 +227,10 @@ class LLMProviderDTO:
         capability that the selected protocol profile explicitly forbids.
         """
 
-        from .llm_profiles import resolve_protocol_profile
+        from .llm_profiles import (
+            protocol_model_capability_overrides,
+            resolve_protocol_profile,
+        )
         from .llm_protocol import capabilities_for_api_format
 
         api_format = str(self.api_format or "chat_completions")
@@ -238,6 +241,7 @@ class LLMProviderDTO:
             model=model,
             infer_when_standard=True,
         )
+        model_overrides = protocol_model_capability_overrides(profile.name, model)
         capabilities = capabilities_for_api_format(api_format)
         capabilities = capabilities.with_overrides(
             reasoning_transport=profile.reasoning_transport,
@@ -261,7 +265,10 @@ class LLMProviderDTO:
             in {"images", "tools", "parallel_tool_calls", "web_search", "temperature"}
         }
         if not metadata:
-            return capabilities.with_overrides(**hard_disabled)
+            return capabilities.with_overrides(
+                **model_overrides,
+                **hard_disabled,
+            )
         overrides: dict[str, Any] = {}
         for key, capability_key in (
             ("supports_tools", "tools"),
@@ -299,7 +306,10 @@ class LLMProviderDTO:
             overrides["reasoning_efforts"] = normalized
             overrides["default_reasoning_level"] = default_level
         capabilities = capabilities.with_overrides(**overrides)
-        return capabilities.with_overrides(**hard_disabled)
+        return capabilities.with_overrides(
+            **model_overrides,
+            **hard_disabled,
+        )
 
 
 def provider_to_dto(provider_dict: dict[str, Any]) -> LLMProviderDTO:
