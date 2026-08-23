@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import time
@@ -69,6 +70,26 @@ from .tool_routing import (
 log = logging.getLogger(__name__)
 
 EventSink = Callable[[dict[str, Any]], Awaitable[None] | None]
+
+
+def _request_image_metadata(request: ModelRequest) -> list[dict[str, Any]]:
+    """返回可安全写日志的图片摘要，绝不包含 URL 或图片正文。"""
+
+    items: list[dict[str, Any]] = []
+    for message in request.messages:
+        for block in message.content:
+            if not isinstance(block, ImageContent):
+                continue
+            data = block.data
+            items.append(
+                {
+                    "source": "inline" if data is not None else "url",
+                    "mime_type": block.mime_type or None,
+                    "bytes": len(data) if data is not None else None,
+                    "sha256": hashlib.sha256(data).hexdigest() if data is not None else None,
+                }
+            )
+    return items
 
 
 class ToolApprovalRequired(RuntimeError):
@@ -472,6 +493,13 @@ class SystemAgentRuntime:
                 "本轮未提供任何工具。请直接回答用户问题；不得输出 XML、tool_call、"
                 "search_tool 或其它伪工具调用标签，也不得声称已经调用工具。"
             )
+        if user_images:
+            system_prompt = (
+                f"{system_prompt}\n\n## 原生媒体输入\n"
+                "用户消息附带的图片已经作为模型原生视觉输入提供，不属于工具。"
+                "即使本轮工具列表为空，也必须直接查看并回答图片相关问题；"
+                "不得因为没有工具而声称未收到或无法查看图片。"
+            )
         approved_tool_names = {str(name) for name in (approved_tools or []) if str(name)}
         tool_specs_by_name = {spec.name: spec for spec in tool_specs}
 
@@ -579,6 +607,7 @@ class SystemAgentRuntime:
                 "max_retries_per_model": 5,
                 "retry_delay_seconds": 3.0,
                 "repair_text_tool_protocol": True,
+                "retry_false_image_refusal": True,
                 # 仅供本地 usage preview 脱敏；Provider adapter 不发送 metadata。
                 "known_secrets": turn_secrets,
                 **build_runtime_metadata(
@@ -679,6 +708,22 @@ class SystemAgentRuntime:
             streaming_redactor.reset()
             await progress_queue.put(next_event("assistant_delta_reset"))
 
+        async def on_response_retry(reason: str) -> None:
+            streaming_redactor.reset()
+            reasoning_redactor.reset()
+            log.warning(
+                "system agent model response retry session=%s run_id=%s "
+                "provider_id=%s model=%s reason=%s",
+                session.id,
+                run_id,
+                active_provider.id,
+                active_model,
+                reason,
+            )
+            await progress_queue.put(
+                next_event("assistant_delta_reset", reason=reason)
+            )
+
         async def on_safe_boundary() -> tuple[ModelMessage, ...]:
             if run_input_provider is None:
                 return ()
@@ -732,6 +777,7 @@ class SystemAgentRuntime:
             on_text_delta=on_text_delta,
             on_reasoning_delta=on_reasoning_delta,
             on_text_reset=on_text_reset,
+            on_response_retry=on_response_retry,
         )
 
         # 模型请求可能持续数分钟，不能让初始化阶段的只读事务在网络等待期间
@@ -801,6 +847,18 @@ class SystemAgentRuntime:
             nonlocal active_model, active_provider, last_used_provider, used_fallback
             nonlocal current_stream_fallback
             provider_request = replace(current, model=active_model)
+            image_metadata = _request_image_metadata(provider_request)
+            if image_metadata:
+                log.info(
+                    "system agent model image request session=%s run_id=%s "
+                    "provider_id=%s model=%s image_count=%s images=%s",
+                    session.id,
+                    run_id,
+                    active_provider.id,
+                    active_model,
+                    len(image_metadata),
+                    json.dumps(image_metadata, ensure_ascii=False, separators=(",", ":")),
+                )
             async for stream_event, used, fallback in stream_structured(
                 active_provider,
                 providers,

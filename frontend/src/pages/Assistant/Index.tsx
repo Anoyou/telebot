@@ -778,7 +778,22 @@ export function AssistantIndex() {
     }
   };
 
-  const resetStreamingReply = () => {
+  const resetStreamingReply = (reason = "") => {
+    if (reason === "false_image_refusal") {
+      liveText.clear();
+      liveReasoning.clear();
+      setStreamNotice("");
+      streamingBubbleCreatedRef.current = false;
+      updatePendingText("模型刚才未正确读取图片，正在自动重试…");
+      setLive((prev) =>
+        prev.map((bubble) =>
+          bubble.id === liveAssistantIdentity().id
+            ? { ...bubble, text: "", reasoning: "", streaming: true, streamFallback: false }
+            : bubble,
+        ),
+      );
+      return;
+    }
     // 过渡语不整泡删除：截断并入状态行，流式气泡清空复用
     const preview = liveText.textRef.current.trim().slice(0, 60);
     if (preview) {
@@ -896,7 +911,7 @@ export function AssistantIndex() {
     }
     if (event.type === "tool_finished") upsertToolProgress(event, true);
     if (event.type === "assistant_delta_reset") {
-      resetStreamingReply();
+      resetStreamingReply(String(event.reason || ""));
     }
     if (event.type === "assistant_delta") {
       setStreamNotice("");

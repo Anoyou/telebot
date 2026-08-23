@@ -59,6 +59,7 @@ class AgentCallbacks:
     on_text_delta: Callable[[str], Awaitable[None]] | None = None
     on_reasoning_delta: Callable[[str], Awaitable[None]] | None = None
     on_text_reset: Callable[[], Awaitable[None]] | None = None
+    on_response_retry: Callable[[str], Awaitable[None]] | None = None
 
 
 @dataclass(frozen=True)
@@ -97,12 +98,48 @@ _TEXT_TOOL_PROTOCOL_RE = re.compile(
     r"<tool_call\b[\s\S]*</(?:search_tool|tool_calls?|tool_call)>\s*$",
     re.IGNORECASE,
 )
+_FALSE_IMAGE_REFUSAL_PATTERNS = (
+    re.compile(
+        r"(?:我|当前会话|本次会话).{0,24}(?:无法|不能|看不到|未能)"
+        r".{0,24}(?:查看|读取|识别|访问).{0,12}(?:图片|图像|视觉内容)"
+    ),
+    re.compile(r"(?:没有|未).{0,12}(?:收到|提供|附带|上传).{0,12}(?:图片|图像)"),
+    re.compile(r"(?:没有|未提供).{0,18}(?:图片识别|视觉).{0,8}(?:工具|能力)"),
+    re.compile(
+        r"(?:i\s+(?:can(?:not|'t)|am\s+unable\s+to)|"
+        r"this\s+session\s+(?:can(?:not|'t)|does\s+not))"
+        r".{0,40}(?:see|view|read|access|analy[sz]e).{0,16}(?:image|picture|visual)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:no|without).{0,16}(?:image|picture|visual)"
+        r".{0,16}(?:provided|attached|received|input|tool|capability)",
+        re.IGNORECASE,
+    ),
+)
 
 
 def _looks_like_text_tool_protocol(text: str) -> bool:
     """识别模型把工具调用协议作为整段普通文本输出的情况。"""
 
     return bool(_TEXT_TOOL_PROTOCOL_RE.fullmatch(str(text or "").strip()))
+
+
+def _image_count(messages: tuple[ModelMessage, ...]) -> int:
+    return sum(
+        isinstance(block, ImageContent)
+        for message in messages
+        for block in message.content
+    )
+
+
+def _looks_like_false_image_refusal(text: str) -> bool:
+    """识别“请求确有图片，但模型声称没收到/不能看”的保守拒答。"""
+
+    value = " ".join(str(text or "").split())
+    if not value or len(value) > 2_000:
+        return False
+    return any(pattern.search(value) for pattern in _FALSE_IMAGE_REFUSAL_PATTERNS)
 
 
 def tools_from_manifest(
@@ -277,7 +314,7 @@ async def run_agent(
                 limit_tokens=limits.max_total_tokens,
             )
 
-    async def call(current: ModelRequest) -> ModelResponse:
+    async def call_once(current: ModelRequest) -> ModelResponse:
         remaining = limits.timeout_seconds - (time.monotonic() - started)
         if remaining <= 0:
             raise TimeoutError("Agent 会话已超时")
@@ -296,6 +333,36 @@ async def run_agent(
             if terminal is None:
                 raise RuntimeError("模型流式调用没有返回最终响应")
             return terminal
+
+    async def call(current: ModelRequest) -> ModelResponse:
+        response = await call_once(current)
+        image_count = _image_count(current.messages)
+        if (
+            current.metadata.get("retry_false_image_refusal") is True
+            and image_count > 0
+            and not response.tool_calls
+            and not response.images
+            and _looks_like_false_image_refusal(response.text)
+        ):
+            if callbacks.on_response_retry is not None:
+                await _notify(callbacks.on_response_retry, "false_image_refusal")
+            else:
+                await _notify(callbacks.on_text_reset)
+            correction = ModelMessage.text(
+                MessageRole.USER,
+                "系统校验：本次请求实际附带了"
+                f" {image_count} 张模型原生视觉图片；图片不属于工具。"
+                "你刚才错误地声称没有收到或无法查看图片。请直接查看已附带图片，"
+                "重新回答用户最初的问题，不要再次讨论工具是否存在。",
+            )
+            retried = await call_once(
+                replace(current, messages=(*current.messages, correction))
+            )
+            return replace(
+                retried,
+                usage=_sum_usage(response.usage, retried.usage),
+            )
+        return response
 
     resumed_once = False
     for step in range(1, limits.max_steps + 1):

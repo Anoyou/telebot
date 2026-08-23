@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -10,6 +11,9 @@ from app.services.llm_client import LLMError
 from app.services.llm_dto import LLMProviderDTO
 from app.services.llm_protocol import (
     ImageContent,
+    MessageRole,
+    ModelMessage,
+    ModelRequest,
     ModelResponse,
     ModelStreamEvent,
     ModelUsage,
@@ -23,6 +27,39 @@ from app.services.system_agent.config import ResolvedAgentProviders
 from app.services.system_agent.context import ToolContext
 from app.services.system_agent.registry import ToolRegistry, ToolSpec
 from app.services.system_agent.runtime import SystemAgentRuntime
+
+
+def test_request_image_metadata_excludes_payload_and_url() -> None:
+    request = ModelRequest(
+        model="vision-model",
+        messages=(
+            ModelMessage(
+                role=MessageRole.USER,
+                content=(
+                    ImageContent(data=b"inline-image", mime_type="image/png"),
+                    ImageContent(url="https://example.com/private.png?token=secret"),
+                ),
+            ),
+        ),
+    )
+
+    metadata = runtime_module._request_image_metadata(request)
+
+    assert metadata == [
+        {
+            "source": "inline",
+            "mime_type": "image/png",
+            "bytes": 12,
+            "sha256": hashlib.sha256(b"inline-image").hexdigest(),
+        },
+        {
+            "source": "url",
+            "mime_type": None,
+            "bytes": None,
+            "sha256": None,
+        },
+    ]
+    assert "secret" not in str(metadata)
 
 
 def _registry() -> ToolRegistry:
@@ -346,6 +383,7 @@ async def test_runtime_general_help_sends_zero_tool_definitions(monkeypatch) -> 
         assert request.tools == ()
         assert tools == {}
         assert request.metadata["repair_text_tool_protocol"] is True
+        assert request.metadata["retry_false_image_refusal"] is True
         assert "本轮未提供任何工具" in request.messages[0].text_content()
         return AgentResult(
             text="帮助",
@@ -373,6 +411,45 @@ async def test_runtime_general_help_sends_zero_tool_definitions(monkeypatch) -> 
     route = next(event for event in events if event["type"] == "route_selected")
     assert route["tool_count"] == 0
     assert run_called is True
+
+
+@pytest.mark.asyncio
+async def test_runtime_marks_uploaded_images_as_native_visual_input(monkeypatch) -> None:
+    primary, fallback = _providers()
+    await _patch_runtime_config(monkeypatch, primary, fallback)
+
+    async def run(_model_call, request, tools, **_kwargs):  # noqa: ANN001
+        assert tools == {}
+        assert "图片已经作为模型原生视觉输入提供，不属于工具" in request.messages[
+            0
+        ].text_content()
+        assert isinstance(request.messages[-1].content[-1], ImageContent)
+        return AgentResult(
+            text="图中是一只猫。",
+            model=request.model,
+            messages=request.messages,
+            usage=ModelUsage(input_tokens=10, output_tokens=5),
+            steps=1,
+            tool_calls=0,
+            stop_reason=StopReason.COMPLETED,
+        )
+
+    monkeypatch.setattr(runtime_module, "run_agent", run)
+
+    events = [
+        event
+        async for event in SystemAgentRuntime(_registry()).stream_turn(
+            None,  # type: ignore[arg-type]
+            session=_session(),  # type: ignore[arg-type]
+            user_text="图里是什么？",
+            user_images=(ImageContent(data=b"image", mime_type="image/png"),),
+            role="admin",
+            channel="web",
+        )
+    ]
+
+    answer = next(event for event in events if event["type"] == "assistant_message")
+    assert answer["content"] == "图中是一只猫。"
     assert any(event["type"] == "assistant_message" for event in events)
     capability = next(event for event in events if event["type"] == "model_capability_check")
     assert capability["provider_name"] == primary.name

@@ -13,6 +13,7 @@ from app.services.llm_agent import (
     tools_from_manifest,
 )
 from app.services.llm_protocol import (
+    ImageContent,
     MessageRole,
     ModelMessage,
     ModelRequest,
@@ -24,6 +25,142 @@ from app.services.llm_protocol import (
     ToolCall,
     ToolSpec,
 )
+
+
+@pytest.mark.asyncio
+async def test_agent_retries_once_when_model_falsely_claims_image_is_missing() -> None:
+    calls: list[ModelRequest] = []
+    events: list[str] = []
+
+    async def model_call(_request: ModelRequest) -> ModelResponse:
+        raise AssertionError("configured stream path must be used")
+
+    async def stream_model_call(request: ModelRequest):
+        calls.append(request)
+        if len(calls) == 1:
+            refusal = "我无法查看图片内容，当前会话没有提供任何视觉工具。"
+            yield ModelStreamEvent(delta=refusal)
+            yield ModelStreamEvent(
+                response=ModelResponse(
+                    model="vision-model",
+                    content=(TextContent(refusal),),
+                    usage=ModelUsage(input_tokens=100, output_tokens=20),
+                    stop_reason=StopReason.COMPLETED,
+                )
+            )
+            return
+        assert "1 张模型原生视觉图片" in request.messages[-1].text_content()
+        yield ModelStreamEvent(delta="图中是一只猫。")
+        yield ModelStreamEvent(
+            response=ModelResponse(
+                model="vision-model",
+                content=(TextContent("图中是一只猫。"),),
+                usage=ModelUsage(input_tokens=130, output_tokens=8),
+                stop_reason=StopReason.COMPLETED,
+            )
+        )
+
+    request = ModelRequest(
+        model="vision-model",
+        messages=(
+            ModelMessage(
+                role=MessageRole.USER,
+                content=(
+                    TextContent("图里是什么？"),
+                    ImageContent(data=b"image-bytes", mime_type="image/png"),
+                ),
+            ),
+        ),
+        metadata={"retry_false_image_refusal": True},
+    )
+    result = await run_agent(
+        model_call,
+        request,
+        {},
+        callbacks=AgentCallbacks(
+            on_text_delta=lambda value: _append(events, f"delta:{value}"),
+            on_text_reset=lambda: _append(events, "reset"),
+        ),
+        stream_model_call=stream_model_call,
+    )
+
+    assert result.text == "图中是一只猫。"
+    assert len(calls) == 2
+    assert events == [
+        "delta:我无法查看图片内容，当前会话没有提供任何视觉工具。",
+        "reset",
+        "delta:图中是一只猫。",
+    ]
+    assert result.usage == ModelUsage(input_tokens=230, output_tokens=28, total_tokens=258)
+
+
+@pytest.mark.asyncio
+async def test_agent_never_retries_false_image_refusal_more_than_once() -> None:
+    calls = 0
+    retry_reasons: list[str] = []
+
+    async def model_call(_request: ModelRequest) -> ModelResponse:
+        nonlocal calls
+        calls += 1
+        return ModelResponse(
+            model="vision-model",
+            content=(TextContent("我没有收到图片，无法查看图片内容。"),),
+            usage=ModelUsage(input_tokens=10, output_tokens=5),
+            stop_reason=StopReason.COMPLETED,
+        )
+
+    result = await run_agent(
+        model_call,
+        ModelRequest(
+            model="vision-model",
+            messages=(
+                ModelMessage(
+                    role=MessageRole.USER,
+                    content=(
+                        TextContent("图里是什么？"),
+                        ImageContent(data=b"image-bytes", mime_type="image/png"),
+                    ),
+                ),
+            ),
+            metadata={"retry_false_image_refusal": True},
+        ),
+        {},
+        callbacks=AgentCallbacks(
+            on_response_retry=lambda reason: _append(retry_reasons, reason),
+        ),
+    )
+
+    assert result.text == "我没有收到图片，无法查看图片内容。"
+    assert result.usage == ModelUsage(input_tokens=20, output_tokens=10, total_tokens=30)
+    assert calls == 2
+    assert retry_reasons == ["false_image_refusal"]
+
+
+@pytest.mark.asyncio
+async def test_agent_does_not_retry_image_refusal_without_an_image() -> None:
+    calls = 0
+
+    async def model_call(_request: ModelRequest) -> ModelResponse:
+        nonlocal calls
+        calls += 1
+        return ModelResponse(
+            model="text-model",
+            content=(TextContent("我没有收到图片。"),),
+            stop_reason=StopReason.COMPLETED,
+        )
+
+    result = await run_agent(
+        model_call,
+        ModelRequest(
+            model="text-model",
+            messages=(ModelMessage.text(MessageRole.USER, "图里是什么？"),),
+            metadata={"retry_false_image_refusal": True},
+        ),
+        {},
+    )
+
+    assert result.text == "我没有收到图片。"
+    assert calls == 1
 
 
 def _request(*tools: ToolSpec) -> ModelRequest:
