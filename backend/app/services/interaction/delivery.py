@@ -1030,14 +1030,17 @@ class InteractionDeliveryExecutor:
             TRACE_STATUS_OK if ok else TRACE_STATUS_FAILED,
             **record_detail,
         )
-        await self._emit_action_tap(
-            action,
-            ACTION_EVENT_STATUS_OK if ok else ACTION_EVENT_STATUS_FAILED,
-            channel="userbot_reply",
-            error_code=record_detail.get("error_code"),
-            error=record_detail.get("error"),
-            result=detail,
-        )
+        if not (ok and detail.get("action_event_recorded") is True):
+            # 新 worker 已由 complete_payout_delivery 原子写入成功 payout 台账；
+            # 旧 worker 未返回标记时继续沿用外层写入，保证滚动升级兼容。
+            await self._emit_action_tap(
+                action,
+                ACTION_EVENT_STATUS_OK if ok else ACTION_EVENT_STATUS_FAILED,
+                channel="userbot_reply",
+                error_code=record_detail.get("error_code"),
+                error=record_detail.get("error"),
+                result=detail,
+            )
         if not ok:
             log_detail = self.log_context(self.incoming)
             log_detail.update(_userbot_action_log_detail(detail))

@@ -2626,7 +2626,9 @@ async def test_userbot_payout_saves_reply_target_before_completing_ledger(monkey
         acquire=AsyncMock(return_value=SimpleNamespace(allowed=True, wait_seconds=0, outcome="ok")),
     )
     order: list[str] = []
+    emit_action_tap = AsyncMock()
     monkeypatch.setattr(loader_mod, "record_action", AsyncMock())
+    monkeypatch.setattr(loader_mod, "_emit_userbot_action_tap", emit_action_tap)
     monkeypatch.setattr(loader_mod.payout_limit, "check_and_consume", AsyncMock(return_value=(True, None)))
     claim, complete, _release = _mock_payout_delivery(monkeypatch)
     complete.side_effect = lambda *args, **kwargs: order.append("complete") or True
@@ -2649,6 +2651,82 @@ async def test_userbot_payout_saves_reply_target_before_completing_ledger(monkey
     assert ok is True
     assert order == ["save", "complete"]
     claim.assert_awaited_once()
+    emit_action_tap.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_userbot_payout_falls_back_to_action_event_when_atomic_recording_fails(monkeypatch) -> None:
+    state = loader_mod._AccountState(account_id=71)
+    state.redis = _FakeRedis()
+    state.client = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(id=512)))
+    state.engine = SimpleNamespace(
+        acquire=AsyncMock(return_value=SimpleNamespace(allowed=True, wait_seconds=0, outcome="ok")),
+    )
+    emit_action_tap = AsyncMock()
+    monkeypatch.setattr(loader_mod, "record_action", AsyncMock())
+    monkeypatch.setattr(loader_mod, "_emit_userbot_action_tap", emit_action_tap)
+    monkeypatch.setattr(loader_mod.payout_limit, "check_and_consume", AsyncMock(return_value=(True, None)))
+    _claim, complete, _release = _mock_payout_delivery(monkeypatch)
+    complete.return_value = False
+    monkeypatch.setattr(loader_mod.payout_compensation, "mark_payout_delivery_ambiguous", AsyncMock())
+    monkeypatch.setattr(loader_mod.payout_compensation, "enqueue_payout_compensation", AsyncMock())
+
+    ok = await loader_mod._apply_userbot_payout_action(
+        state,
+        SimpleNamespace(chat_id=-100777),
+        {
+            "type": "payout",
+            "amount": 8,
+            "chat_id": -100777,
+            "payout_key": "pay_atomic_fallback",
+        },
+    )
+
+    assert ok is True
+    emit_action_tap.assert_awaited_once()
+    assert emit_action_tap.await_args.args[2] == loader_mod.ACTION_EVENT_STATUS_OK
+    assert emit_action_tap.await_args.kwargs["result"]["delivery_ambiguous"] is True
+
+
+@pytest.mark.asyncio
+async def test_userbot_payout_idempotent_replay_does_not_reinsert_action_event(monkeypatch) -> None:
+    state = loader_mod._AccountState(account_id=71)
+    state.redis = _FakeRedis()
+    state.client = SimpleNamespace(send_message=AsyncMock())
+    state.engine = SimpleNamespace(
+        acquire=AsyncMock(return_value=SimpleNamespace(allowed=True, wait_seconds=0, outcome="ok")),
+    )
+    record_action = AsyncMock()
+    emit_action_tap = AsyncMock()
+    monkeypatch.setattr(loader_mod, "record_action", record_action)
+    monkeypatch.setattr(loader_mod, "_emit_userbot_action_tap", emit_action_tap)
+    monkeypatch.setattr(loader_mod.payout_limit, "check_and_consume", AsyncMock(return_value=(True, None)))
+    monkeypatch.setattr(
+        loader_mod.payout_compensation,
+        "claim_payout_delivery",
+        AsyncMock(
+            return_value=loader_mod.payout_compensation.PayoutDeliveryClaim(
+                status="sent",
+                sent_message_id=513,
+            )
+        ),
+    )
+
+    ok = await loader_mod._apply_userbot_payout_action(
+        state,
+        SimpleNamespace(chat_id=-100777),
+        {
+            "type": "payout",
+            "amount": 8,
+            "chat_id": -100777,
+            "payout_key": "pay_replay",
+        },
+    )
+
+    assert ok is True
+    state.client.send_message.assert_not_awaited()
+    assert record_action.await_args.kwargs["result"]["idempotent_replay"] is True
+    emit_action_tap.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -4840,6 +4918,63 @@ async def test_live_message_ops_defaults_to_userbot_reply(monkeypatch) -> None:
     ]
     # 泄漏回归锁：apply 执行后 actions 不累积，恒为空。
     assert messages.actions == []
+
+
+@pytest.mark.asyncio
+async def test_live_message_ops_apply_returns_structured_failure_result(monkeypatch) -> None:
+    state = loader_mod._AccountState(181)
+    state.redis = _FakeRedis()
+    apply_actions = AsyncMock(
+        return_value=loader_mod.ActionBatchResult(
+            executed=2,
+            failed=1,
+            skipped=0,
+            dropped=1,
+            kinds=["send_message", "delete_message"],
+        )
+    )
+    write_log = AsyncMock()
+    monkeypatch.setattr(loader_mod, "_apply_userbot_event_bus_actions", apply_actions)
+    monkeypatch.setattr(loader_mod, "_log", write_log)
+    messages = loader_mod._LiveMessageOps(state, plugin_key="_test_apply_result")
+
+    result = await messages.apply(
+        [{"type": "delete_message", "chat_id": -100123, "message_id": 7}]
+    )
+
+    assert result == {
+        "ok": False,
+        "executed": 2,
+        "failed": 1,
+        "skipped": 0,
+        "dropped": 1,
+        "kinds": ["send_message", "delete_message"],
+    }
+    assert apply_actions.await_args.kwargs["return_result"] is True
+    assert write_log.await_args.kwargs["action_result"] == result
+    assert messages.actions == []
+
+
+@pytest.mark.asyncio
+async def test_interaction_entry_message_ops_apply_forwards_structured_result(monkeypatch) -> None:
+    message_ops = loader_mod._InteractionEntryMessageOps(
+        loader_mod._AccountState(account_id=182),
+        plugin_key="demo",
+        entry_key="main",
+    )
+    expected = {
+        "ok": True,
+        "executed": 1,
+        "failed": 0,
+        "skipped": 0,
+        "dropped": 0,
+        "kinds": ["send_message"],
+    }
+    monkeypatch.setattr(message_ops._live, "apply", AsyncMock(return_value=expected))
+
+    result = await message_ops.apply([{"type": "send_message", "text": "ok"}])
+
+    assert result == expected
 
 
 @pytest.mark.asyncio

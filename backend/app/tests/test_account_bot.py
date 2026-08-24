@@ -5403,7 +5403,7 @@ async def test_shared_userbot_payout_saves_target_before_completing_ledger(monke
         AsyncMock(side_effect=lambda *args, **kwargs: order.append("save")),
     )
 
-    await userbot_actions.execute_userbot_interaction_action(
+    result = await userbot_actions.execute_userbot_interaction_action(
         client,
         {
             "action_type": "payout",
@@ -5432,6 +5432,7 @@ async def test_shared_userbot_payout_saves_target_before_completing_ledger(monke
     )
 
     assert order == ["save", "complete"]
+    assert result["action_event_recorded"] is True
 
 
 @pytest.mark.asyncio

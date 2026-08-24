@@ -301,7 +301,17 @@ if attempts is not None and attempts > 5:
 
 live facade 当前没有 `send_photo`、`send_file`、`edit_rich`、`edit_caption`、`update_session` helper；直接调用会得到属性不存在错误。后台需要发送媒体或编辑 caption 时，构造文档化的标准 action 后调用 `await ctx.messages.apply([action], entry_key="...")`。`update_session` 只在拥有当前交互会话的入口中使用，不把后台任务伪装成会话更新。
 
-`apply(actions, entry_key=None)` 是公共 live 执行入口：它会规范化 action、补 trace context 并立即交给 UserBot/Event Bus 动作执行器；返回 `None`，部分动作失败会写插件日志，不会把失败 action 列表作为返回值。交互缓冲 facade 也提供 `apply` 供延迟或即时提交，但 Interaction Bot 入口仍拒绝 `click_callback_button`。
+`apply(actions, entry_key=None)` 是公共 live 执行入口：它会规范化 action、补 trace context 并立即交给 UserBot/Event Bus 动作执行器，同时返回 JSON-safe 的批次结果。旧插件可以继续忽略返回值；需要在动作成功后更新业务状态或记录成功日志的插件，应检查 `ok`：
+
+```python
+result = await ctx.messages.apply(actions, entry_key="main")
+if not result["ok"]:
+    raise RuntimeError(
+        f"消息动作失败：failed={result['failed']}, dropped={result['dropped']}"
+    )
+```
+
+返回字段固定为 `ok`、`executed`、`failed`、`skipped`、`dropped`、`kinds`。`ok` 仅在没有失败动作且没有因批次上限丢弃动作时为 `true`；`kinds` 按执行顺序列出规范化动作类型。平台仍会为失败批次写结构化插件告警和逐动作 ActionEvent，插件不需要解析日志来判断成功。交互缓冲 facade 也提供同一返回契约，供延迟或即时提交，但 Interaction Bot 入口仍拒绝 `click_callback_button`。
 
 `read_saved_message_id(key)` 与 `delete_saved_message_id(key)` 只访问平台拥有、按账号和插件隔离的 message-id 命名空间，不开放原始 Redis。普通纯 `BufferedMessageOps` 没有 live 存储时读取返回 `None`、删除返回 `False`；平台注入的交互 adapter 和 live facade 会转发到真实存储。
 

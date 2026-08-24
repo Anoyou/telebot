@@ -104,7 +104,7 @@ from ...services.event_trace import (
     trace_log_context,
     update_plugin_runtime_status,
 )
-from ...services.interaction.action_core import build_failure_result
+from ...services.interaction.action_core import ActionBatchResult, build_failure_result
 from ...services.interaction.contracts import (
     SEND_CHANNEL_DEPRECATED_REASON_CODE,
     action_send_via_options,
@@ -2078,7 +2078,8 @@ async def _apply_userbot_event_bus_actions(
     session_key: str | None = None,
     session: dict[str, Any] | None = None,
     synthetic_callback: bool = False,
-) -> bool:
+    return_result: bool = False,
+) -> bool | ActionBatchResult:
     """E1 adapter: channel handlers + shared ``run_action_batch`` dispatch core."""
 
     from ...services.interaction.action_core import (
@@ -2396,6 +2397,8 @@ async def _apply_userbot_event_bus_actions(
         limit=INTERACTION_ACTION_LIMIT,
         prepare_action=_prepare,
     )
+    if return_result:
+        return batch
     return batch.failed > 0
 
 
@@ -3489,13 +3492,8 @@ async def _apply_userbot_payout_action(state: _AccountState, event: Any, action:
             actual_send_via="userbot_reply",
             result=result,
         )
-        await _emit_userbot_action_tap(
-            state,
-            action,
-            ACTION_EVENT_STATUS_OK,
-            channel="userbot_reply",
-            result=result,
-        )
+        # complete_payout_delivery 将 sent 状态与可计账事件原子提交；幂等重放
+        # 只补 Trace，不重复写相同 payout_key 的 ActionEvent。
         return True
     if payout_claim.status != "acquired":
         await _record_userbot_action_failure(
@@ -3601,13 +3599,16 @@ async def _apply_userbot_payout_action(state: _AccountState, event: Any, action:
             actual_send_via="userbot_reply",
             result=result,
         )
-        await _emit_userbot_action_tap(
-            state,
-            action,
-            ACTION_EVENT_STATUS_OK,
-            channel="userbot_reply",
-            result=result,
-        )
+        if not marker_ok:
+            # 原子完成失败时保留事实性兜底事件；成功路径的唯一写入者是
+            # complete_payout_delivery，避免同 payout_key 二次 INSERT。
+            await _emit_userbot_action_tap(
+                state,
+                action,
+                ACTION_EVENT_STATUS_OK,
+                channel="userbot_reply",
+                result=result,
+            )
         return True
     except Exception as post_exc:  # noqa: BLE001
         log.warning(
@@ -3624,16 +3625,17 @@ async def _apply_userbot_payout_action(state: _AccountState, event: Any, action:
             reply_to_message_id=reply_to,
             reply_to_user_id=reply_to_user_id,
         )
-        try:
-            await _emit_userbot_action_tap(
-                state,
-                action,
-                ACTION_EVENT_STATUS_OK,
-                channel="userbot_reply",
-                result={**result, "post_send_bookkeeping_failed": True},
-            )
-        except Exception:  # noqa: BLE001
-            log.debug("payout post-send tap failed", exc_info=True)
+        if not marker_ok:
+            try:
+                await _emit_userbot_action_tap(
+                    state,
+                    action,
+                    ACTION_EVENT_STATUS_OK,
+                    channel="userbot_reply",
+                    result={**result, "post_send_bookkeeping_failed": True},
+                )
+            except Exception:  # noqa: BLE001
+                log.debug("payout post-send tap failed", exc_info=True)
         return True
 
 
@@ -6078,10 +6080,17 @@ class _LiveMessageOps:
         self._default_send_via = list(default_send_via or ["userbot_reply"])
         self.actions: list[dict[str, Any]] = []
 
-    async def apply(self, actions: list[dict[str, Any]], *, entry_key: str | None = None) -> None:
+    async def apply(self, actions: list[dict[str, Any]], *, entry_key: str | None = None) -> dict[str, Any]:
         normalized = _normalize_interaction_actions(actions, default_send_via=self._default_send_via)
         if not normalized:
-            return
+            return {
+                "ok": True,
+                "executed": 0,
+                "failed": 0,
+                "skipped": 0,
+                "dropped": 0,
+                "kinds": [],
+            }
         effective_entry_key = entry_key if entry_key is not None else self._entry_key
         context = trace_log_context(
             self._trace,
@@ -6096,7 +6105,7 @@ class _LiveMessageOps:
         redis = self._state.redis or get_redis()
         event = SimpleNamespace(chat_id=None)
         try:
-            failed = await _apply_userbot_event_bus_actions(
+            batch = await _apply_userbot_event_bus_actions(
                 self._state,
                 self._trace,
                 event,
@@ -6104,8 +6113,29 @@ class _LiveMessageOps:
                 entry_key=effective_entry_key,
                 actions=normalized,
                 redis=redis,
+                return_result=True,
             )
-            if failed:
+            if isinstance(batch, ActionBatchResult):
+                result = {
+                    "ok": batch.failed == 0 and batch.dropped == 0,
+                    "executed": batch.executed,
+                    "failed": batch.failed,
+                    "skipped": batch.skipped,
+                    "dropped": batch.dropped,
+                    "kinds": list(batch.kinds),
+                }
+            else:
+                # 仅兼容测试桩或滚动升级期间的旧内部返回值。
+                failed = bool(batch)
+                result = {
+                    "ok": not failed,
+                    "executed": len(normalized),
+                    "failed": int(failed),
+                    "skipped": 0,
+                    "dropped": 0,
+                    "kinds": [str(action.get("type") or "") for action in normalized],
+                }
+            if not result["ok"]:
                 await _log(
                     redis,
                     self._state.account_id,
@@ -6113,8 +6143,10 @@ class _LiveMessageOps:
                     "插件消息动作部分执行失败，请在消息链路动作记录中查看具体原因。",
                     source="plugin",
                     action_count=len(normalized),
+                    action_result=result,
                     **context,
                 )
+            return result
         finally:
             self.actions.clear()
 
@@ -6232,7 +6264,7 @@ class _InteractionEntryMessageOps(BufferedMessageOps):
             default_send_via=default_send_via,
         )
 
-    async def apply(self, actions: list[dict[str, Any]], *, entry_key: str | None = None) -> None:
+    async def apply(self, actions: list[dict[str, Any]], *, entry_key: str | None = None) -> dict[str, Any]:
         if not self._allow_userbot_callback_click and any(
             str((action or {}).get("type") or "").strip() == "click_callback_button"
             for action in (actions or [])
@@ -6242,7 +6274,7 @@ class _InteractionEntryMessageOps(BufferedMessageOps):
                 "Interaction Bot 插件入口不支持 click_callback_button；"
                 "Interaction Bot 收到用户点击后请使用 answer_callback"
             )
-        await self._live.apply(actions, entry_key=entry_key)
+        return await self._live.apply(actions, entry_key=entry_key)
 
     async def click_callback_button(self, **kwargs: Any) -> dict[str, Any]:
         if not self._allow_userbot_callback_click:

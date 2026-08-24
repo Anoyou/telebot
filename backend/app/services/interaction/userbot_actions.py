@@ -167,6 +167,7 @@ async def execute_userbot_interaction_action(
                         "reply_to_user_id": reply_to_user_id,
                         "payout_key": payout_key,
                         "idempotent_replay": True,
+                        "action_event_recorded": True,
                     }
                 if payout_claim.status != "acquired":
                     raise RuntimeError("payout delivery already in progress")
@@ -232,6 +233,7 @@ async def execute_userbot_interaction_action(
                 ledger_action=payload,
                 ledger_result=result,
             )
+            result["action_event_recorded"] = bool(marker_ok)
             if not marker_ok:
                 result["post_send_bookkeeping_failed"] = True
                 result["delivery_ambiguous"] = True

@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.db.models.account import Account  # noqa: F401 - registers FK target table metadata
 from app.db.models.action_event import (
     ACTION_EVENT_STATUS_COMPENSATED,
+    ACTION_EVENT_STATUS_OK,
     ActionEvent,
 )
 from app.db.models.payout_compensation import (
@@ -436,6 +437,103 @@ async def test_delivery_failed_payout_enqueues_and_records_detail(monkeypatch) -
     assert record_action.await_args.kwargs["payout_key"] == enqueue_kwargs["payload"]["payout_key"]
     assert record_action.await_args.kwargs["result"]["compensation_queued"] is True
     assert record_action.await_args.kwargs["result"]["payout_key"] == enqueue_kwargs["payload"]["payout_key"]
+
+
+@pytest.mark.asyncio
+async def test_delivery_successful_payout_does_not_duplicate_worker_action_event(monkeypatch) -> None:
+    incoming = account_bot_runtime.Incoming(
+        account_id=1,
+        token="123:token",
+        update_id=10,
+        user_id=20,
+        chat_id=-100,
+        message_id=30,
+        text="",
+        trace_id="evt_payout_success",
+    )
+    run_worker_action = AsyncMock(
+        return_value=(
+            True,
+            None,
+            {
+                "message_id": 66,
+                "payout_key": "pay_success",
+                "action_event_recorded": True,
+            },
+        )
+    )
+    emit_action_tap = AsyncMock()
+    monkeypatch.setattr("app.services.interaction.delivery.record_action", AsyncMock())
+    monkeypatch.setattr(InteractionDeliveryExecutor, "_emit_action_tap", emit_action_tap)
+    executor = InteractionDeliveryExecutor(
+        incoming=incoming,
+        write_log=AsyncMock(),
+        run_worker_action=run_worker_action,
+        log_context=account_bot_runtime._interaction_log_context,
+        trace_context=account_bot_runtime._interaction_trace_context,
+    )
+
+    await executor.apply(
+        [
+            {
+                "type": "payout",
+                "amount": 66,
+                "payout_key": "pay_success",
+                "context": {"trace_id": "evt_payout_success"},
+            }
+        ]
+    )
+
+    emit_action_tap.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_delivery_successful_payout_keeps_fallback_when_worker_did_not_record_event(monkeypatch) -> None:
+    incoming = account_bot_runtime.Incoming(
+        account_id=1,
+        token="123:token",
+        update_id=10,
+        user_id=20,
+        chat_id=-100,
+        message_id=30,
+        text="",
+        trace_id="evt_payout_fallback",
+    )
+    run_worker_action = AsyncMock(
+        return_value=(
+            True,
+            None,
+            {
+                "message_id": 67,
+                "payout_key": "pay_fallback",
+                "action_event_recorded": False,
+            },
+        )
+    )
+    emit_action_tap = AsyncMock()
+    monkeypatch.setattr("app.services.interaction.delivery.record_action", AsyncMock())
+    monkeypatch.setattr(InteractionDeliveryExecutor, "_emit_action_tap", emit_action_tap)
+    executor = InteractionDeliveryExecutor(
+        incoming=incoming,
+        write_log=AsyncMock(),
+        run_worker_action=run_worker_action,
+        log_context=account_bot_runtime._interaction_log_context,
+        trace_context=account_bot_runtime._interaction_trace_context,
+    )
+
+    await executor.apply(
+        [
+            {
+                "type": "payout",
+                "amount": 67,
+                "payout_key": "pay_fallback",
+                "context": {"trace_id": "evt_payout_fallback"},
+            }
+        ]
+    )
+
+    emit_action_tap.assert_awaited_once()
+    assert emit_action_tap.await_args.args[1] == ACTION_EVENT_STATUS_OK
 
 
 @pytest.mark.asyncio
